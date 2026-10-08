@@ -175,97 +175,189 @@ Omapix's are.
 Keys inside a tool (crop's X to swap the aspect, for one) only apply
 while it's open, as in Lightroom.
 
+## Built on Lightcraft
+
+[Lightcraft](https://github.com/storytold/lightcraft) (MIT OR
+Apache-2.0) is a clean-room, pure-Rust reimplementation of all of
+Lightroom: library, catalogue, culling, every Develop panel, masking,
+merges, an MCP server and a web build. That is far more than OmaLux wants,
+and its UI is its own, not Omarchy's. But it's built in layers, and
+everything below its UI depends on nothing but itself:
+
+```
+geom, color, raster, tiff     (L0)
+raw, codecs, meta, develop    (L1)
+pipeline                      (L2, the CPU pipeline: the reference)
+gpu                           (L3, the same stages as wgpu compute shaders)
+catalog → engine → ui-egui, mcp → apps
+```
+
+So OmaLux takes the bottom of it whole and builds its own top: what was
+going to take most of the roadmap is there already, tested, on the same
+stack (Rust 2024, egui 0.36, wgpu). Checked against Lightcraft at
+`7b47ba7` (2026-10-09).
+
+### What's taken whole (vendored)
+
+| Crate | What OmaLux gets from it |
+|-------|--------------------------|
+| `geom`, `color`, `raster`, `tiff` | Maths, colour spaces and transfer functions, float images, TIFF reading |
+| `raw` | Pure-Rust raw decoders, Sony ARW among them (the ILCE-7M3's compressed and uncompressed files are its benchmark), demosaicing (AHD, PPG), highlight recovery |
+| `codecs` | JPEG decoding (the embedded previews), TIFF encoding, ICC profiles, colour conversion (`moxcms`) |
+| `meta` | Exif and makernotes, XMP parsing, and `xmp_merge`: writing into a sidecar another tool wrote, keeping everything it doesn't own byte for byte |
+| `develop` | `DevelopSettings`, every control's range and default, copy groups |
+| `pipeline` | The CPU pipeline: scene-referred, linear Rec. 2020 float; white balance, Light with edge-aware local tone mapping, Presence, Detail (sharpening, noise reduction), Optics (distortion, vignetting, lateral CA auto and manual, defringe), crop, straighten and Upright, auto tone and white balance, output |
+| `gpu` | The same stages as wgpu compute shaders, checked against the CPU pipeline to within 1/255, with a CPU fallback and careful backend selection |
+| `scenes` | Procedural test photos, for tests that can't ship real raws |
+
+### What's lifted in part (copied from `engine` and `ui-egui`)
+
+- **Camera colour from the camera's JPEG** (`engine/camera_preview.rs`,
+  `camera_profiles.rs`): a guarded fit of a matrix, a hue/saturation
+  table, a tone curve and a chroma curve to the embedded JPEG, and pooled
+  profiles fitted over many shoots (`lightcraft-cli calibrate`), as
+  bundled for the ILCE-7M4. This is OmaLux's camera match. They depend
+  only on the vendored crates.
+- **Export:** the TIFF and ICC part of `engine/export.rs`.
+- **Sidecars:** how `engine/sidecar.rs` drives `xmp_merge`.
+- **Widgets and behaviour** from `ui-egui`, one at a time, restyled with
+  Omarchy's theme: slider behaviour (drag, wheel, double-click reset,
+  drafts while dragging), the histogram, the crop overlay, the copy
+  settings checklist, before/after.
+- **Patterns:** a render worker pool off the UI thread (drafts during
+  drags, full quality on release, neighbours prepared ahead); the
+  never-crash rules (no panics on anything read from a file); profiling
+  with per-stage timings.
+
+### What's left
+
+The library and catalogue (OmaLux is folder and sidecar), import, the
+command registry and control channel (OmaLux has Omacull's `Command`),
+MCP, the web build, merges (Omapix has them), SAM 3 masks on candle
+(Omapix's models are on ONNX Runtime), Lightroom catalogue import,
+presets, localisation, and the UI as a whole.
+
+### How it's kept
+
+- **Vendored at a pinned commit** under `vendor/lightcraft/`, with the
+  crates' own names, licences and `NOTICE`, and `vendor/lightcraft/UPSTREAM.md`
+  recording the commit and every local change. Lightcraft moves fast
+  (hundreds of commits a month, camera colour among them), so it's
+  re-synced on purpose, not followed: diff upstream since the pinned
+  commit, take what helps, re-run the renders the process version
+  guards (below), bump the commit.
+- **Changes to the vendored crates stay clean-room and permissive**, so
+  they can be offered back upstream: no code ported from GPL projects goes
+  into them. What is GPL-derived (lensfun's models, anything ported from
+  darktable or RawTherapee) lives in OmaLux's own crates and reaches the
+  pipeline through the vendored crates' existing inputs (a `Warp`'s
+  coefficients, a decoded Bayer image).
+- **Licence:** OmaLux is GPL-3.0-or-later; MIT and Apache-2.0 code can
+  be part of it. The vendored crates keep their MIT OR Apache-2.0 headers
+  and licence files; the README credits Lightcraft.
+- **The settings struct is taken whole**, HSL, grading, masks and all.
+  OmaLux's panels only show the controls in scope, so most of the "Later"
+  list is a matter of showing a panel, not building one.
+
 ## The edit and the sidecar
 
 - **One sidecar per raw**, the one Omacull writes: `DSC01234.ARW.xmp`, or
   `DSC01234.xmp` if that's the one that exists (Omacull's `sidecar =
   "adobe"`). A new one is named darktable's way, as Omacull names them.
-- **The rating** stays in `xmp:Rating`, where Omacull reads and writes it.
-- **The edit** is OmaLux's own: an `rdf:Description` in its own namespace
-  (`omalux:`), one attribute per setting, plus `omalux:ProcessVersion`.
-  Only settings that differ from the default are written, so an empty edit
-  is an absent one.
-- **Written the way Omacull writes ratings:** OmaLux's part is spliced
-  into the file and everything else is left byte for byte as it was;
-  writes are atomic (a temp file, renamed over); they go to a disk thread
-  so a slow disk never holds up a frame. A drag writes once, when it ends.
+- **The rating** stays in `xmp:Rating` (-1 rejected, 1 a pick), where
+  Omacull reads and writes it. Lightcraft's own `lc:flag` isn't written.
+- **The edit** is Lightcraft's `DevelopSettings` as JSON in
+  `omalux:settings` (an exact round trip, as Lightcraft's `lc:settings`
+  is), beside `omalux:processVersion`.
+- **Written with `xmp_merge`:** OmaLux owns the `omalux:` namespace and
+  `xmp:Rating`, and everything else in the file is copied byte for byte;
+  writes are atomic (temp file, fsync, rename) and go to a disk thread.
+  A drag writes once, when it ends.
 - **darktable is gone** once OmaLux replaces it, so its history in a
   sidecar is left alone and never read. (If darktable ever rewrote one of
   these sidecars, it would drop OmaLux's part. That's a reason to stop
   using darktable on a shoot, not something to build around.)
+- **The process version** is OmaLux's, not Lightcraft's schema version:
+  it names how a frame was rendered. Re-syncing Lightcraft can change a
+  rendering, so a set of reference frames (Michael's, and raw.pixls.us's
+  A7 III files) is rendered before and after each re-sync; if they
+  differ, the version is bumped and older edits keep the old behaviour
+  where it can be kept, or say they'll look different.
 - **Undo** history lives in memory for the session, per frame.
 
 ## The look
 
 Camera match is the default, so it has to be stable: two frames of one
 burst with the same settings must look the same, or pasting settings
-across a stack means nothing. So the look is fitted once per camera (and
-Creative Style), not per frame:
+across a stack means nothing.
 
-- The A7 III embeds a 1616×1080 JPEG of how it rendered each frame.
-  Fitting OmaLux's neutral rendering of the raw to those JPEGs, over many
-  frames of real shoots, gives a tone curve and a colour transform (a 3D
-  LUT) that make OmaLux start where the camera did. RawTherapee's
-  auto-matched tone curve does this per frame; doing it per camera keeps
-  it stable.
-- The fit is a tool that's run once and its result shipped as a profile
-  file. Other cameras get a neutral starting look until someone fits one.
-- Flat skips the fitted curve and keeps a gentle one that never clips.
-- Loading DCP profiles (the open format Adobe's own profiles are in) is
-  for later; it would let anyone with Adobe's DNG Converter use Adobe
-  Color or Adobe Portrait.
+- **Lightcraft's fit** develops a small proxy of the raw and fits it to
+  the camera's embedded JPEG (a 3×3 chromaticity matrix, a
+  hue/saturation table, a tone curve and a chroma curve, each kept only if
+  it beats the neutral fallback on held-out pixels). Per file, that's
+  unstable across a burst.
+- **A pooled profile** for the ILCE-7M3, fitted with Lightcraft's
+  `calibrate` over Michael's shoots and bundled, as Lightcraft bundles the
+  ILCE-7M4's, fixes the colour. Lightcraft still fits the tone curve per
+  file when a profile exists; OmaLux uses the profile's own tone too, so
+  the whole look is fixed per camera. Whether a pooled tone curve looks
+  right across his shoots is for M4 to find out.
+- **Flat** skips the fitted curve and keeps a gentle one that never clips.
+- **White balance is relative** until a camera is calibrated: Lightcraft
+  doesn't assume Sony's colour matrix is a DNG one, so Temp and Tint are a
+  scale around As Shot (6500/0 is its neutral reference), not measured
+  Kelvin. Fine for what OmaLux does; measured Kelvin is later.
+- **Loading DCP profiles** (Adobe's own, or made with `dcamprof`) is
+  later. Lightcraft refuses them on principle; OmaLux needn't.
 
 ## HDR
 
 Pulling Highlights down and Shadows up across a whole frame flattens it.
-Lightroom's, and every good raw developer's, highlights and shadows work
-locally: dark areas are lifted by more than dark details are. OmaLux's
-HDR slider does that with exposure fusion of one raw: the frame is
-developed at a few virtual exposures and blended, weighted by how well
-exposed each pixel is in each, across a pyramid so there are no halos.
-Omapix has exposure fusion already (`omapix-engine`'s `fusion.rs`) for
-Merge to HDR; vkdt's local laplacian is the other reference. Highlights
-and Shadows use the same local machinery at gentler strengths.
+Lightcraft's Highlights and Shadows already work locally (a guided filter
+on log luminance, so a blown sky comes back without grey halos). The HDR
+slider goes further on the same machinery: both at once, by an amount, so
+more of what the raw holds is visible. If that can't reach the look,
+exposure fusion of virtual exposures of the one raw is the alternative
+(Omapix's `fusion.rs`, which Merge to HDR uses). M4 tries both.
 
 ## Pipeline
 
-Float throughout, linear until the display or output transform. The order
-is a starting point for M1 to settle:
+Lightcraft's, as it stands: float throughout, scene-referred in linear
+Rec. 2020 until the output transform, with gamut mapping instead of
+clipping and a filmic shoulder for raws. The CPU pipeline is the
+reference; the GPU runs the same stages and is tested against it. Its
+budget is OmaLux's: a slider update in under 16 ms on a draft-sized
+image, the loupe in under 60 ms at about 2.5 MP (Lightcraft measured 4 ms
+and 30 ms on an Apple M4 Pro; M0 measures the RTX 4070 laptop on Vulkan).
 
-1. **Decode** the raw (`rawler`): sensor data, black and white levels,
-   the camera's colour matrix.
-2. **AI Denoise** (if on), on the Bayer data. Slow, so it runs once per
-   frame and its result is cached on disk.
-3. **Highlight recovery** of clipped channels.
-4. **White balance**, as channel multipliers from Temp and Tint through
-   the camera's matrix.
-5. **Demosaic** (RCD or AMaZE, from RawTherapee's `librtprocess`, ported
-   to compute shaders). Lateral chromatic aberration is corrected here.
-6. **Camera to working space** (linear ProPhoto or Rec. 2020).
-7. **Lens:** distortion and vignetting. **Crop & straighten**.
-8. **Noise Reduction** (manual) on linear data.
-9. **Tone:** Exposure, HDR, Highlights, Shadows, Whites, Blacks, Contrast.
-10. **Presence:** Vibrance, Saturation.
-11. **The look:** the profile's curve and colour transform.
-12. **Sharpening**, on luminance.
-13. **Output:** to the monitor's profile for display, to Linear ProPhoto
-    16-bit for export.
+What OmaLux adds, and where:
 
-How it runs:
+- **AI Denoise** on the Bayer data, between decoding and demosaicing in
+  `raw`'s decode path: the denoised mosaic replaces the original, and is
+  cached on disk per frame, since it takes seconds.
+- **Lens profile data** into `pipeline`'s `Warp` and vignetting: Optics
+  already corrects from data embedded in DNG and RW2 files; OmaLux
+  supplies the coefficients for ARWs (below).
+- **16-bit linear output.** Lightcraft's 16-bit output is display-encoded
+  and its linear output is 32-bit float. OmaLux exports 16-bit Linear
+  ProPhoto as Michael's darktable exports were; M0 checks that against
+  what Omapix does with it, and against 16-bit ProPhoto with its own
+  curve, which keeps more shadow precision in 16 bits.
+- **Demosaicing:** Lightcraft has AHD and PPG. RCD or AMaZE (from
+  RawTherapee, GPL, so in OmaLux's own crate) only if AHD leaves detail
+  behind at 100% on real frames.
 
-- **On the GPU** (wgpu compute shaders, WGSL), with the UI in egui on the
-  same device, as Omacull and Omapix do. Nothing is copied back to the
-  CPU to be shown.
-- **Interactive:** each frame's raw is decoded, demosaiced and cached at
-  a little over screen size once, and sliders run on that, so a drag is
-  a few milliseconds. At 100% only the tiles on screen are worked out at
-  full size. Export runs the same shaders at full size, in tiles: a 24 MP
-  frame in float RGBA is 384 MB, and the laptop's GPU (an RTX 4070, 8 GB)
-  shares that with everything else.
+How it runs in the app:
+
+- **On the GPU**, with the UI in egui on the same device, as Omacull and
+  Omapix do. Lightcraft's backend selection (only the backends meant, so
+  a crashing driver elsewhere can't take the process down) is kept.
+- **Drafts during drags, full quality on release,** on a worker pool off
+  the UI thread; at 100% only what's on screen at full size.
 - **Neighbours prepared ahead**, as Omacull prefetches previews: stepping
-  to the next frame shows it with its edit straight away.
-- **The filmstrip** shows Omacull-style thumbnails at first and the
-  developed frame once it's been seen, cached in `~/.cache/omalux/`.
+  to the next frame shows its embedded preview at once, then its render.
+- **The filmstrip** shows the embedded previews, and the developed frame
+  once it's been rendered, cached in `~/.cache/omalux/`.
 
 ## Lens corrections
 
@@ -273,62 +365,65 @@ All three of Michael's lenses are in the lensfun database with
 distortion, chromatic aberration and vignetting data (checked
 2026-10-08 in `data/db/mil-sony.xml`: FE 35mm f/1.8, FE 50mm f/1.8,
 FE 85mm f/1.8). Sony also writes its own correction data into every ARW.
-Both are read:
+Lightcraft corrects from neither (lensfun is GPL territory to it), but
+its Optics stage takes the coefficients. So OmaLux, in its own crate:
 
-- **lensfun's database** from the system package (`pacman -S lensfun`,
-  under `/usr/share/lensfun`), read with our own XML reader and the
-  models it uses (ptlens and poly3 distortion, poly3 TCA, pa vignetting).
-  The data is CC-BY-SA 3.0; OmaLux doesn't ship it.
-- **Sony's embedded data**, which darktable reads too. A darktable user
-  reported it under-corrects distortion where lensfun didn't; M0 compares
-  them on real frames and picks the default.
+- **reads lensfun's database** from the system package (`pacman -S
+  lensfun`, under `/usr/share/lensfun`) with its own XML reader, and
+  turns its models (ptlens and poly3 distortion, poly3 TCA, pa
+  vignetting) into the `Warp`'s; the data is CC-BY-SA 3.0 and isn't
+  shipped;
+- **reads Sony's embedded corrections**, which darktable reads too. A
+  darktable user reported they under-correct distortion where lensfun
+  didn't; M0 compares them on real frames and picks the default.
+
+Lightcraft's automatic lateral CA estimate and its defringe cover the
+rest: Remove Chromatic Aberration and the fringes at f/1.8.
 
 ## AI
 
-Following Omapix and Omacull: models on the system's ONNX Runtime opened
-at run time, CUDA where the library has it (Arch's `onnxruntime-cuda`, as
-Omapix uses), the CPU otherwise. Models are fetched by a script and
-checked by size and SHA-256; OmaLux itself never goes online. Where
-Omapix has a model on disk already, it's used and not fetched again.
+Following Omapix and Omacull, not Lightcraft (whose SAM 3 runs on
+candle): models on the system's ONNX Runtime opened at run time, CUDA
+where the library has it (Arch's `onnxruntime-cuda`, as Omapix uses), the
+CPU otherwise. Models are fetched by a script and checked by size and
+SHA-256; OmaLux itself never goes online. Where Omapix has a model on disk
+already, it's used and not fetched again.
 
-- **Raw denoise.** Omapix's NIND is the copy darktable installs, so it
-  goes away with darktable, and it works on developed images anyway.
-  Two models work on the raw itself:
+- **Raw denoise** is the one AI feature Lightcraft lacks. Omapix's NIND is
+  the copy darktable installs, so it goes away with darktable, and it
+  works on developed images anyway. Two models work on the raw itself:
   - RawNIND's Bayer model (GPL-3.0; Benoit Brummer, who made NIND).
   - RawForge's TreeNet models (MIT; Light, Super Light and Heavy), which
     testers on pixls.us compared favourably with Topaz's raw denoise.
 
   M0 runs both on real A7 III frames at ISO 3200 to 6400 and picks one.
-- **Later:** subject and sky masks would reuse Omapix's BiRefNet and SAM.
+- **Later:** subject and sky masks would reuse Omapix's BiRefNet and SAM
+  through Lightcraft's mask inputs.
 
 ## Architecture
 
-Same stack and layout as Omacull and Omapix: Rust 2024, egui on wgpu,
-Little CMS 2, GPL-3.0-or-later. A separate repository. Theme, hotkeys,
-monitor profiles, the `Command` pattern, the headless harness and
-packaging are copied from them, not shared as crates, as Omacull did.
-Omacull's raw container reader and makernotes, sidecar splicing and
-stacking are copied the same way.
-
 ```
+vendor/lightcraft/   lightcraft-geom, -color, -raster, -tiff, -raw, -codecs,
+                     -meta, -develop, -pipeline, -gpu, -scenes, as upstream
+                     with UPSTREAM.md listing every local change
 crates/
-  omalux-engine    folder scan, raw metadata and makernotes, the edit and
-                   its settings, XMP read/write, lens data, stacks,
-                   auto white balance, exposure, tone and level, export
-                   to TIFF (no UI dependencies; testable headless)
-  omalux-pipeline  the develop pipeline as wgpu compute shaders, with no
-                   UI: run on a headless device by tests and export
-  omalux-ai        ONNX Runtime, raw denoise
-  omalux           the app: egui UI, panels, views, input, theme
+  omalux-engine      folder scan, sidecars (on xmp_merge), the edit and its
+                     process version, camera profiles and the fit (lifted
+                     from Lightcraft), lens data (lensfun, Sony), stacks
+                     (from Omacull), export (no UI or GPU dependencies;
+                     testable headless)
+  omalux-ai          ONNX Runtime, raw denoise
+  omalux             the app: egui UI, panels, views, input, theme
 ```
 
-- **Commands:** every action goes through one `Command` enum, so
-  shortcuts, menus and headless test scripts never diverge, with an
-  `OMALUX_SCRIPT` hook.
-- **Testing the pipeline:** each stage is checked against a small CPU
-  reference of the same maths on small images. Whether the GPU side runs
-  in tests on a software Vulkan device (lavapipe) or only where there is
-  a GPU is for M0 to settle.
+- **Two families of conventions.** OmaLux's own crates follow Omacull's
+  and Omapix's: theme, hotkeys, monitor profiles, the `Command` enum with
+  an `OMALUX_SCRIPT` hook, the headless `Harness`, packaging, copied from
+  them and not shared. The vendored crates keep Lightcraft's (its
+  never-crash lints, its tests, the CPU pipeline as the GPU's oracle).
+- **One colour engine.** Lightcraft uses `moxcms` (pure Rust); Omacull
+  and Omapix use Little CMS 2 for monitor profiles. OmaLux uses `moxcms`
+  for both unless M0 finds the monitor handling needs lcms2.
 - **Config:** `~/.config/omalux/config.toml`, written on first run with
   every setting explained: where exports go, the program Ctrl+E opens.
 - **Omacull hands over** with its existing `developer = "omalux"`
@@ -341,19 +436,20 @@ session; M0 checks the specifics the design leans on.
 
 | Tool | Take | Leave |
 |------|------|-------|
+| Lightcraft (MIT OR Apache-2.0) | The bottom half of OmaLux, as code: see "Built on Lightcraft" | The library, the catalogue, MCP, the web build, its UI |
 | Lightroom Classic (proprietary) | Panel and slider names and behaviour, keys, Auto, Copy Settings checklist, before/after, raw AI Denoise, Camera Matching profiles | Catalogue, import, modules beyond Develop, subscription |
-| darktable | Highlight recovery and demosaic ideas, reading Sony's embedded lens data | Too much going on; scene-referred controls exposed; its copy and paste |
-| RawTherapee / ART | Demosaicing (AMaZE, RCD in `librtprocess`, GPL-3), the auto-matched tone curve, DCP profiles, CA correction | Density of settings |
-| vkdt | The whole pipeline on the GPU; local laplacian; highlight inpainting | The node graph as the interface |
-| RapidRAW (AGPL-3.0) | Closest in spirit: Rust, `rawler`, a WGSL pipeline, Lightroom-like sliders, sidecars | A web UI in Tauri; its code (AGPL), ideas only |
-| Filmulator | Few controls that do a lot | Its film-development model as the only look |
+| darktable | Reading Sony's embedded lens data | Too much going on; scene-referred controls exposed; its copy and paste |
+| RawTherapee / ART | RCD and AMaZE demosaicing if AHD isn't enough (GPL-3, in OmaLux's crate), DCP profiles later | Density of settings |
+| vkdt | Ideas for highlight inpainting and the local laplacian | The node graph as the interface |
+| RapidRAW (AGPL-3.0) | Ideas only | A web UI in Tauri; its code |
 | lensfun | The lens database | Its C library; we read the XML |
 | RawNIND, RawForge | Raw denoise models | Their Python runtimes |
-| Omacull | Raw reader, makernotes, sidecar splicing, colour management, stacks, preview prefetch | Culling, which stays there |
-| Omapix | Conventions, ONNX Runtime on CUDA, exposure fusion, 16-bit TIFF with ICC, `--round-trip` | Everything that edits pixels by hand |
+| Omacull | Sidecar conventions, colour management, stacks, preview prefetch, the `Command` and `Harness` | Culling, which stays there |
+| Omapix | Conventions, ONNX Runtime on CUDA, exposure fusion, `--round-trip` | Everything that edits pixels by hand |
 
 What doesn't exist on Linux, and is the reason for the project: a raw
 developer with Lightroom's few, good controls and its keys, that runs
 entirely on the GPU, denoises raws with AI locally, copies and pastes
 settings the obvious way, keeps edits in sidecars beside the raws, and
-looks and behaves like an Omarchy app.
+looks and behaves like an Omarchy app. Lightcraft has the engine for it;
+OmaLux is the small, Omarchy-shaped tool on top.
