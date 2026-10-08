@@ -16,6 +16,13 @@ retouch in Omapix, export.
 **Status:** scoped, not built yet. [docs/DESIGN.md](docs/DESIGN.md) has
 the design and [docs/ROADMAP.md](docs/ROADMAP.md) the plan.
 
+## Credits
+
+OmaLux's raw decoding, colour science and develop pipeline come from
+[Lightcraft](https://github.com/storytold/lightcraft), by the ArtCraft
+Team and the Lightcraft contributors, under MIT OR Apache-2.0.
+
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+GPL-3.0-or-later. See [LICENSE](LICENSE). The vendored Lightcraft
+crates keep their own licence, MIT OR Apache-2.0.
