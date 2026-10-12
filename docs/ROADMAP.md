@@ -14,8 +14,10 @@ for him, in order of how often he needs it.
 
 Most of the develop engine is Lightcraft's, so the milestones up to M3 are
 mostly OmaLux's own parts (the folder, the sidecar, the UI, the handoff)
-around controls that already work; M4 to M6 are what Lightcraft doesn't
-have. The order of M3 to M6 can change once M1 is in daily use.
+around controls that already work; M4 to M6 were what Lightcraft didn't
+have, though since the plan it has added lens profiles and raw denoise
+(see "Built on Lightcraft" in DESIGN.md), which makes M5 and M6 smaller.
+The order of M3 to M6 can change once M1 is in daily use.
 
 ## M0. Vendor, spikes and scaffold
 
@@ -24,35 +26,49 @@ real A7 III raws before building UI: Michael's (low and high ISO, all
 three primes) and raw.pixls.us's (the CC0 ILCE-7M3 files Lightcraft
 benchmarks on, which tests can download).
 
-- **Vendor Lightcraft** at a pinned commit into `vendor/lightcraft/`:
-  `geom`, `color`, `raster`, `tiff`, `raw`, `codecs`, `meta`, `develop`,
-  `pipeline`, `gpu`, `scenes`, with their licences, `NOTICE` and an
-  `UPSTREAM.md`. Their tests pass in OmaLux's workspace. `codecs` trimmed
-  of the formats OmaLux never reads or writes (WebP, JPEG XL, AVIF) if
-  that's a small change.
+- **Vendor Lightcraft** at a pinned commit (`701f78e` or later) into
+  `vendor/lightcraft/`: `geom`, `color`, `raster`, `tiff`, `raw`,
+  `codecs`, `meta`, `develop`, `pipeline`, `gpu`, `scenes`, and the new
+  `denoise`, `denoise-core` and `lensdb` if the spikes below keep them,
+  with their licences, `NOTICE` and an `UPSTREAM.md`. Their tests pass
+  in OmaLux's workspace. `codecs` trimmed of the formats OmaLux never
+  reads or writes (WebP, JPEG XL, AVIF) if that's a small change.
+- **The reference set** (see "Quality bar" in DESIGN.md): 20 to 30 of
+  Michael's frames, with the camera's JPEG, Lightroom Classic's renders
+  (Adobe Color, and Camera Standard or Vivid), Capture One's default
+  render (free trials) and his darktable export of each. Every spike
+  below is judged on it.
 - **Render real ARWs** through Lightcraft's pipeline from a small example
-  binary: decode time, how the camera match fits each frame, and how AHD
-  holds detail at 100% against darktable's export of the same frame.
+  binary: decode time, how the camera match fits each frame (CIEDE2000
+  against the camera's JPEG), and how AHD and the highlight
+  reconstruction hold up at 100% against Lightroom's and Capture One's
+  renders of the same frame. If AHD loses detail, try RCD.
+- **His camera settings:** he shoots Standard and Vivid; confirm from the
+  makernotes how his shoots split between them, and which DRO settings
+  (Off, Auto, Lv1 to Lv5) they use, since DRO is matched (see "The look"
+  in DESIGN.md). Read the Creative Style, which Lightcraft doesn't yet.
 - **The GPU on the laptop.** Lightcraft's GPU pipeline on the RTX 4070
   under Hyprland and Vulkan: slider update and loupe times against the
   16 ms and 60 ms budgets, full-size export time, VRAM. That its CPU and
   GPU results agree there too.
-- **Lens data.** Read Sony's embedded corrections from the ARWs and
-  lensfun's for the FE 35, 50 and 85 f/1.8; check both can be expressed as
-  Lightcraft's `Warp` and vignetting; compare them on frames with straight
-  lines and a plain sky; pick the default.
+- **Lens data.** lensfun's corrections for the FE 35, 50 and 85 f/1.8
+  through Lightcraft's `lensdb`, and Sony's embedded ones (Lightcraft
+  reads them only for the ILCE-7RM4A so far); compare them, and
+  Lightroom's profile correction, on frames with straight lines and a
+  plain sky; pick the default.
 - **Raw denoise.** RawNIND's Bayer model against RawForge's TreeNet (Light
-  and Heavy) on ISO 3200 to 6400 frames: how they look at 100%, how long
-  they take on CUDA and on the CPU, how much VRAM. Pick one. Write down
-  how the Bayer data has to be packed, and where in `raw`'s decode it
-  goes.
+  and Heavy) on ISO 3200 to 6400 frames, and both against Lightroom's
+  Denoise: how they look at 100%, how long they take, how much VRAM.
+  Pick one. Run it through Lightcraft's `denoise` crates (their wgpu
+  executor) and through ONNX Runtime on CUDA, and keep Lightcraft's
+  unless ONNX Runtime is much faster.
 - **The sidecar.** Write `omalux:settings` and `xmp:Rating` with
   `xmp_merge` into sidecars Omacull wrote and darktable wrote; check
   Omacull still reads and writes the rating, and the rest of the file is
   untouched.
-- **The handoff.** 16-bit TIFFs with an ICC profile, Linear ProPhoto and
-  ProPhoto with its curve, open right in Omapix, and `omapix --round-trip
-  a.tif b.tif` opens several as tabs. Pick the one to export.
+- **The handoff.** 16-bit Linear ProPhoto TIFFs with their ICC profile
+  (decided: see "Pipeline" in DESIGN.md) open right in Omapix, and
+  `omapix --round-trip a.tif b.tif` opens several as tabs.
 - **One colour engine:** whether Omacull's monitor-profile handling works
   on `moxcms`, so lcms2 isn't needed.
 - **Scaffold.** The workspace (`omalux-engine`, `omalux-ai`, `omalux`
@@ -126,11 +142,28 @@ the panels, keys and checks on real frames.
 
 ## M4. The look and HDR
 
-- **Camera match, pooled:** the ILCE-7M3 profile fitted with Lightcraft's
-  `calibrate` over Michael's shoots and bundled, with its tone curve used
-  too rather than fitted per file, so a burst with the same settings looks
-  the same. Checked against the camera's JPEGs as Lightcraft checks its
-  7M4 profile (ΔE on held-out frames).
+- **Camera match, fixed per camera:** the target is the camera's own
+  JPEG. Two candidates, measured the same way on held-out frames
+  (CIEDE2000 against the camera's JPEG, overall and on saturated, skin and
+  sky pixels), and the closer one becomes the default:
+  - the ILCE-7M3 profile fitted with Lightcraft's `calibrate` over
+    Michael's shoots and bundled, one for Standard and one for Vivid,
+    with its tone curve used too rather than fitted per file;
+  - Adobe's Camera Standard and Camera Vivid DCPs for the ILCE-7M3 (from
+    Adobe's free DNG Converter, read from where Michael put them, never
+    shipped), through a DCP reader in OmaLux's own crate feeding the DNG
+    colour model Lightcraft's pipeline already has. With them, Temp and
+    Tint are measured Kelvin.
+
+  Either way, at least as close to the camera as Lightroom's Camera
+  Standard and Camera Vivid are.
+- **DRO matched:** frames shot with DRO on open with its local shadow
+  lift, on the HDR slider's local tone mapping, at a strength pooled per
+  level (Lv1 to Lv5) or measured from the frame's JPEG (Auto), as part of
+  the profile, with the slider at 0. Checked against the camera's JPEGs
+  of DRO frames. Needs the HDR work below, so it lands with it.
+- **Side by side** with Lightroom and Capture One on the reference set,
+  at fit and at 100%; what loses goes back to its stage.
 - **Flat**, one key away.
 - **HDR:** the slider, on Lightcraft's local tone mapping, or exposure
   fusion of virtual exposures if that can't reach the look. Both tried
@@ -141,18 +174,20 @@ the panels, keys and checks on real frames.
 ## M5. Lens profiles
 
 - Profile corrections for ARWs: distortion and vignetting from lensfun's
-  database or Sony's embedded data (whichever M0 picked as the default),
-  found from the lens the raw names, fed to Lightcraft's Optics. On by
-  default.
+  database (Lightcraft's `lensdb`) or Sony's embedded data (whichever M0
+  picked as the default), found from the lens the raw names, fed to
+  Lightcraft's Optics. On by default. Checked against Lightroom's
+  correction of the same frames.
 - Lateral CA from the profile where it has it, Lightcraft's automatic
   estimate where it doesn't.
 
 ## M6. AI Denoise
 
 - A button and a strength, on the raw's Bayer data before demosaicing,
-  with the model M0 picked, on CUDA through ONNX Runtime. Its result
-  cached on disk per frame; the model fetched by a script, as Omacull's
-  and Omapix's are.
+  with the model M0 picked, on whichever runtime M0 picked (Lightcraft's
+  `denoise` crates on wgpu, or ONNX Runtime on CUDA). Its result cached on
+  disk per frame; the model fetched by a script, as Omacull's and
+  Omapix's are.
 - What Denoise and Lightcraft's Sharpening and Noise Reduction do to each
   other, checked at 100% on real ISO 6400 frames.
 
@@ -190,9 +225,9 @@ are in Lightcraft already and need only a panel; those that aren't say so.
 - **HSL, the colour grading wheels and the tone curve** (Lightcraft's
   Color Mixer, Color Grading and Tone Curve).
 - **Match Total Exposures** across a set.
-- **DCP profiles**: Adobe's own (from the DNG Converter) or made with
-  `dcamprof`. Not in Lightcraft, by its rules.
-- **Measured white balance in Kelvin**, once the A7 III is calibrated.
+- **A measured colour profile**: a ColorChecker shot in daylight and
+  tungsten, made into a dual-illuminant DCP with `dcamprof`, for colour
+  beyond the camera's own if Michael wants it (M4 reads DCPs already).
 - **Other cameras:** Lightcraft decodes Nikon, Canon, Fuji and more;
   each would want a pooled camera-match profile and lens data.
 - **Culling features** in OmaLux, if any turn out to be missed. Omacull

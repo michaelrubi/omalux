@@ -131,8 +131,8 @@ job:
 - Virtual copies (two edits of one raw). Later.
 - JPEGs and phone photos as input. Later; raws only to begin with.
 - JPEG export. Later: there are times a frame goes straight out.
-- Loading DCP camera profiles (Adobe's own, or ones made with
-  `dcamprof`). Later.
+- Profiles made with `dcamprof` from a ColorChecker. Later. (Reading
+  DCPs is in, for Adobe's Camera Standard: see "The look".)
 - Match Total Exposures across a set. Later.
 - Presets saved by name. Copy and paste covers the need for now.
 - Healing, liquify and anything else that changes pixels by hand: Omapix.
@@ -196,6 +196,21 @@ So OmaLux takes the bottom of it whole and builds its own top: what was
 going to take most of the roadmap is there already, tested, on the same
 stack (Rust 2024, egui 0.36, wgpu). Checked against Lightcraft at
 `7b47ba7` (2026-10-09).
+
+Since then (looked at `701f78e`, 2026-10-12), Lightcraft has added two
+things OmaLux was going to build itself. M0 decides whether to vendor
+them:
+
+- **`denoise` and `denoise-core`:** AI denoise on the Bayer data before
+  demosaicing. They pack the mosaic, tile and blend it, cache the result
+  and mix it back by an Amount. Any ONNX model with a manifest runs on
+  Lightcraft's own executor, on the CPU or on wgpu. It knows RawNIND's
+  Bayer model; no weights are bundled.
+- **`lensdb`:** a clean-room reader for lensfun's XML database, turning
+  its distortion, TCA and vignetting models into the pipeline's
+  corrections. It's not yet checked against real photos. Lightcraft's
+  reading of Sony's embedded distortion is enabled for the ILCE-7RM4A
+  only, not the A7 III.
 
 ### What's taken whole (vendored)
 
@@ -287,9 +302,15 @@ presets, localisation, and the UI as a whole.
 
 ## The look
 
-Camera match is the default, so it has to be stable: two frames of one
-burst with the same settings must look the same, or pasting settings
-across a stack means nothing.
+**The target is the camera.** Camera match is the default, and a frame
+should open as close as can be measured to the JPEG the camera made of it
+(what was on its screen at the shoot), in colour and in tone (decided
+2026-10-12). It also has to be stable: two frames of one burst with the
+same settings must look the same, or pasting settings across a stack
+means nothing. The two goals agree. For a given Creative Style the camera
+renders every frame through the same fixed processing, so a fixed profile
+is both the stable choice and the faithful one. What varies from frame to
+frame in a per-file fit is the fit's error, not the camera.
 
 - **Lightcraft's fit** develops a small proxy of the raw and fits it to
   the camera's embedded JPEG (a 3×3 chromaticity matrix, a
@@ -298,17 +319,111 @@ across a stack means nothing.
   unstable across a burst.
 - **A pooled profile** for the ILCE-7M3, fitted with Lightcraft's
   `calibrate` over Michael's shoots and bundled, as Lightcraft bundles the
-  ILCE-7M4's, fixes the colour. Lightcraft still fits the tone curve per
-  file when a profile exists; OmaLux uses the profile's own tone too, so
-  the whole look is fixed per camera. Whether a pooled tone curve looks
-  right across his shoots is for M4 to find out.
+  ILCE-7M4's, fixes the colour. On Lightcraft's ILCE-7CR profile (125
+  photos), pooling brought held-out frames from a mean CIE76 ΔE of 4.07 to
+  3.29 against their camera JPEGs. Lightcraft still fits the tone curve
+  per file when a profile exists; OmaLux uses the profile's own tone too,
+  so the whole look is fixed per camera. Whether a pooled tone curve looks
+  right across his shoots is for M4 to find out. One profile per Creative
+  Style Michael shoots in: Standard and Vivid (Adobe has a Camera
+  Standard and a Camera Vivid DCP to match, below). The makernotes record
+  the style, so a frame gets its own; Lightcraft doesn't read it yet.
+- **Adobe's Camera Standard** is the other candidate. Lightroom's camera
+  match for the ILCE-7M3 is a DCP profile installed by Adobe's free DNG
+  Converter. Lightcraft's pipeline already implements the whole colour
+  model a DCP describes (dual-illuminant matrices, HueSatMap, LookTable,
+  ProfileToneCurve) and only refuses to read `.dcp` files on principle.
+  OmaLux reads them, in its own crate, from wherever Michael put them, and
+  never ships Adobe's. A DCP is fixed per camera, so it's stable by
+  construction, and with one loaded Temp and Tint become measured Kelvin,
+  as in Lightroom.
+- **How it's judged:** both are measured against held-out frames' camera
+  JPEGs, the same way (CIEDE2000, overall and on the saturated, skin and
+  sky pixels where the errors show), and the closer one is the default.
+  Either way, OmaLux's camera match has to be at least as close to the
+  camera as Lightroom's is.
+- **DRO is matched** (decided 2026-10-12): OmaLux is for Sony first, so
+  a frame shot with DRO on opens looking like the camera showed it. The
+  A7 III's Dynamic Range Optimizer (on by default) lifts the JPEG's
+  shadows locally; the raw doesn't have it. Lightcraft fits the colour
+  from the JPEG but deliberately takes Sony's tone curve without DRO, as
+  Lightroom develops it, so on Lightcraft's measurements DRO frames open
+  about 6 L* darker than the camera showed them, mostly in the shadows.
+  OmaLux puts the lift back:
+  - **with the local tone mapping the HDR slider uses** (below), on the
+    DRO-off tone curve, so it lifts shadows locally as DRO does rather
+    than brightening the whole curve;
+  - **at the strength the frame had.** The makernotes record the setting
+    (Off, Auto, Lv1 to Lv5) but not what Auto chose, so the strength for
+    Lv1 to Lv5 is pooled per level over Michael's shoots, and for Auto
+    it's measured per frame from the frame's JPEG, which is what the
+    camera did: Auto varies with the scene;
+  - **as part of the Camera match profile**, not as a value of the HDR
+    slider: the slider starts at 0 and adds to it, so nothing's changed
+    on opening a frame (principle 6). Flat leaves it out.
+
+  M4 checks it against the camera's JPEGs of DRO frames, shadows above
+  all. If local tone mapping can't get close, the fallback is the fitted
+  per-file tone curve (Lightcraft's behaviour before it took DRO out).
+- **Beyond the camera's JPEG** (highlights it blew, colours outside sRGB)
+  there's nothing to match, and the raw has more. The profile extrapolates
+  smoothly there, and Lightcraft's highlight reconstruction and gamut
+  mapping take over. That's where the raw should look better than the
+  camera.
 - **Flat** skips the fitted curve and keeps a gentle one that never clips.
-- **White balance is relative** until a camera is calibrated: Lightcraft
-  doesn't assume Sony's colour matrix is a DNG one, so Temp and Tint are a
-  scale around As Shot (6500/0 is its neutral reference), not measured
-  Kelvin. Fine for what OmaLux does; measured Kelvin is later.
-- **Loading DCP profiles** (Adobe's own, or made with `dcamprof`) is
-  later. Lightcraft refuses them on principle; OmaLux needn't.
+- **White balance is relative** without a DCP: Lightcraft doesn't assume
+  Sony's colour matrix is a DNG one, so Temp and Tint are a scale around
+  As Shot (6500/0 is its neutral reference), not measured Kelvin.
+- **Sony's look, rendered as well as Lightroom and Capture One render
+  it.** Michael likes Lightroom's and Capture One's colour better than
+  Lightcraft's or darktable's (2026-10-12), and Sony's look is the target
+  for now. Those two don't conflict: what sets them apart is less the
+  look than how cleanly it's rendered (smooth hue transitions, skin, how
+  saturated colours and highlights roll off), so they're the bar for that
+  (see "Quality bar"). Capture One's profiles are proprietary and not
+  copied. A look beyond the camera's, if he ever wants one, would be a
+  profile measured from a ColorChecker with `dcamprof`: later.
+
+## Quality bar
+
+Michael's yardstick: the best colours he has seen came from Capture One,
+he likes Lightroom's and Capture One's better than Lightcraft's or
+darktable's, and Sony's Imaging Edge looked okay but not great. OmaLux's
+output has to hold up next to Lightroom's and Capture One's, at fit and
+at 100%. That's measured, not assumed: Lightcraft's own parity notes call
+its demosaicing and highlight quality "unmeasured against Lightroom".
+
+- **A reference set** of 20 to 30 of Michael's frames, each chosen to test
+  one or more stages: skin, foliage, blue sky, saturated reds and oranges,
+  a backlit or blown sky, specular highlights, fine detail (hair, fabric,
+  distant foliage), straight lines, ISO 3200 to 6400, mixed light. Plus
+  raw.pixls.us's CC0 ILCE-7M3 files for the tests. Kept outside the repo.
+- **References** for each frame: the camera's JPEG; Lightroom Classic's
+  render twice, with Adobe Color (its default, and the Lightroom colour
+  Michael liked: he never loaded a camera profile) and with Camera
+  Standard or Camera Vivid (the camera-match bar); Capture One's default
+  render (both have free trials); all exported as 16-bit TIFFs; and his
+  current darktable export as the baseline to beat.
+- **Compared stage by stage**, so a loss points at the stage that causes
+  it:
+  - **Colour:** CIEDE2000 against the camera's JPEG (above), and side by
+    side with Capture One.
+  - **Demosaicing** at 100%: fine detail, maze patterns, false colour on
+    edges. If AHD loses to Lightroom or Capture One, RCD (fast, few
+    artefacts) or AMaZE (best low-ISO detail), ported into OmaLux's own
+    crate.
+  - **Highlights:** blown skies and speculars roll off without magenta or
+    cyan and keep their colour as long as the raw has it.
+  - **Noise:** ISO 3200 to 6400 against Lightroom's Denoise.
+  - **Sharpening:** against Lightroom's raw default (Amount 40, Radius
+    1.0, Detail 25). If that leaves the A7 III's low-pass softness
+    behind, capture sharpening by deconvolution (RawTherapee's, GPL, in
+    OmaLux's crate) underneath the Lightroom sliders.
+  - **Lens:** distortion and vignetting against Lightroom's profile
+    correction of the same frame.
+- **A loss is a bug** against the milestone that owns the stage, not a
+  footnote. The same frames are the reference renders the process version
+  guards.
 
 ## HDR
 
@@ -338,14 +453,20 @@ What OmaLux adds, and where:
 - **Lens profile data** into `pipeline`'s `Warp` and vignetting: Optics
   already corrects from data embedded in DNG and RW2 files; OmaLux
   supplies the coefficients for ARWs (below).
-- **16-bit linear output.** Lightcraft's 16-bit output is display-encoded
-  and its linear output is 32-bit float. OmaLux exports 16-bit Linear
-  ProPhoto as Michael's darktable exports were; M0 checks that against
-  what Omapix does with it, and against 16-bit ProPhoto with its own
-  curve, which keeps more shadow precision in 16 bits.
+- **16-bit Linear ProPhoto output** (decided 2026-10-12), as Michael's
+  darktable exports were and as he works in Omapix. Lightcraft's 16-bit
+  output is display-encoded and its linear output is 32-bit float, so
+  OmaLux adds 16-bit integer linear. 32-bit float would add nothing here.
+  The A7 III records at most 14 bits, and 16-bit linear holds four times
+  as many levels as the raw in every stop, so nothing the sensor captured
+  is lost. What float can hold that integers can't is values above white
+  and below zero, and the output's shoulder and gamut mapping already
+  bring those into range. A 32-bit file is twice the size (about 290 MB
+  a frame against 145 MB), and Omapix would convert it back to 16 bits.
+  Big exposure moves belong in OmaLux, before the 16 bits, not in Omapix.
 - **Demosaicing:** Lightcraft has AHD and PPG. RCD or AMaZE (from
-  RawTherapee, GPL, so in OmaLux's own crate) only if AHD leaves detail
-  behind at 100% on real frames.
+  RawTherapee, GPL, so in OmaLux's own crate) if AHD loses detail to
+  Lightroom or Capture One at 100% (see "Quality bar").
 
 How it runs in the app:
 
@@ -365,17 +486,19 @@ All three of Michael's lenses are in the lensfun database with
 distortion, chromatic aberration and vignetting data (checked
 2026-10-08 in `data/db/mil-sony.xml`: FE 35mm f/1.8, FE 50mm f/1.8,
 FE 85mm f/1.8). Sony also writes its own correction data into every ARW.
-Lightcraft corrects from neither (lensfun is GPL territory to it), but
-its Optics stage takes the coefficients. So OmaLux, in its own crate:
+When this was planned, Lightcraft corrected from neither, so OmaLux was
+going to read both in its own crate. Lightcraft's new `lensdb` now reads
+lensfun's database (see "Built on Lightcraft"), so:
 
-- **reads lensfun's database** from the system package (`pacman -S
-  lensfun`, under `/usr/share/lensfun`) with its own XML reader, and
-  turns its models (ptlens and poly3 distortion, poly3 TCA, pa
-  vignetting) into the `Warp`'s; the data is CC-BY-SA 3.0 and isn't
-  shipped;
-- **reads Sony's embedded corrections**, which darktable reads too. A
-  darktable user reported they under-correct distortion where lensfun
-  didn't; M0 compares them on real frames and picks the default.
+- **lensfun's database** comes from the system package (`pacman -S
+  lensfun`, under `/usr/share/lensfun`), read by the vendored `lensdb`
+  (ptlens, poly3 and poly5 distortion, linear and poly3 TCA, pa
+  vignetting); the data is CC-BY-SA 3.0 and isn't shipped;
+- **Sony's embedded corrections**, which darktable reads too. Lightcraft
+  reads the distortion table only, and only for the ILCE-7RM4A; OmaLux
+  would enable it for the A7 III once it's checked on his frames. A
+  darktable user reported Sony's data under-corrects distortion where
+  lensfun didn't; M0 compares them on real frames and picks the default.
 
 Lightcraft's automatic lateral CA estimate and its defringe cover the
 rest: Remove Chromatic Aberration and the fringes at f/1.8.
@@ -396,7 +519,10 @@ already, it's used and not fetched again.
   - RawForge's TreeNet models (MIT; Light, Super Light and Heavy), which
     testers on pixls.us compared favourably with Topaz's raw denoise.
 
-  M0 runs both on real A7 III frames at ISO 3200 to 6400 and picks one.
+  M0 runs both on real A7 III frames at ISO 3200 to 6400 and picks one,
+  through Lightcraft's new `denoise` crates (packing, tiling, cache and
+  an executor on wgpu) if they run the chosen model as fast as ONNX
+  Runtime on CUDA does; otherwise on ONNX Runtime as planned.
 - **Later:** subject and sky masks would reuse Omapix's BiRefNet and SAM
   through Lightcraft's mask inputs.
 
@@ -438,8 +564,9 @@ session; M0 checks the specifics the design leans on.
 |------|------|-------|
 | Lightcraft (MIT OR Apache-2.0) | The bottom half of OmaLux, as code: see "Built on Lightcraft" | The library, the catalogue, MCP, the web build, its UI |
 | Lightroom Classic (proprietary) | Panel and slider names and behaviour, keys, Auto, Copy Settings checklist, before/after, raw AI Denoise, Camera Matching profiles | Catalogue, import, modules beyond Develop, subscription |
+| Capture One (proprietary) | The quality bar: its renders of the reference set, side by side | Its profiles, its look as a target, its interface |
 | darktable | Reading Sony's embedded lens data | Too much going on; scene-referred controls exposed; its copy and paste |
-| RawTherapee / ART | RCD and AMaZE demosaicing if AHD isn't enough (GPL-3, in OmaLux's crate), DCP profiles later | Density of settings |
+| RawTherapee / ART | RCD and AMaZE demosaicing, capture sharpening, if Lightcraft's lose to Lightroom or Capture One (GPL-3, in OmaLux's crate) | Density of settings |
 | vkdt | Ideas for highlight inpainting and the local laplacian | The node graph as the interface |
 | RapidRAW (AGPL-3.0) | Ideas only | A web UI in Tauri; its code |
 | lensfun | The lens database | Its C library; we read the XML |
