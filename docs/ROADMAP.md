@@ -34,9 +34,10 @@ benchmarks on, which tests can download).
   in OmaLux's workspace. `codecs` trimmed of the formats OmaLux never
   reads or writes (WebP, JPEG XL, AVIF) if that's a small change.
 - **The reference set** (see "Quality bar" in DESIGN.md): 20 to 30 of
-  Michael's frames, with the camera's JPEG, Lightroom Classic's and
-  Capture One's default renders (free trials) and his darktable export of
-  each. Every spike below is judged on it.
+  Michael's frames, with the camera's JPEG, Lightroom Classic's renders
+  (Adobe Color, and Camera Standard or Vivid), Capture One's default
+  render (free trials) and his darktable export of each. Every spike
+  below is judged on it.
 - **Render real ARWs** through Lightcraft's pipeline from a small example
   binary: decode time, how the camera match fits each frame (CIEDE2000
   against the camera's JPEG), and how AHD and the highlight

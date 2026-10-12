@@ -398,9 +398,12 @@ its demosaicing and highlight quality "unmeasured against Lightroom".
   a backlit or blown sky, specular highlights, fine detail (hair, fabric,
   distant foliage), straight lines, ISO 3200 to 6400, mixed light. Plus
   raw.pixls.us's CC0 ILCE-7M3 files for the tests. Kept outside the repo.
-- **References** for each frame: the camera's JPEG, Lightroom Classic's
-  default render and Capture One's (both have free trials), exported as
-  16-bit TIFFs, and his current darktable export as the baseline to beat.
+- **References** for each frame: the camera's JPEG; Lightroom Classic's
+  render twice, with Adobe Color (its default, and the Lightroom colour
+  Michael liked: he never loaded a camera profile) and with Camera
+  Standard or Camera Vivid (the camera-match bar); Capture One's default
+  render (both have free trials); all exported as 16-bit TIFFs; and his
+  current darktable export as the baseline to beat.
 - **Compared stage by stage**, so a loss points at the stage that causes
   it:
   - **Colour:** CIEDE2000 against the camera's JPEG (above), and side by
