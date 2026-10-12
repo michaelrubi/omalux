@@ -388,10 +388,10 @@ frame in a per-file fit is the fit's error, not the camera.
 
 Michael's yardstick: the best colours he has seen came from Capture One,
 he likes Lightroom's and Capture One's better than Lightcraft's or
-darktable's, and Sony's Imaging Edge looked okay but not great. OmaLux's output has to
-hold up next to Lightroom's and Capture One's, at fit and at 100%. That's
-measured, not assumed: Lightcraft's own parity notes call its demosaicing
-and highlight quality "unmeasured against Lightroom".
+darktable's, and Sony's Imaging Edge looked okay but not great. OmaLux's
+output has to hold up next to Lightroom's and Capture One's, at fit and
+at 100%. That's measured, not assumed: Lightcraft's own parity notes call
+its demosaicing and highlight quality "unmeasured against Lightroom".
 
 - **A reference set** of 20 to 30 of Michael's frames, each chosen to test
   one or more stages: skin, foliage, blue sky, saturated reds and oranges,
