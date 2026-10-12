@@ -1,0 +1,10 @@
+[package]
+name = "omalux-ai"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "OmaLux's models on the system's ONNX Runtime"
+
+[dependencies]
+# Opened at run time from the system's ONNX Runtime, as Omacull and Omapix do.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-27"] }

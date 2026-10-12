@@ -1,0 +1,16 @@
+[package]
+name = "omalux"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "A fast, keyboard-first raw developer for Omarchy"
+
+[dependencies]
+eframe = { version = "0.36.2", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts"] }
+egui = "0.36.2"
+env_logger = "0.11.11"
+log = "0.4.34"
+omalux-engine = { version = "0.1.0", path = "../omalux-engine" }
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"

@@ -1,0 +1,12 @@
+[package]
+name = "omalux-engine"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "OmaLux's engine: the shoot, sidecars, the camera match, export. No UI or GPU dependencies"
+
+[dependencies]
+lightcraft-develop = { workspace = true }
+lightcraft-meta = { workspace = true }
+quick-xml = { workspace = true }
+serde_json = { workspace = true }

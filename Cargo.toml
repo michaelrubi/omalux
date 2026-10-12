@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["vendor/lightcraft/crates/*"]
+members = ["crates/*", "vendor/lightcraft/crates/*"]
 
 # Lightcraft's, which its vendored crates inherit. OmaLux's own crates set
 # theirs (GPL-3.0-or-later) in their own manifests.
