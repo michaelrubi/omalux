@@ -325,8 +325,9 @@ frame in a per-file fit is the fit's error, not the camera.
   per file when a profile exists; OmaLux uses the profile's own tone too,
   so the whole look is fixed per camera. Whether a pooled tone curve looks
   right across his shoots is for M4 to find out. One profile per Creative
-  Style Michael shoots in (the makernotes record it; M0 lists which his
-  shoots use).
+  Style Michael shoots in: Standard and Vivid (Adobe has a Camera
+  Standard and a Camera Vivid DCP to match, below). The makernotes record
+  the style, so a frame gets its own; Lightcraft doesn't read it yet.
 - **Adobe's Camera Standard** is the other candidate. Lightroom's camera
   match for the ILCE-7M3 is a DCP profile installed by Adobe's free DNG
   Converter. Lightcraft's pipeline already implements the whole colour
@@ -341,15 +342,29 @@ frame in a per-file fit is the fit's error, not the camera.
   sky pixels where the errors show), and the closer one is the default.
   Either way, OmaLux's camera match has to be at least as close to the
   camera as Lightroom's is.
-- **DRO.** The A7 III's Dynamic Range Optimizer (on by default) lifts the
-  JPEG's shadows locally; the raw doesn't have it. Lightcraft fits the
-  colour from the JPEG but deliberately takes Sony's tone curve without
-  DRO, as Lightroom develops it: on Lightcraft's measurements, DRO frames
-  open about 6 L* darker than the camera showed them, mostly in the
-  shadows. Matching the camera there would mean recreating DRO's local
-  lift with the HDR machinery (below), at the level the file records, as
-  part of the camera match. Open: does Michael want that, or Lightroom's
-  behaviour?
+- **DRO is matched** (decided 2026-10-12): OmaLux is for Sony first, so
+  a frame shot with DRO on opens looking like the camera showed it. The
+  A7 III's Dynamic Range Optimizer (on by default) lifts the JPEG's
+  shadows locally; the raw doesn't have it. Lightcraft fits the colour
+  from the JPEG but deliberately takes Sony's tone curve without DRO, as
+  Lightroom develops it, so on Lightcraft's measurements DRO frames open
+  about 6 L* darker than the camera showed them, mostly in the shadows.
+  OmaLux puts the lift back:
+  - **with the local tone mapping the HDR slider uses** (below), on the
+    DRO-off tone curve, so it lifts shadows locally as DRO does rather
+    than brightening the whole curve;
+  - **at the strength the frame had.** The makernotes record the setting
+    (Off, Auto, Lv1 to Lv5) but not what Auto chose, so the strength for
+    Lv1 to Lv5 is pooled per level over Michael's shoots, and for Auto
+    it's measured per frame from the frame's JPEG, which is what the
+    camera did: Auto varies with the scene;
+  - **as part of the Camera match profile**, not as a value of the HDR
+    slider: the slider starts at 0 and adds to it, so nothing's changed
+    on opening a frame (principle 6). Flat leaves it out.
+
+  M4 checks it against the camera's JPEGs of DRO frames, shadows above
+  all. If local tone mapping can't get close, the fallback is the fitted
+  per-file tone curve (Lightcraft's behaviour before it took DRO out).
 - **Beyond the camera's JPEG** (highlights it blew, colours outside sRGB)
   there's nothing to match, and the raw has more. The profile extrapolates
   smoothly there, and Lightcraft's highlight reconstruction and gamut
@@ -359,17 +374,21 @@ frame in a per-file fit is the fit's error, not the camera.
 - **White balance is relative** without a DCP: Lightcraft doesn't assume
   Sony's colour matrix is a DNG one, so Temp and Tint are a scale around
   As Shot (6500/0 is its neutral reference), not measured Kelvin.
-- **Not Capture One's colour.** Capture One's profiles are its own look,
-  not the camera's, and proprietary. They're a reference for how good
-  colour can look (see "Quality bar"), not something to copy. The way
-  towards that kind of colour, if Michael wants it beyond the camera's,
-  is a profile measured from a ColorChecker with `dcamprof`, loaded as a
-  DCP: later.
+- **Sony's look, rendered as well as Lightroom and Capture One render
+  it.** Michael likes Lightroom's and Capture One's colour better than
+  Lightcraft's or darktable's (2026-10-12), and Sony's look is the target
+  for now. Those two don't conflict: what sets them apart is less the
+  look than how cleanly it's rendered (smooth hue transitions, skin, how
+  saturated colours and highlights roll off), so they're the bar for that
+  (see "Quality bar"). Capture One's profiles are proprietary and not
+  copied. A look beyond the camera's, if he ever wants one, would be a
+  profile measured from a ColorChecker with `dcamprof`: later.
 
 ## Quality bar
 
 Michael's yardstick: the best colours he has seen came from Capture One,
-and Sony's Imaging Edge looked okay but not great. OmaLux's output has to
+he likes Lightroom's and Capture One's better than Lightcraft's or
+darktable's, and Sony's Imaging Edge looked okay but not great. OmaLux's output has to
 hold up next to Lightroom's and Capture One's, at fit and at 100%. That's
 measured, not assumed: Lightcraft's own parity notes call its demosaicing
 and highlight quality "unmeasured against Lightroom".

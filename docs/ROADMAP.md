@@ -42,9 +42,10 @@ benchmarks on, which tests can download).
   against the camera's JPEG), and how AHD and the highlight
   reconstruction hold up at 100% against Lightroom's and Capture One's
   renders of the same frame. If AHD loses detail, try RCD.
-- **His camera settings:** the Creative Styles and DRO levels his shoots
-  use, from the makernotes, which decide how many camera-match profiles
-  M4 fits and how much DRO matters (see "The look" in DESIGN.md).
+- **His camera settings:** he shoots Standard and Vivid; confirm from the
+  makernotes how his shoots split between them, and which DRO settings
+  (Off, Auto, Lv1 to Lv5) they use, since DRO is matched (see "The look"
+  in DESIGN.md). Read the Creative Style, which Lightcraft doesn't yet.
 - **The GPU on the laptop.** Lightcraft's GPU pipeline on the RTX 4070
   under Hyprland and Vulkan: slider update and loupe times against the
   16 ms and 60 ms budgets, full-size export time, VRAM. That its CPU and
@@ -145,16 +146,21 @@ the panels, keys and checks on real frames.
   (CIEDE2000 against the camera's JPEG, overall and on saturated, skin and
   sky pixels), and the closer one becomes the default:
   - the ILCE-7M3 profile fitted with Lightcraft's `calibrate` over
-    Michael's shoots and bundled, one per Creative Style he uses, with its
-    tone curve used too rather than fitted per file;
-  - Adobe's Camera Standard DCP for the ILCE-7M3 (from Adobe's free DNG
-    Converter, read from where Michael put it, never shipped), through a
-    DCP reader in OmaLux's own crate feeding the DNG colour model
-    Lightcraft's pipeline already has. With it, Temp and Tint are measured
-    Kelvin.
+    Michael's shoots and bundled, one for Standard and one for Vivid,
+    with its tone curve used too rather than fitted per file;
+  - Adobe's Camera Standard and Camera Vivid DCPs for the ILCE-7M3 (from
+    Adobe's free DNG Converter, read from where Michael put them, never
+    shipped), through a DCP reader in OmaLux's own crate feeding the DNG
+    colour model Lightcraft's pipeline already has. With them, Temp and
+    Tint are measured Kelvin.
 
   Either way, at least as close to the camera as Lightroom's Camera
-  Standard. DRO as Michael decides (see "The look" in DESIGN.md).
+  Standard and Camera Vivid are.
+- **DRO matched:** frames shot with DRO on open with its local shadow
+  lift, on the HDR slider's local tone mapping, at a strength pooled per
+  level (Lv1 to Lv5) or measured from the frame's JPEG (Auto), as part of
+  the profile, with the slider at 0. Checked against the camera's JPEGs
+  of DRO frames. Needs the HDR work below, so it lands with it.
 - **Side by side** with Lightroom and Capture One on the reference set,
   at fit and at 100%; what loses goes back to its stage.
 - **Flat**, one key away.
