@@ -10,15 +10,15 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-# Vendored from Lightcraft (vendor/lightcraft/UPSTREAM.md). JPEG XL and AVIF
-# are left out of what OmaLux builds: it never reads or writes them. Their
-# own tests still build them.
+# Vendored from Lightcraft (vendor/lightcraft/UPSTREAM.md). AVIF, and JPEG
+# XL raws, are left out of what OmaLux builds: it never reads or writes
+# them. Their own tests still build them.
 lightcraft-geom = { path = "vendor/lightcraft/crates/geom" }
 lightcraft-color = { path = "vendor/lightcraft/crates/color" }
 lightcraft-raster = { path = "vendor/lightcraft/crates/raster" }
 lightcraft-tiff = { path = "vendor/lightcraft/crates/tiff" }
 lightcraft-raw = { path = "vendor/lightcraft/crates/raw", default-features = false }
-lightcraft-codecs = { path = "vendor/lightcraft/crates/codecs", default-features = false, features = ["parallel"] }
+lightcraft-codecs = { path = "vendor/lightcraft/crates/codecs", default-features = false, features = ["parallel", "jxl"] }
 lightcraft-meta = { path = "vendor/lightcraft/crates/meta" }
 lightcraft-develop = { path = "vendor/lightcraft/crates/develop" }
 lightcraft-pipeline = { path = "vendor/lightcraft/crates/pipeline" }

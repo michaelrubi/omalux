@@ -6,7 +6,22 @@ license = "GPL-3.0-or-later"
 description = "OmaLux's engine: the shoot, sidecars, the camera match, export. No UI or GPU dependencies"
 
 [dependencies]
+lightcraft-codecs = { workspace = true }
+lightcraft-color = { workspace = true }
 lightcraft-develop = { workspace = true }
+lightcraft-geom = { workspace = true }
+lightcraft-lensdb = { workspace = true }
 lightcraft-meta = { workspace = true }
+lightcraft-pipeline = { workspace = true }
+lightcraft-raster = { workspace = true }
+lightcraft-raw = { workspace = true }
+lightcraft-tiff = { workspace = true }
+log = { workspace = true }
 quick-xml = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+web-time = { workspace = true }
+
+[dev-dependencies]
+tiff = { workspace = true }

@@ -39,10 +39,12 @@ Lightcraft's `[workspace.package]` and `[workspace.lints]` for them and the
 same `[workspace.dependencies]` versions, with the lockfile seeded from
 upstream's. Not changes to the crates:
 
-- `lightcraft-raw` and `lightcraft-codecs` are depended on without JPEG XL
-  and AVIF (`default-features = false`; codecs keeps `parallel`). Their own
+- `lightcraft-raw` is depended on without JPEG XL DNGs, and
+  `lightcraft-codecs` without AVIF (`default-features = false`). Their own
   tests, run as workspace members, still build them with their defaults.
-  WebP isn't behind a feature, and stays.
+  codecs keeps `jxl`: without it, its `jxl_encode.rs` has unused imports,
+  and fixing that would be a local change for nothing OmaLux needs. WebP
+  isn't behind a feature, and stays.
 - wgpu is built with Vulkan only (Lightcraft's adds Metal and DX12).
 
 Their tests need real raws for the corpus tests, which skip without them:
