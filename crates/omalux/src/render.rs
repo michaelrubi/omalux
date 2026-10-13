@@ -24,7 +24,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use lightcraft_develop::DevelopSettings;
-use lightcraft_pipeline::{Quality, RenderRequest, SourceInfo, StageCache};
+use lightcraft_pipeline::{PixelWindow, Quality, RenderRequest, SourceInfo, StageCache};
 use lightcraft_raster::{Histogram, Rgb32f, Rgba8};
 
 /// The long edge the loupe's source is decoded to: enough for the loupe on
@@ -46,6 +46,11 @@ pub struct Decoder {
     pub preview: fn(&[u8]) -> Option<Rgba8>,
     /// The raw itself, as the pipeline's source.
     pub source: fn(&[u8]) -> Decoded,
+    /// The raw at full size, for 100% zoom.
+    pub full: fn(&[u8]) -> Decoded,
+    /// The long edge of the raw at full size, in pixels, without decoding
+    /// it: how large 100% will be, before the full size is there.
+    pub long_edge: fn(&[u8]) -> Option<usize>,
 }
 
 impl Decoder {
@@ -53,6 +58,11 @@ impl Decoder {
         Self {
             preview: |bytes| omalux_engine::raw::embedded_preview_srgb(bytes, SOURCE_EDGE),
             source: |bytes| omalux_engine::raw::load(bytes, SOURCE_EDGE),
+            full: |bytes| omalux_engine::raw::load(bytes, usize::MAX),
+            long_edge: |bytes| {
+                let (w, h) = lightcraft_raw::probe_info(bytes).ok()?.developed_size();
+                Some(w.max(h))
+            },
         }
     }
 }
@@ -68,12 +78,16 @@ pub struct Wanted {
 
 /// What the loupe has room for, in pixels, and whether a slider is being
 /// dragged (drafts, of the current frame only).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct View {
     pub size: (usize, usize),
     pub dragging: bool,
     /// The clipping warnings are on: clipped pixels are coloured.
     pub clipping: bool,
+    /// The loupe is at 100%, with this point of the current frame in its
+    /// middle (a share of the frame's width and height): the window of the
+    /// frame that's on screen is rendered from the raw at full size.
+    pub zoom: Option<[f32; 2]>,
 }
 
 /// Which render of a frame this is: of what settings, how large, how good.
@@ -86,12 +100,28 @@ pub struct Key {
     pub clipping: bool,
 }
 
+/// Which window of a frame at 100% a render is: where in the frame (x, y,
+/// width, height, in the full-size frame's pixels), and of what settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZoomKey {
+    pub settings: u64,
+    pub window: [usize; 4],
+    /// The whole frame's size at 100%.
+    pub full: (usize, usize),
+    pub draft: bool,
+    pub clipping: bool,
+}
+
 pub enum Done {
     /// The camera's JPEG of a frame: what the loupe shows until its render
     /// is in.
     Preview { path: PathBuf, image: egui::ColorImage },
-    /// A frame's raw is decoded: what its settings are read against.
-    Decoded { path: PathBuf, info: Arc<SourceInfo> },
+    /// A frame's raw is decoded: what its settings are read against, and
+    /// how large the frame is at 100% (near enough, until it's rendered
+    /// there).
+    Decoded { path: PathBuf, info: Arc<SourceInfo>, full: (usize, usize) },
+    /// The window of the current frame that's on screen at 100%.
+    Zoomed { path: PathBuf, key: ZoomKey, image: egui::ColorImage },
     Rendered {
         path: PathBuf,
         key: Key,
@@ -105,6 +135,10 @@ pub enum Done {
     },
     Failed { path: PathBuf, error: String },
 }
+
+/// A window to render at 100%: whose, from what, with which stages and
+/// settings, and which window.
+type ZoomJob = (PathBuf, Arc<Source>, Arc<StageCache>, Arc<DevelopSettings>, ZoomKey);
 
 struct Source {
     image: Arc<Rgb32f>,
@@ -127,6 +161,14 @@ struct State {
     rendering: bool,
     /// The current frame's stages, which a drag's renders reuse.
     stages: Option<(PathBuf, Arc<StageCache>)>,
+    /// The current frame at full size, while the loupe is at 100%, with
+    /// its own stages.
+    full: Option<(PathBuf, Arc<Source>, Arc<StageCache>)>,
+    /// The frame being decoded at full size, and one that couldn't be.
+    full_decoding: Option<PathBuf>,
+    full_failed: Option<PathBuf>,
+    /// The last window rendered at 100%.
+    zoomed: Option<ZoomKey>,
     done: Vec<Done>,
     quit: bool,
 }
@@ -179,8 +221,16 @@ impl Renderer {
         state.sources.retain(|path, _| keep(path));
         state.failed.retain(keep);
         state.rendered.retain(|path, _| keep(path));
-        if state.stages.as_ref().is_some_and(|(path, _)| frames.first().is_none_or(|f| f.path != *path)) {
+        let current = frames.first().map(|f| &f.path);
+        if state.stages.as_ref().is_some_and(|(path, _)| Some(path) != current) {
             state.stages = None;
+        }
+        // The full size is the current frame's, and only while it's zoomed.
+        if view.zoom.is_none() || state.full.as_ref().is_some_and(|(path, ..)| Some(path) != current) {
+            (state.full, state.zoomed) = (None, None);
+        }
+        if state.full_failed.as_ref() != current {
+            state.full_failed = None;
         }
         state.wanted = frames;
         state.view = view;
@@ -201,10 +251,10 @@ impl Renderer {
 
     /// Whether there's anything still to decode or render, or anything
     /// finished that [`Self::done`] hasn't handed over yet.
-    #[cfg(test)]
     pub fn busy(&self) -> bool {
         let state = self.shared.lock();
-        !state.decoding.is_empty() || state.rendering || !state.done.is_empty() || state.next_decode().is_some() || state.next_render().is_some()
+        let waiting = state.next_decode().is_some() || state.next_render().is_some() || state.next_full().is_some() || state.next_zoom().is_some();
+        !state.decoding.is_empty() || state.full_decoding.is_some() || state.rendering || !state.done.is_empty() || waiting
     }
 }
 
@@ -223,6 +273,36 @@ impl State {
     fn next_decode(&self) -> Option<PathBuf> {
         let waiting = |path: &PathBuf| !self.sources.contains_key(path) && !self.decoding.contains(path) && !self.failed.contains(path);
         self.wanted.iter().map(|f| &f.path).find(|path| waiting(path)).cloned()
+    }
+
+    /// The current frame, if it's to be decoded at full size: the loupe is
+    /// at 100% and its source is in, so its fit render comes first.
+    fn next_full(&self) -> Option<PathBuf> {
+        self.view.zoom?;
+        let path = &self.wanted.first()?.path;
+        let have = self.full.as_ref().is_some_and(|(full, ..)| full == path);
+        let tried = self.full_decoding.as_ref() == Some(path) || self.full_failed.as_ref() == Some(path);
+        (!have && !tried && self.sources.contains_key(path)).then(|| path.clone())
+    }
+
+    /// The window of the current frame on screen at 100%, if it isn't
+    /// what was last rendered there.
+    fn next_zoom(&self) -> Option<ZoomJob> {
+        let centre = self.view.zoom?;
+        let frame = self.wanted.first()?;
+        let (path, full, stages) = self.full.as_ref().filter(|(path, ..)| *path == frame.path)?;
+        let fresh = || Arc::new(DevelopSettings::for_raw(full.info.as_shot_temp, full.info.as_shot_tint));
+        let settings = frame.settings.clone().unwrap_or_else(fresh);
+        let (frame_w, frame_h) = omalux_engine::export::full_size(&full.image, &settings);
+        let (w, h) = (self.view.size.0.min(frame_w), self.view.size.1.min(frame_h));
+        if w == 0 || h == 0 {
+            return None;
+        }
+        // The window round the centre, moved as little as keeps it in the frame.
+        let corner = |centre: f32, frame: usize, size: usize| ((centre * frame as f32) as usize).saturating_sub(size / 2).min(frame - size);
+        let window = [corner(centre[0], frame_w, w), corner(centre[1], frame_h, h), w, h];
+        let key = ZoomKey { settings: settings.hash64(), window, full: (frame_w, frame_h), draft: self.view.dragging, clipping: self.view.clipping };
+        (self.zoomed != Some(key)).then(|| (path.clone(), full.clone(), stages.clone(), settings, key))
     }
 
     /// The render a frame should have: a draft of the current one while a
@@ -280,12 +360,51 @@ impl Shared {
     }
 
     fn decode(&self) {
+        /// A raw to decode: for the loupe, or at full size for 100%.
+        enum Job {
+            Source(PathBuf),
+            Full(PathBuf),
+        }
         let claim = |state: &mut State| {
-            let path = state.next_decode()?;
-            state.decoding.insert(path.clone());
-            Some(path)
+            // The current frame's source, then its full size, then the neighbours.
+            let current = state.wanted.first().map(|f| f.path.clone());
+            let next = state.next_decode();
+            if next.is_some() && next == current {
+                state.decoding.insert(next.clone()?);
+                return next.map(Job::Source);
+            }
+            if let Some(path) = state.next_full() {
+                state.full_decoding = Some(path.clone());
+                return Some(Job::Full(path));
+            }
+            state.decoding.insert(next.clone()?);
+            next.map(Job::Source)
         };
-        while let Some(path) = self.next(claim) {
+        while let Some(job) = self.next(claim) {
+            let path = match job {
+                Job::Source(path) => path,
+                Job::Full(path) => {
+                    let full = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| (self.decoder.full)(&bytes));
+                    self.finish(&path, |state, _| {
+                        state.full_decoding = None;
+                        // Still the current frame, and still zoomed?
+                        let wanted = state.view.zoom.is_some() && state.wanted.first().is_some_and(|f| f.path == path);
+                        match full {
+                            Ok((image, info)) if wanted => {
+                                let source = Arc::new(Source { image: Arc::new(image), info: Arc::new(info) });
+                                state.full = Some((path.clone(), source, Arc::new(StageCache::default())));
+                            }
+                            Ok(_) => {}
+                            Err(error) if wanted => {
+                                state.full_failed = Some(path.clone());
+                                state.done.push(Done::Failed { path: path.clone(), error });
+                            }
+                            Err(_) => {}
+                        }
+                    });
+                    continue;
+                }
+            };
             let bytes = std::fs::read(&path).map_err(|e| e.to_string());
             if let Ok(bytes) = &bytes
                 && let Some(preview) = (self.decoder.preview)(bytes)
@@ -297,14 +416,19 @@ impl Shared {
                     }
                 });
             }
+            let long_edge = bytes.as_ref().ok().and_then(|bytes| (self.decoder.long_edge)(bytes));
             let source = bytes.and_then(|bytes| (self.decoder.source)(&bytes));
             self.finish(&path, |state, wanted| {
                 state.decoding.remove(&path);
                 match source {
                     Ok((image, info)) if wanted => {
+                        // The frame at 100%: the source's shape, as long as the raw's long edge.
+                        let (w, h) = (image.width, image.height);
+                        let scale = long_edge.map_or(1.0, |edge| edge as f64 / w.max(h).max(1) as f64);
+                        let full = ((w as f64 * scale).round() as usize, (h as f64 * scale).round() as usize);
                         let info = Arc::new(info);
                         state.sources.insert(path.clone(), Arc::new(Source { image: Arc::new(image), info: info.clone() }));
-                        state.done.push(Done::Decoded { path: path.clone(), info });
+                        state.done.push(Done::Decoded { path: path.clone(), info, full });
                     }
                     Ok(_) => {}
                     Err(error) if wanted => {
@@ -318,12 +442,30 @@ impl Shared {
     }
 
     fn render(&self) {
+        /// A render to make: of a frame to fit the loupe, or of the window
+        /// of the current frame that's on screen at 100%.
+        enum Job {
+            Fit(Key),
+            Zoom(ZoomKey),
+        }
         let claim = |state: &mut State| {
-            let (frame, source, settings, key) = state.next_render()?;
+            let current = state.wanted.first().map(|f| f.path.clone());
+            let fit = state.next_render();
+            // The current frame to fit first (it's what's shown until the
+            // window at 100% is in), then that window, then the neighbours.
+            let zoom = if fit.as_ref().is_some_and(|(frame, ..)| Some(&frame.path) == current.as_ref()) { None } else { state.next_zoom() };
+            state.rendering = true;
+            if let Some((path, source, stages, settings, key)) = zoom {
+                state.zoomed = Some(key);
+                return Some((path, source, settings, Some(stages), Job::Zoom(key)));
+            }
+            let Some((frame, source, settings, key)) = fit else {
+                state.rendering = false;
+                return None;
+            };
             // The current frame's stages are kept between renders; a
             // neighbour is rendered once, so it has none to keep.
-            let current = state.wanted.first().is_some_and(|f| f.path == frame.path);
-            let stages = current.then(|| match &state.stages {
+            let stages = (Some(&frame.path) == current.as_ref()).then(|| match &state.stages {
                 Some((path, stages)) if *path == frame.path => stages.clone(),
                 _ => {
                     let stages = Arc::new(StageCache::default());
@@ -333,28 +475,39 @@ impl Shared {
             });
             // Claimed: not picked again while it's being rendered.
             state.rendered.insert(frame.path.clone(), key);
-            state.rendering = true;
-            Some((frame.path, source, settings, key, stages))
+            Some((frame.path, source, settings, stages, Job::Fit(key)))
         };
-        while let Some((path, source, settings, key, stages)) = self.next(claim) {
-            let quality = if key.draft { Quality::Draft } else { Quality::Full };
-            let request = RenderRequest { quality, ..RenderRequest::fit(key.size.0, key.size.1) };
+        while let Some((path, source, settings, stages, job)) = self.next(claim) {
+            let (draft, clipping, request) = match job {
+                Job::Fit(key) => (key.draft, key.clipping, RenderRequest::fit(key.size.0, key.size.1)),
+                Job::Zoom(key) => {
+                    let [x, y, w, h] = key.window;
+                    let request = RenderRequest { window: Some(PixelWindow { x, y, w, h }), ..RenderRequest::fit(key.full.0, key.full.1) };
+                    (key.draft, key.clipping, request)
+                }
+            };
+            let request = RenderRequest { quality: if draft { Quality::Draft } else { Quality::Full }, ..request };
             let started = Instant::now();
             let on_gpu = self.gpu.then(|| lightcraft_gpu::try_render(&source.image, &source.info, &settings, &request, stages.as_deref()).ok()).flatten();
-            let rendered = on_gpu.unwrap_or_else(|| match &stages {
+            let mut rendered = on_gpu.unwrap_or_else(|| match &stages {
                 Some(stages) => lightcraft_pipeline::render_cached(&source.image, &source.info, &settings, &request, stages),
                 None => lightcraft_pipeline::render(&source.image, &source.info, &settings, &request),
             });
             let ms = started.elapsed().as_secs_f64() * 1e3;
-            let mut rendered = rendered;
-            if key.clipping {
+            if clipping {
                 crate::histogram::clipping_overlay(&mut rendered.image);
             }
             let image = color_image(&rendered.image);
             self.finish(&path, |state, wanted| {
                 state.rendering = false;
-                if wanted {
-                    state.done.push(Done::Rendered { path: path.clone(), key, image, histogram: rendered.histogram, settings, ms });
+                match job {
+                    Job::Fit(key) if wanted => state.done.push(Done::Rendered { path: path.clone(), key, image, histogram: rendered.histogram, settings, ms }),
+                    // Only if it's still the current frame's, and still zoomed.
+                    Job::Zoom(key) if state.zoomed == Some(key) && state.full.as_ref().is_some_and(|(full, ..)| *full == path) => {
+                        log::debug!("{}: {}×{} at 100% in {ms:.0} ms", path.display(), key.window[2], key.window[3]);
+                        state.done.push(Done::Zoomed { path: path.clone(), key, image });
+                    }
+                    _ => {}
                 }
             });
         }
@@ -384,6 +537,13 @@ pub(crate) mod tests {
                     Ok((image, SourceInfo { raw: true, as_shot_temp: 5200.0, as_shot_tint: 3.0, ..SourceInfo::default() }))
                 }
             },
+            // Four times the source's size.
+            full: |_| {
+                let mut image = Rgb32f::new(192, 128);
+                image.data.fill([0.18; 3]);
+                Ok((image, SourceInfo { raw: true, as_shot_temp: 5200.0, as_shot_tint: 3.0, ..SourceInfo::default() }))
+            },
+            long_edge: |_| Some(192),
         }
     }
 
@@ -438,7 +598,9 @@ pub(crate) mod tests {
 
         let of = |name: &str| -> Vec<&Done> {
             let path = |d: &&Done| match d {
-                Done::Preview { path, .. } | Done::Decoded { path, .. } | Done::Rendered { path, .. } | Done::Failed { path, .. } => path.ends_with(name),
+                Done::Preview { path, .. } | Done::Decoded { path, .. } | Done::Rendered { path, .. } | Done::Zoomed { path, .. } | Done::Failed { path, .. } => {
+                    path.ends_with(name)
+                }
             };
             done.iter().filter(path).collect()
         };
@@ -488,6 +650,35 @@ pub(crate) mod tests {
         state.view.dragging = true;
         assert_eq!((state.key(0, &source, &settings).size, state.key(0, &source, &settings).draft), (DRAFT, true));
         assert_eq!((state.key(1, &source, &settings).size, state.key(1, &source, &settings).draft), ((2560, 1500), false), "a neighbour");
+    }
+
+    #[test]
+    fn at_100_percent_the_window_on_screen_is_rendered_from_the_full_size() {
+        let folder = Folder::new("zoom", &[("a.ARW", ""), ("b.ARW", "")]);
+        let renderer = Renderer::new(decoder(), false, || {});
+        let frames = |names: &[&str]| names.iter().map(|name| wanted(&folder.0, name)).collect::<Vec<_>>();
+        let zooms = |done: &[Done]| done.iter().filter_map(|d| if let Done::Zoomed { key, image, .. } = d { Some((key.window, key.full, image.size)) } else { None }).collect::<Vec<_>>();
+        let view = View { size: (40, 30), ..View::default() };
+        renderer.want(frames(&["a.ARW", "b.ARW"]), view);
+        let done = settle(&renderer);
+        assert!(zooms(&done).is_empty());
+        assert!(done.iter().any(|d| matches!(d, Done::Decoded { full: (192, 128), .. })), "how large 100% will be is known from the start");
+
+        // Zoomed at the middle: a loupe's worth of the full-size frame, round the middle.
+        renderer.want(frames(&["a.ARW", "b.ARW"]), View { zoom: Some([0.5, 0.5]), ..view });
+        assert_eq!(zooms(&settle(&renderer)), [([76, 49, 40, 30], (192, 128), [40, 30])]);
+        // Panned to a corner: the window stops at the frame's edge.
+        renderer.want(frames(&["a.ARW", "b.ARW"]), View { zoom: Some([1.0, 0.0]), ..view });
+        assert_eq!(zooms(&settle(&renderer)), [([152, 0, 40, 30], (192, 128), [40, 30])]);
+        assert!(renderer.shared.lock().full.is_some());
+
+        // The next frame, still zoomed: its own full size. Zoomed out: none is kept.
+        renderer.want(frames(&["b.ARW", "a.ARW"]), View { zoom: Some([1.0, 0.0]), ..view });
+        let done = settle(&renderer);
+        assert!(matches!(&done[..], [Done::Zoomed { path, .. }] if path.ends_with("b.ARW")), "{}", done.len());
+        renderer.want(frames(&["b.ARW", "a.ARW"]), view);
+        assert!(settle(&renderer).is_empty());
+        assert!(renderer.shared.lock().full.is_none());
     }
 
     #[test]

@@ -438,6 +438,10 @@ impl App {
             Command::WhiteBalance => self.selector = !self.selector && self.shoot.is_some(),
             Command::BeforeAfter => self.before = !self.before && self.shoot.is_some(),
             Command::Clipping => self.clipping = !self.clipping,
+            Command::Zoom => {
+                let (pointer, time) = ctx.input(|i| (i.pointer.hover_pos(), i.time));
+                self.loupe.key_down(pointer, time);
+            }
             Command::Pick
             | Command::Reject
             | Command::Unmark
@@ -575,7 +579,16 @@ impl App {
         }
     }
 
+    /// The script's next command, once everything wanted has been
+    /// developed: so a script sees what its last command led to, and
+    /// `Next,Zoom,Quit` on real raws renders each step before the next.
     fn run_script(&mut self, ctx: &egui::Context) {
+        if self.script.is_empty() {
+            return;
+        }
+        if self.renderer.busy() {
+            return ctx.request_repaint();
+        }
         let Some(command) = self.script.pop_front() else {
             return;
         };
@@ -600,6 +613,12 @@ impl App {
             }
         }
         self.run_script(ctx);
+        // The zoom key let go ends a look.
+        if let Some(key) = hotkeys::current().command(Command::Zoom).map(|s| s.logical_key)
+            && let (false, time) = ctx.input(|i| (i.key_down(key), i.time))
+        {
+            self.loupe.key_up(time);
+        }
         if let Some(shoot) = &self.shoot {
             self.filmstrip.sync_shoot(shoot, ctx);
             self.filmstrip.collect(ctx, shoot.current());
@@ -627,7 +646,7 @@ impl App {
             current.settings = None;
         }
         self.loupe.retain(|path| wanted.iter().any(|w| w.path == path));
-        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping });
+        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom: self.loupe.zoom() });
         for news in self.loupe.take(ctx, self.renderer.done()) {
             match news {
                 News::Decoded(path, info) => {
@@ -1234,6 +1253,51 @@ mod tests {
         h.press(Modifiers::NONE, Key::Num3);
         h.app.disk.flush();
         assert_eq!(std::fs::read_to_string(sidecar::path_for(&raw)).unwrap(), newer.replace("xmp:Rating=\"1\"", "xmp:Rating=\"3\""));
+    }
+
+    #[test]
+    fn z_and_a_click_zoom_to_100_percent_where_the_full_size_is_rendered() {
+        let folder = Folder::new("zoom", &[1, 1]);
+        let raw = |name: &str| folder.0.join(name);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let window = |h: &Harness, name: &str| h.app.loupe.shown(&raw(name)).unwrap().zoomed.as_ref().map(|z| (z.key.window, z.key.full));
+        let fitted: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("loupe frame"))).unwrap();
+        assert!(h.app.loupe.zoom().is_none() && window(&h, "DSC00001.ARW").is_none());
+
+        // A tap of Z: at 100%, and the window on screen rendered from the full size
+        // (the test decoder's is 192×128, smaller than the loupe: all of it).
+        h.press(Modifiers::NONE, Key::Z);
+        assert_eq!(h.app.loupe.zoom(), Some([0.5, 0.5]));
+        h.settle();
+        assert_eq!(window(&h, "DSC00001.ARW"), Some(([0, 0, 192, 128], (192, 128))));
+        let zoomed: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("loupe frame"))).unwrap();
+        assert_eq!((zoomed.size(), zoomed.center()), (egui::vec2(192.0, 128.0), fitted.center()), "a pixel of the frame to a pixel of the screen");
+
+        // Stepping stays at 100%, on the next frame's own full size.
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.settle();
+        assert_eq!(window(&h, "DSC00002.ARW"), Some(([0, 0, 192, 128], (192, 128))));
+        // Another tap: back to the whole frame.
+        h.press(Modifiers::NONE, Key::Z);
+        h.settle();
+        assert!(h.app.loupe.zoom().is_none());
+
+        // Held longer than a tap, Z is a look that ends when it's let go.
+        h.frame(key_events(Modifiers::NONE, Key::Z, true));
+        assert!(h.app.loupe.zoom().is_some());
+        for _ in 0..10 {
+            h.frame(vec![]);
+        }
+        h.frame(key_events(Modifiers::NONE, Key::Z, false));
+        assert!(h.app.loupe.zoom().is_none());
+
+        // A click zooms in, and a click again out.
+        h.click(fitted.center());
+        assert!(h.app.loupe.zoom().is_some());
+        h.click(fitted.center());
+        assert!(h.app.loupe.zoom().is_none());
     }
 
     #[test]

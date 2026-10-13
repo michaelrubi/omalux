@@ -2918,6 +2918,7 @@ dependencies = [
  "lightcraft-gpu",
  "lightcraft-pipeline",
  "lightcraft-raster",
+ "lightcraft-raw",
  "log",
  "omalux-engine",
  "rfd",

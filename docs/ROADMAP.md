@@ -229,9 +229,14 @@ binary.
 - The histogram at the top of the right panel, with clipping warnings
   (J). *Done:* the render's own histogram; J or a click on a triangle
   colours blown highlights red and crushed shadows blue in the loupe.
-- Before/after (`\`), 100% zoom (Z). *Before/after done; 100% zoom left:*
-  it needs the full-size source decoded for the current frame and the
-  window on screen rendered from it.
+- Before/after (`\`), 100% zoom (Z). *Done.* Z, or a click on the frame:
+  a tap toggles and a hold is a look, a drag or the wheel pans, and
+  stepping stays at 100% on the same spot, all as Omacull's zoom behaves.
+  The current frame is decoded at full size when it's first zoomed, and
+  only the window on screen is rendered from it; until that's in, the
+  render that fits is shown enlarged. On a copy of one of Michael's
+  frames: the first window (2532×1596) in 150 ms, the next after a
+  slider nudge in 7.
 - Sliders by mouse (drag, wheel, double-click to reset) and by key (`,`
   `.` to select, `=` `−` to nudge), Lightroom's behaviour as Lightcraft
   implements it, in Omarchy's theme. *Done,* but for typing a value into
