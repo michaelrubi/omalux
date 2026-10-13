@@ -6,6 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
+use omalux_engine::copy::Group;
 use omalux_engine::shoot::Filter;
 
 const MAX_RECENT: usize = 10;
@@ -22,11 +25,26 @@ pub struct Place {
     pub filter: Filter,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+fn default_copy_groups() -> Vec<Group> {
+    Group::ALL.to_vec()
+}
+
+fn deserialize_copy_groups<'de, D>(deserializer: D) -> Result<Vec<Group>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let strings = Vec::<String>::deserialize(deserializer)?;
+    Ok(strings.into_iter().filter_map(|s| serde_json::from_value(serde_json::Value::String(s)).ok()).collect())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct State {
     /// Most recent first.
     #[serde(default)]
     pub recent: Vec<PathBuf>,
+    /// Groups last chosen to copy.
+    #[serde(default = "default_copy_groups", alias = "copy", deserialize_with = "deserialize_copy_groups")]
+    pub copy_groups: Vec<Group>,
     /// Most recent first. Last in the file, as TOML wants tables after
     /// plain values.
     #[serde(default)]
@@ -34,6 +52,17 @@ pub struct State {
     /// Where it's saved; nowhere in tests.
     #[serde(skip)]
     path: Option<PathBuf>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            recent: Vec::new(),
+            copy_groups: default_copy_groups(),
+            places: Vec::new(),
+            path: None,
+        }
+    }
 }
 
 impl State {
@@ -90,6 +119,10 @@ impl State {
         self.places.retain(|p| p.dir != place.dir);
         self.places.insert(0, place);
         self.places.truncate(MAX_PLACES);
+        self.save();
+    }
+    pub fn remember_copy(&mut self, groups: &[Group]) {
+        self.copy_groups = groups.to_vec();
         self.save();
     }
 }
@@ -149,5 +182,37 @@ mod tests {
 
         std::fs::remove_dir(&b).unwrap();
         assert_eq!(State::load_from(path).recent, [a], "gone folders are forgotten");
+    }
+
+    #[test]
+    fn copy_groups_round_trip_and_ignore_unknown_ones() {
+        let folder = TempFolder::new("copy-state");
+        let (a, b) = (folder.0.join("a"), folder.0.join("b"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let path = folder.0.join("config").join("state.toml");
+
+        // A file without the setting gives every group.
+        let mut state = State::load_from(path.clone());
+        assert_eq!(state.copy_groups, Group::ALL);
+
+        // The choice round-trips through the file.
+        state.remember_copy(&[Group::Light]);
+        let loaded = State::load_from(path.clone());
+        assert_eq!(loaded.copy_groups, [Group::Light]);
+
+        // An unknown group is ignored, and known ones are kept.
+        // Recent shoots and places still load beside it.
+        let toml = format!(
+            "recent = [\"{}\"]\ncopy_groups = [\"white_balance\", \"future_panel\", \"presence\"]\n\n[[places]]\ndir = \"{}\"\nframe = \"DSC00001.ARW\"\n",
+            a.display(),
+            b.display()
+        );
+        std::fs::write(&path, toml).unwrap();
+        let loaded = State::load_from(path.clone());
+        assert_eq!(loaded.copy_groups, [Group::WhiteBalance, Group::Presence]);
+        assert_eq!(loaded.recent, [std::fs::canonicalize(&a).unwrap()]);
+        assert_eq!(loaded.places.len(), 1);
+        assert_eq!(loaded.places[0].frame, "DSC00001.ARW");
     }
 }
