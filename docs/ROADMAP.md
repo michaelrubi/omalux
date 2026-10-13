@@ -72,6 +72,8 @@ commands are in AGENTS.md.
   from tags `0xb020` and `0xb025`), tested on made-up maker notes only.
   *On the laptop:* the `spike` example counts them over his shoots, which
   is also the first check that the A7 III writes them where expected.
+  First count (2026-10-13, the picks of three shoots, 53 frames): all
+  Standard, DRO Auto, and both read where expected.
 - **The GPU on the laptop.** Lightcraft's GPU pipeline on the RTX 4070
   under Hyprland and Vulkan: slider update and loupe times against the
   16 ms and 60 ms budgets, full-size export time, VRAM. That its CPU and
@@ -90,7 +92,12 @@ commands are in AGENTS.md.
   dropped (worth an upstream issue). *On the laptop:* the `lens` example
   renders each frame with lensfun's correction and without, and reports
   Sony's table; trying Sony's on the A7 III means opening Lightcraft's
-  ILCE-7RM4A-only gate (`vendor/arw_lens.rs`) on a test branch.
+  ILCE-7RM4A-only gate (`vendor/arw_lens.rs`) on a test branch. First
+  run (2026-10-13, 53 frames, all FE 85 f/1.8): lensfun matches the
+  lens on every frame and gives it distortion and vignetting; Sony's
+  table is there on every frame and changes from frame to frame at the
+  same focal length and aperture, so it follows the focus distance,
+  which lensfun's model doesn't. The FE 35 and 50 are still to run.
 - **Raw denoise.** RawNIND's Bayer model against RawForge's TreeNet (Light
   and Heavy) on ISO 3200 to 6400 frames, and both against Lightroom's
   Denoise: how they look at 100%, how long they take, how much VRAM.
