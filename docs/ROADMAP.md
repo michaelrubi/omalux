@@ -10,7 +10,7 @@ vendored, the workspace and an empty window up, and the spikes run on
 the laptop and Michael's frames. On 2026-10-13 what was left of it moved
 to the milestones that need it first, and M0 closed on its last question,
 why the GPU loupe's times jump between frames: the GPU's power states
-(see M0). M1 started the same day.
+(see M0). M1 started the same day, and M2 after it.
 
 Each milestone ends with something Michael can use on a real shoot. M1 is
 the point where OmaLux replaces darktable for a clean, low-ISO shoot;
@@ -275,15 +275,50 @@ What makes 10 to 50 picks quick: develop one, paste onto the others.
 Lightcraft's copy groups, with copy-time choice, are already how DESIGN.md
 wants it.
 
+Each item says where it stands. Built on 2026-10-13, on `m2`: Claude on
+the commands, the copy groups, paste and its undo, Antigravity on the
+parts ported from Omacull and Lightcraft (the selection, stacks, the
+checklist), each on a branch of its own. Everything here has headless
+tests, and a script has copied, pasted and undone on copies of the
+corpus raws; none of it has been tried by hand yet, which is Michael's
+to do from the installed binary.
+
 - Multi-select in the filmstrip (Ctrl+click, Shift+click, Shift+arrows,
-  Ctrl+A), as Omacull has it.
+  Ctrl+A), as Omacull has it. *Done,* with Ctrl+D for none. Unlike
+  Omacull's, a plain step or click clears the selection, as in
+  Lightroom, since here it's where a paste lands (see "Selecting" in
+  DESIGN.md); so does changing the filter. The status bar says how many
+  are selected.
 - Ctrl+C copies everything; Ctrl+Shift+C opens the checklist of groups
   (restyled from Lightcraft's), which remembers the last choice; Ctrl+V
   pastes onto the selection; Ctrl+Alt+V pastes from the previous frame.
+  *Done.* The groups are the panels there are (White Balance, Light,
+  Presence); each later panel brings its own. What was copied lasts the
+  session, across shoots. A paste reaches frames whose raws haven't
+  been decoded, and saves each; a frame whose edit this OmaLux can't
+  read is left alone, and said. A white balance copied as shot is
+  pasted as each frame's own. Paste from Previous takes every setting
+  of the frame the cursor came from, onto the current frame alone, as
+  Lightroom's does.
 - Stacks by capture time and look among the picks, as Omacull makes
   them, collapsed in the filmstrip; a key pastes onto the whole stack.
+  *Done:* each raw's capture time and thumbnail are read from its
+  headers when the shoot opens (800 frames in 24 ms from a warm disk;
+  not timed cold, nor on one of Michael's shoots), and frames up to 30
+  seconds apart that look alike are a stack, with no setting. G opens
+  one out and closes it up (Omacull's key), and Ctrl+Shift+V pastes
+  onto it. A stack is only the frames the filter lets through, so a
+  paste never reaches one that isn't shown. *Open:* how his shoots
+  stack, which only his frames can say; and that Ctrl+A with stacks
+  closed up selects the frame standing for each and not the rest, so
+  an export of "everything" needs the stacks opened out first
+  (Lightroom's way, and a trap there too).
 - One step of undo for a paste, however many frames it reached.
-- Exporting the selection.
+  *Done:* Ctrl+Z on the frame it was made from, or on any frame it
+  reached, takes it back from all of them, and Ctrl+Shift+Z makes it
+  again; a frame edited since keeps its edit and the paste under it.
+- Exporting the selection. *Done:* Ctrl+E and Ctrl+Shift+E export the
+  selection, or the current frame with none.
 
 ## M3. Detail, crop and auto
 

@@ -1077,9 +1077,12 @@ impl App {
 fn status(shoot: &Shoot) -> String {
     let shown = shoot.shown_indices();
     let place = shown.iter().position(|&i| i == shoot.current()).map_or(0, |p| p + 1);
+    // Stacks closed up show one frame each: how many are shown isn't how many there are.
+    let through = shoot.frames().iter().filter(|frame| shoot.filter().matches(frame)).count();
+    let (count, closed) = if shown.len() < through { (through, format!("{} shown of ", shown.len())) } else { (shown.len(), String::new()) };
     let of = match shoot.filter() {
-        Filter::Picks => format!("{} picks of {} frames", shown.len(), shoot.frames().len()),
-        Filter::All => format!("{} frames", shown.len()),
+        Filter::Picks => format!("{closed}{count} picks of {} frames", shoot.frames().len()),
+        Filter::All => format!("{closed}{count} frames"),
     };
     let mark = stars(shoot.frame().rating);
     let mark = if mark.is_empty() { String::new() } else { format!("{mark}   ") };
@@ -2680,8 +2683,10 @@ mod tests {
         h.settle();
         let shown = |h: &Harness| h.app.shoot.as_ref().unwrap().shown_indices();
         assert_eq!(shown(&h), [0, 3], "stacks start closed up");
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★   1 / 2 shown of 4 picks of 4 frames");
         h.press(Modifiers::NONE, Key::G);
         assert_eq!(shown(&h), [0, 1, 2, 3]);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★   1 / 4 picks of 4 frames");
         h.press(Modifiers::NONE, Key::ArrowRight);
         h.press(Modifiers::NONE, Key::G);
         assert_eq!((shown(&h), current(&h).as_str()), (vec![0, 3], "DSC00001.ARW"), "closed from any frame in it");
