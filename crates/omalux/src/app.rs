@@ -72,6 +72,10 @@ pub struct App {
     selected: usize,
     /// A slider is being dragged: the loupe gets drafts.
     dragging: bool,
+    /// The White Balance Selector is out: a click on the frame picks.
+    selector: bool,
+    /// The loupe shows the current frame with no edit, until it's left.
+    before: bool,
     /// The folder picker, while it's open.
     picking: Option<Receiver<Option<PathBuf>>>,
     /// The last thing to tell the user, and whether it's a problem.
@@ -131,6 +135,8 @@ impl App {
             edits: HashMap::new(),
             selected: develop::sliders().position(|spec| spec.id == "light.exposure").unwrap_or(0),
             dragging: false,
+            selector: false,
+            before: false,
             picking: None,
             message: None,
             title: String::new(),
@@ -154,7 +160,7 @@ impl App {
                 self.shoot = Some(shoot);
                 self.saved.clear();
                 self.edits.clear();
-                self.dragging = false;
+                self.leave();
             }
             Err(e) => self.message = Some((format!("Couldn't open {}: {e}", dir.display()), true)),
         }
@@ -211,13 +217,32 @@ impl App {
             Command::Decrease => self.nudge(-1.0),
             Command::IncreaseMore => self.nudge(5.0),
             Command::DecreaseMore => self.nudge(-5.0),
+            Command::WhiteBalance => self.selector = !self.selector && self.shoot.is_some(),
+            Command::BeforeAfter => self.before = !self.before && self.shoot.is_some(),
         }
     }
 
     fn step_to(&mut self, step: Step) {
-        if let Some(shoot) = &mut self.shoot {
-            shoot.step(step);
+        if let Some(shoot) = &mut self.shoot
+            && shoot.step(step)
+        {
+            self.leave();
         }
+    }
+
+    /// What ends when the cursor leaves a frame: a drag, the White Balance
+    /// Selector, the look at Before.
+    fn leave(&mut self) {
+        (self.dragging, self.selector, self.before) = (false, false, false);
+    }
+
+    /// The White Balance Selector clicked the current frame at `at`, a
+    /// share of its width and height: what's there becomes neutral, and
+    /// the selector is put away, as Lightroom's is.
+    fn pick_white_balance(&mut self, at: [f64; 2]) {
+        self.selector = false;
+        let Some(source) = self.shoot.as_ref().and_then(|shoot| self.renderer.source(&shoot.frame().path)) else { return };
+        self.edit(|history, info| history.set(|settings| edit::pick_white_balance(settings, info, &source, at)));
     }
 
     /// Change the current frame's edit in one step, and save it. `change`
@@ -321,7 +346,11 @@ impl App {
             let frames = std::iter::once(shoot.current()).chain(shoot.neighbours(AHEAD, BEHIND));
             frames.map(|i| shoot.frames()[i].path.clone()).collect()
         });
-        let wanted: Vec<Wanted> = paths.into_iter().map(|path| Wanted { settings: self.settings_of(&path), path }).collect();
+        let mut wanted: Vec<Wanted> = paths.into_iter().map(|path| Wanted { settings: self.settings_of(&path), path }).collect();
+        // Before: the current frame as a fresh raw (`None` is one).
+        if let Some(current) = wanted.first_mut().filter(|_| self.before) {
+            current.settings = None;
+        }
         self.loupe.retain(|path| wanted.iter().any(|w| w.path == path));
         self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging });
         for news in self.loupe.take(ctx, self.renderer.done()) {
@@ -375,10 +404,20 @@ impl App {
             egui::Panel::right("develop").frame(side).resizable(false).exact_size(PANEL_WIDTH).show(ui, |ui| self.develop_panel(ui));
         }
         let pasteboard = egui::Frame::new().fill(self.theme.pasteboard());
+        let mut picked = None;
         egui::CentralPanel::no_frame().frame(pasteboard).show(ui, |ui| match &self.shoot {
-            Some(shoot) => self.loupe.show(ui, &shoot.frame().path),
+            Some(shoot) => {
+                picked = self.loupe.show(ui, &shoot.frame().path, self.selector);
+                if self.before {
+                    let corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);
+                    ui.painter().text(corner, Align2::LEFT_TOP, "Before", FontId::proportional(13.0), self.theme.foreground);
+                }
+            }
             None => self.empty_state(ui),
         });
+        if let Some(at) = picked {
+            self.pick_white_balance(at);
+        }
     }
 
     /// The shown frames' thumbnails, under the loupe.
@@ -727,6 +766,44 @@ mod tests {
             h.pointer(track.center(), Some(false));
         }
         assert_eq!((h.settings().light.contrast, h.saved().map(|s| s.light.contrast)), (0.0, Some(0.0)));
+    }
+
+    #[test]
+    fn w_picks_the_white_balance_from_a_click_and_backslash_shows_before() {
+        use lightcraft_develop::WbMode;
+        let folder = Folder::new("selector", &[1, 1]);
+        let raw = folder.0.join("DSC00001.ARW");
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let frame: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("loupe frame"))).unwrap();
+
+        // A click on the frame does nothing until the selector is out.
+        h.pointer(frame.center(), Some(true));
+        h.pointer(frame.center(), Some(false));
+        assert_eq!(h.settings().wb.mode, WbMode::AsShot);
+        h.press(Modifiers::NONE, Key::W);
+        h.frame(vec![]);
+        h.pointer(frame.center(), Some(true));
+        h.pointer(frame.center(), Some(false));
+        assert_eq!(h.settings().wb.mode, WbMode::Custom);
+        assert!(!h.app.selector, "one click and the selector is put away");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.settle();
+        let rendered = |h: &Harness| h.app.loupe.shown(&raw).unwrap().render.as_ref().unwrap().settings.wb.mode;
+        assert_eq!(rendered(&h), WbMode::Custom);
+
+        // Before: the frame with no edit, in the loupe only.
+        h.press(Modifiers::NONE, Key::Backslash);
+        h.settle();
+        assert_eq!((rendered(&h), h.settings().wb.mode), (WbMode::AsShot, WbMode::Custom));
+        h.press(Modifiers::NONE, Key::Backslash);
+        h.settle();
+        assert_eq!(rendered(&h), WbMode::Custom);
+        // Leaving the frame ends it.
+        h.press(Modifiers::NONE, Key::Backslash);
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert!(!h.app.before);
     }
 
     #[test]

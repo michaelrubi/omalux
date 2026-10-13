@@ -4,6 +4,7 @@
 
 use lightcraft_develop::{DevelopSettings, WbMode, controls};
 use lightcraft_pipeline::SourceInfo;
+use lightcraft_raster::Rgb32f;
 
 /// One frame's settings and how they got there.
 #[derive(Clone, Debug, PartialEq)]
@@ -130,9 +131,59 @@ pub fn as_shot(settings: &mut DevelopSettings, info: &SourceInfo) {
     (settings.wb.mode, settings.wb.temp, settings.wb.tint) = (WbMode::AsShot, info.as_shot_temp, info.as_shot_tint);
 }
 
+/// The white balance that makes the source's pixels round a point
+/// neutral: Lightroom's White Balance Selector. `at` is the point as a
+/// share of the frame's width and height. As Lightcraft's `develop.wbPick`
+/// does it (`engine/src/cmd/develop.rs` at `701f78e`): the mean of five
+/// pixels by five, through its auto white balance.
+pub fn pick_white_balance(settings: &mut DevelopSettings, info: &SourceInfo, source: &Rgb32f, at: [f64; 2]) {
+    // Turned as the frame is shown, which for a frame that hasn't been
+    // turned is as it is.
+    let turned;
+    let oriented = if settings.orientation == Default::default() {
+        source
+    } else {
+        turned = source.oriented(settings.orientation);
+        &turned
+    };
+    let centre = |share: f64, size: usize| (share.clamp(0.0, 1.0) * size as f64) as isize;
+    let (x, y) = (centre(at[0], oriented.width), centre(at[1], oriented.height));
+    let mut mean = [0.0f32; 3];
+    for dy in -2..=2 {
+        for dx in -2..=2 {
+            let pixel = oriented.get_clamped(x + dx, y + dy);
+            for (sum, channel) in mean.iter_mut().zip(pixel) {
+                *sum += channel / 25.0;
+            }
+        }
+    }
+    let (temp, tint) = lightcraft_pipeline::auto::auto_wb(&Rgb32f::filled(4, 4, mean), info);
+    lightcraft_pipeline::local::normalize_wb(settings, info);
+    (settings.wb.mode, settings.wb.temp, settings.wb.tint) = (WbMode::Custom, temp, tint);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_selector_makes_what_was_clicked_neutral() {
+        let info = SourceInfo::default();
+        // A grey frame with a warm cast in its right half.
+        let mut source = Rgb32f::filled(40, 20, [0.2, 0.2, 0.2]);
+        for y in 0..20 {
+            for x in 20..40 {
+                source.data[y * 40 + x] = [0.3, 0.2, 0.1];
+            }
+        }
+        let mut neutral = DevelopSettings::default();
+        pick_white_balance(&mut neutral, &info, &source, [0.25, 0.5]);
+        let mut warm = DevelopSettings::default();
+        pick_white_balance(&mut warm, &info, &source, [0.75, 0.5]);
+        assert_eq!(neutral.wb.mode, WbMode::Custom);
+        assert!((neutral.wb.temp - 6500.0).abs() < 100.0 && neutral.wb.tint.abs() < 2.0, "grey is neutral already: {:?}", neutral.wb);
+        assert!(warm.wb.temp < neutral.wb.temp - 500.0, "a warm cast is cooled: {:?}", warm.wb);
+    }
 
     #[test]
     fn temp_and_tint_make_the_white_balance_custom_from_as_shot() {

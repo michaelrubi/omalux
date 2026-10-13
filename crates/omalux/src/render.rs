@@ -184,6 +184,12 @@ impl Renderer {
         self.shared.changed.notify_all();
     }
 
+    /// A frame's decoded raw, if it's wanted and decoded: what the white
+    /// balance selector samples.
+    pub fn source(&self, path: &Path) -> Option<Arc<Rgb32f>> {
+        self.shared.lock().sources.get(path).map(|source| source.image.clone())
+    }
+
     /// What's been finished since this was last called.
     pub fn done(&self) -> Vec<Done> {
         std::mem::take(&mut self.shared.lock().done)

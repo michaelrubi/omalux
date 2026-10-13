@@ -24,6 +24,9 @@ pub enum Command {
     Decrease,
     IncreaseMore,
     DecreaseMore,
+    /// The White Balance Selector: click something neutral.
+    WhiteBalance,
+    BeforeAfter,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -47,6 +50,8 @@ impl Command {
         Command::Decrease,
         Command::IncreaseMore,
         Command::DecreaseMore,
+        Command::WhiteBalance,
+        Command::BeforeAfter,
     ];
 
     /// Look a command up by its name in code, e.g. "Open".
@@ -74,6 +79,8 @@ impl Command {
         Command::Decrease,
         Command::SliderPrevious,
         Command::SliderNext,
+        Command::WhiteBalance,
+        Command::BeforeAfter,
     ];
 
     pub fn label(self) -> &'static str {
@@ -94,6 +101,8 @@ impl Command {
             Command::Decrease => "Decrease the Selected Slider",
             Command::IncreaseMore => "Increase the Selected Slider More",
             Command::DecreaseMore => "Decrease the Selected Slider More",
+            Command::WhiteBalance => "White Balance Selector",
+            Command::BeforeAfter => "Before/After",
         }
     }
 
@@ -118,6 +127,8 @@ impl Command {
             // Shift with = is +.
             Command::IncreaseMore => s(Modifiers::SHIFT, Key::Plus),
             Command::DecreaseMore => s(Modifiers::SHIFT, Key::Minus),
+            Command::WhiteBalance => s(Modifiers::NONE, Key::W),
+            Command::BeforeAfter => s(Modifiers::NONE, Key::Backslash),
         }
     }
 
@@ -189,5 +200,7 @@ mod tests {
         assert_eq!(press(&ctx, Modifiers::NONE, Key::Minus), [Command::Decrease]);
         assert_eq!(press(&ctx, Modifiers::SHIFT, Key::Minus), [Command::DecreaseMore]);
         assert_eq!(press(&ctx, Modifiers::SHIFT, Key::Plus), [Command::IncreaseMore]);
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::W), [Command::WhiteBalance]);
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::Backslash), [Command::BeforeAfter]);
     }
 }

@@ -96,14 +96,25 @@ impl Loupe {
     }
 
     /// Draw `path`'s frame: its render, or the camera's JPEG until that's
-    /// in.
-    pub fn show(&mut self, ui: &mut Ui, path: &Path) {
+    /// in. With `picking` (the White Balance Selector) the pointer is a
+    /// crosshair over the frame, and a click on it is returned, as a share
+    /// of the frame's width and height.
+    pub fn show(&mut self, ui: &mut Ui, path: &Path, picking: bool) -> Option<[f64; 2]> {
         let area = ui.max_rect().shrink(MARGIN);
         let pixels = area.size() * ui.ctx().pixels_per_point();
         self.size = (pixels.x.max(0.0) as usize, pixels.y.max(0.0) as usize);
-        let Some(shown) = self.shown.get(path) else { return };
-        let Some(texture) = shown.render.as_ref().map(|r| &r.texture).or(shown.preview.as_ref()) else { return };
+        let shown = self.shown.get(path)?;
+        let texture = shown.render.as_ref().map(|r| &r.texture).or(shown.preview.as_ref())?;
+        let frame = fit(texture.size_vec2(), area);
         let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        ui.painter().image(texture.id(), fit(texture.size_vec2(), area), uv, egui::Color32::WHITE);
+        ui.painter().image(texture.id(), frame, uv, egui::Color32::WHITE);
+        #[cfg(test)]
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("loupe frame"), frame));
+        if !picking {
+            return None;
+        }
+        let response = ui.interact(frame, ui.id().with("white balance selector"), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::Crosshair);
+        let at = response.clicked().then(|| response.interact_pointer_pos()).flatten()?;
+        Some([f64::from((at.x - frame.left()) / frame.width()), f64::from((at.y - frame.top()) / frame.height())])
     }
 }
