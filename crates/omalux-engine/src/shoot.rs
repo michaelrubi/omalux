@@ -23,6 +23,23 @@ pub type Rating = i32;
 
 pub const PICK: Rating = 1;
 
+/// A mark changing on one frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Change {
+    pub index: usize,
+    pub was: Rating,
+    pub now: Rating,
+}
+
+/// "★★★" for three stars; a pick is one star, and "✕" a reject.
+pub fn stars(rating: Rating) -> String {
+    match rating {
+        REJECT => "✕".to_owned(),
+        stars if stars > 0 => "★".repeat(stars as usize),
+        _ => String::new(),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
     pub path: PathBuf,
@@ -217,6 +234,20 @@ impl Shoot {
             }
         }
     }
+
+    /// Mark the current frame. None if it already had that mark.
+    pub fn mark(&mut self, rating: Rating) -> Option<Change> {
+        let frame = &mut self.frames[self.current];
+        let was = std::mem::replace(&mut frame.rating, rating);
+        (was != rating).then_some(Change { index: self.current, was, now: rating })
+    }
+
+    /// Put back what a sidecar holds after writing to it failed.
+    pub fn restore(&mut self, path: &Path, rating: Rating) {
+        if let Some(frame) = self.frames.iter_mut().find(|f| f.path == path) {
+            frame.rating = rating;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -284,5 +315,33 @@ mod tests {
         assert!(s.go_to_path(Path::new("/shoot/DSC00001.ARW")));
         assert_eq!((s.current(), s.filter()), (1, Filter::All));
         assert!(!s.go_to_path(Path::new("/shoot/DSC00009.ARW")));
+    }
+
+    #[test]
+    fn marking_changes_the_current_frames_rating_and_reports_it() {
+        let mut s = shoot(&[1, 0]);
+        assert_eq!(s.mark(3), Some(Change { index: 0, was: 1, now: 3 }));
+        assert_eq!(s.frame().rating, 3);
+        assert_eq!(s.mark(3), None, "already 3 stars");
+        assert_eq!(s.mark(REJECT), Some(Change { index: 0, was: 3, now: REJECT }));
+        assert_eq!(s.frame().rating, REJECT);
+    }
+
+    #[test]
+    fn restoring_puts_back_the_rating_of_a_path() {
+        let mut s = shoot(&[1, 0]);
+        s.mark(5);
+        s.restore(Path::new("/shoot/DSC00000.ARW"), 1);
+        assert_eq!(s.frame().rating, 1);
+        s.restore(Path::new("/shoot/nonexistent.ARW"), 3);
+        assert_eq!(s.frame().rating, 1);
+    }
+
+    #[test]
+    fn stars_formats_ratings() {
+        assert_eq!(stars(3), "★★★");
+        assert_eq!(stars(PICK), "★");
+        assert_eq!(stars(0), "");
+        assert_eq!(stars(REJECT), "✕");
     }
 }

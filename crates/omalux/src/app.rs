@@ -3,7 +3,7 @@
 //! Its patterns (a `Command` a key or a script runs, `build` for tests,
 //! the `Harness`) are Omacull's.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
@@ -11,8 +11,9 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use egui::{Align2, FontId, RichText, Ui};
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::SourceInfo;
+use omalux_engine::disk::{Disk, Mark, Problem};
 use omalux_engine::edit::{self, History};
-use omalux_engine::shoot::{Filter, Shoot, Step};
+use omalux_engine::shoot::{Filter, Shoot, Step, stars};
 use omalux_engine::sidecar;
 
 use crate::commands::Command;
@@ -108,6 +109,9 @@ pub struct App {
     /// The edits their sidecars held, of frames not decoded yet: read
     /// when a frame is first wanted.
     saved: HashMap<PathBuf, Option<Arc<DevelopSettings>>>,
+    /// Frames whose sidecar holds an edit this OmaLux can't read (a newer
+    /// one's, say): shown as fresh raws and never written over.
+    unreadable: HashSet<PathBuf>,
     /// The frames edited or looked at this session, each with its steps
     /// to undo.
     edits: HashMap<PathBuf, Editing>,
@@ -126,6 +130,7 @@ pub struct App {
     /// The last thing to tell the user, and whether it's a problem.
     message: Option<(String, bool)>,
     title: String,
+    disk: Disk,
 }
 
 impl App {
@@ -162,8 +167,10 @@ impl App {
         }
         let wake = ctx.clone();
         let renderer = Renderer::new(Decoder::raw(), gpu, move || wake.request_repaint());
+        let wake = ctx.clone();
+        let disk = Disk::new(move || wake.request_repaint());
         let paths = Paths { state: hotkeys::config_dir().map(|dir| dir.join("state.toml")) };
-        let mut app = Self::build(theme, theme::watch(ctx.clone()), config, warnings, script, renderer, paths);
+        let mut app = Self::build(theme, theme::watch(ctx.clone()), config, warnings, script, renderer, disk, paths);
         if let Some(path) = open {
             app.open(path);
         }
@@ -177,6 +184,7 @@ impl App {
         warnings: Vec<String>,
         script: VecDeque<Command>,
         renderer: Renderer,
+        disk: Disk,
         paths: Paths,
     ) -> Self {
         let state = paths.state.map_or_else(State::default, State::load_from);
@@ -191,6 +199,7 @@ impl App {
             renderer,
             loupe: Loupe::default(),
             saved: HashMap::new(),
+            unreadable: HashSet::new(),
             edits: HashMap::new(),
             selected: develop::sliders().position(|spec| spec.id == "light.exposure").unwrap_or(0),
             dragging: false,
@@ -200,6 +209,7 @@ impl App {
             exporting: None,
             message: None,
             title: String::new(),
+            disk,
         }
     }
 
@@ -238,6 +248,7 @@ impl App {
                 self.message = (!unread.is_empty()).then(|| (format!("Couldn't read {}", unread.join("; ")), true));
                 self.shoot = Some(shoot);
                 self.saved.clear();
+                self.unreadable.clear();
                 self.edits.clear();
                 self.leave();
             }
@@ -252,6 +263,7 @@ impl App {
         self.shoot = None;
         self.message = None;
         self.saved.clear();
+        self.unreadable.clear();
         self.edits.clear();
         self.leave();
     }
@@ -410,6 +422,42 @@ impl App {
             Command::DecreaseMore => self.nudge(-5.0),
             Command::WhiteBalance => self.selector = !self.selector && self.shoot.is_some(),
             Command::BeforeAfter => self.before = !self.before && self.shoot.is_some(),
+            Command::Pick
+            | Command::Reject
+            | Command::Unmark
+            | Command::Star1
+            | Command::Star2
+            | Command::Star3
+            | Command::Star4
+            | Command::Star5 => {
+                if let Some(rating) = command.rating()
+                    && let Some(shoot) = &mut self.shoot
+                    && let Some(change) = shoot.mark(rating)
+                {
+                    self.disk.write(Mark {
+                        path: shoot.frame().path.clone(),
+                        rating: change.now,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Marks that didn't reach their sidecar are put back as they are on
+    /// disk; an edit that didn't is said.
+    fn disk_problems(&mut self) {
+        let problems: Vec<Problem> = self.disk.problems().collect();
+        for problem in problems {
+            let text = match problem {
+                Problem::Sidecar { path, error, on_disk } => {
+                    if let Some(shoot) = &mut self.shoot {
+                        shoot.restore(&path, on_disk);
+                    }
+                    format!("Couldn't mark {}: {error}", file_name(&path))
+                }
+                Problem::Edit { path, error } => format!("Couldn't save {}: {error}", file_name(&sidecar::path_for(&path))),
+            };
+            self.message = Some((text, true));
         }
     }
 
@@ -441,18 +489,29 @@ impl App {
     /// raw has been decoded.
     fn edit(&mut self, change: impl FnOnce(&mut History, &SourceInfo) -> bool) {
         let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
+        if self.locked(&path) {
+            return;
+        }
         if self.edits.get_mut(&path).is_some_and(|editing| editing.edit(change)) {
             self.save(&path);
         }
     }
 
-    /// Write a frame's edit to its sidecar.
+    /// Whether a frame's edit is one this OmaLux can't read, and so mustn't
+    /// change: says so if it is.
+    fn locked(&mut self, path: &Path) -> bool {
+        let locked = self.unreadable.contains(path);
+        if locked {
+            let text = format!("{}'s edit can't be read by this OmaLux, so it's left as it is", file_name(path));
+            self.message = Some((text, true));
+        }
+        locked
+    }
+
+    /// Send a frame's edit to its sidecar, on the disk thread.
     fn save(&mut self, path: &Path) {
         let Some(editing) = self.edits.get(path) else { return };
-        let saved = sidecar::Edit::new(editing.history.settings().clone());
-        if let Err(e) = sidecar::update(path, |xmp| sidecar::with_edit(xmp, &saved)) {
-            self.message = Some((format!("Couldn't save {}: {e}", file_name(&sidecar::path_for(path))), true));
-        }
+        self.disk.save(path.to_path_buf(), sidecar::Edit::new(editing.history.settings().clone()));
     }
 
     /// Move the selected slider by `steps` nudges.
@@ -470,6 +529,9 @@ impl App {
     /// in the loupe and one step once it ends, saved then.
     fn panel(&mut self, out: PanelOut) {
         let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
+        if out != PanelOut::default() && self.locked(&path) {
+            return;
+        }
         let Some(editing) = self.edits.get_mut(&path) else { return };
         let mut save = false;
         if out.as_shot {
@@ -515,6 +577,7 @@ impl App {
         self.finish_picking();
         self.develop(ctx);
         self.finish_exporting();
+        self.disk_problems();
         if !ctx.egui_wants_keyboard_input() {
             for command in Command::pressed(ctx) {
                 self.run(command, ctx);
@@ -575,12 +638,10 @@ impl App {
             Ok(saved) => saved.flatten(),
             Err(e) => {
                 self.message = Some((format!("Couldn't read the edit in {}: {e}", file_name(&sidecar::path_for(path))), true));
+                self.unreadable.insert(path.to_path_buf());
                 None
             }
         };
-        if saved.as_ref().is_some_and(|edit| edit.process > sidecar::PROCESS_VERSION) {
-            self.message = Some((format!("{} was edited with a newer OmaLux and may look different here", file_name(path)), true));
-        }
         let settings = saved.map(|edit| Arc::new(edit.settings));
         self.saved.insert(path.to_path_buf(), settings.clone());
         settings
@@ -697,7 +758,7 @@ impl App {
     }
 }
 
-/// The current frame, its place among the frames shown, and the filter.
+/// The current frame, its mark, its place among the frames shown, and the filter.
 fn status(shoot: &Shoot) -> String {
     let shown = shoot.shown_indices();
     let place = shown.iter().position(|&i| i == shoot.current()).map_or(0, |p| p + 1);
@@ -705,7 +766,9 @@ fn status(shoot: &Shoot) -> String {
         Filter::Picks => format!("{} picks of {} frames", shown.len(), shoot.frames().len()),
         Filter::All => format!("{} frames", shown.len()),
     };
-    format!("{}   {place} / {of}", shoot.frame().name())
+    let mark = stars(shoot.frame().rating);
+    let mark = if mark.is_empty() { String::new() } else { format!("{mark}   ") };
+    format!("{}   {mark}{place} / {of}", shoot.frame().name())
 }
 
 fn file_name(path: &Path) -> String {
@@ -745,6 +808,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         self.remember_place();
+        self.disk.finish();
     }
 }
 
@@ -771,7 +835,9 @@ mod tests {
             let (_tx, rx) = channel();
             let ctx = egui::Context::default();
             let renderer = Renderer::new(crate::render::tests::decoder(), false, || {});
-            let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect(), renderer, paths);
+            let wake = ctx.clone();
+            let disk = Disk::new(move || wake.request_repaint());
+            let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect(), renderer, disk, paths);
             Self { ctx, app, time: 0.0 }
         }
 
@@ -832,6 +898,7 @@ mod tests {
 
         /// The edit in the current frame's sidecar.
         fn saved(&self) -> Option<DevelopSettings> {
+            self.app.disk.flush();
             let path = &self.app.shoot.as_ref().unwrap().frame().path;
             sidecar::edit(&sidecar::read(path).unwrap()?).unwrap().map(|edit| edit.settings)
         }
@@ -941,7 +1008,7 @@ mod tests {
         assert_eq!(h.app.shoot.as_ref().map(Shoot::dir), Some(dir.as_path()));
         let name = dir.file_name().unwrap().to_string_lossy();
         assert_eq!(titles(&h.frame(vec![])), [format!("{name} — OmaLux")]);
-        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   1 / 2 picks of 3 frames");
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★   1 / 2 picks of 3 frames");
 
         // A raw the filter leaves out is opened all the same.
         h.app.open(dir.join("DSC00002.ARW"));
@@ -1098,6 +1165,40 @@ mod tests {
         h.press(Modifiers::NONE, Key::Backslash);
         h.press(Modifiers::NONE, Key::ArrowRight);
         assert!(!h.app.before);
+    }
+
+    #[test]
+    fn an_edit_from_a_newer_omalux_is_shown_fresh_and_never_written_over() {
+        let folder = Folder::new("newer", &[1]);
+        let raw = folder.0.join("DSC00001.ARW");
+        let mut edited = DevelopSettings::for_raw(5200.0, 3.0);
+        edited.light.exposure = 0.7;
+        sidecar::update(&raw, |xmp| {
+            let with = sidecar::with_edit(xmp, &sidecar::Edit::new(edited.clone()))?;
+            Ok(with.replace(">1</omalux:processVersion>", ">99</omalux:processVersion>"))
+        })
+        .unwrap();
+        let newer = std::fs::read_to_string(sidecar::path_for(&raw)).unwrap();
+        assert!(newer.contains(">99<"));
+
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        assert!(h.app.message.as_ref().is_some_and(|(text, _)| text.contains("newer OmaLux")), "{:?}", h.app.message);
+        assert_eq!(h.settings().light.exposure, 0.0, "shown as a fresh raw");
+        h.press(Modifiers::NONE, Key::Equals);
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::R);
+        let track = h.track("light.contrast");
+        h.pointer(track.center() + egui::vec2(20.0, 0.0), Some(true));
+        h.pointer(track.center() + egui::vec2(20.0, 0.0), Some(false));
+        assert_eq!((h.settings().light.exposure, h.settings().light.contrast), (0.0, 0.0), "and not changed");
+        assert!(h.app.message.as_ref().is_some_and(|(text, _)| text.contains("left as it is")), "{:?}", h.app.message);
+        h.app.disk.flush();
+        assert_eq!(std::fs::read_to_string(sidecar::path_for(&raw)).unwrap(), newer);
+        // The mark is still the frame's to change.
+        h.press(Modifiers::NONE, Key::Num3);
+        h.app.disk.flush();
+        assert_eq!(std::fs::read_to_string(sidecar::path_for(&raw)).unwrap(), newer.replace("xmp:Rating=\"1\"", "xmp:Rating=\"3\""));
     }
 
     #[test]
@@ -1348,5 +1449,100 @@ mod tests {
         let target = folder.0.join("omalux/DSC00001.tif");
         assert!(target.exists(), "TIFF was not exported");
         assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exported 1 of 1 to omalux", false)));
+    }
+
+    #[test]
+    fn keys_mark_and_reach_the_sidecars() {
+        let folder = Folder::new("keys-mark", &[0, 0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   1 / 2 frames");
+
+        // P marks pick
+        h.press(Modifiers::NONE, Key::P);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★   1 / 2 frames");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 1);
+
+        // 3 marks 3 stars
+        h.press(Modifiers::NONE, Key::Num3);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★★★   1 / 2 frames");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 3);
+
+        // X marks reject
+        h.press(Modifiers::NONE, Key::X);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ✕   1 / 2 frames");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, sidecar::REJECT);
+
+        // 0 unmarks
+        h.press(Modifiers::NONE, Key::Num0);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   1 / 2 frames");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0);
+
+        // Mark 4 stars and check it reached the sidecar
+        h.press(Modifiers::NONE, Key::Num4);
+        h.app.disk.flush();
+        let raw1 = folder.0.join("DSC00001.ARW");
+        let xmp = sidecar::read(&raw1).unwrap().unwrap();
+        assert_eq!(sidecar::rating(&xmp).unwrap(), Some(4));
+    }
+
+    #[test]
+    fn a_failed_write_is_taken_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = Folder::new("failed-write", &[2]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 2);
+
+        // Make directory read-only so sidecar::update fails to create tmp file
+        std::fs::set_permissions(&folder.0, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Marking 5 stars will fail on disk
+        h.press(Modifiers::NONE, Key::Num5);
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 5);
+        h.app.disk.flush();
+        // A new frame lets step() collect disk problems
+        h.frame(vec![]);
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 2);
+        assert!(h.app.message.as_ref().is_some_and(|(msg, prob)| *prob && msg.contains("Couldn't mark DSC00001.ARW")));
+
+        // Restore directory permissions for cleanup
+        std::fs::set_permissions(&folder.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn a_pick_unmarked_while_the_picks_are_shown_stays_until_the_cursor_leaves_it() {
+        let folder = Folder::new("unmark-shown", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert_eq!(current(&h), "DSC00001.ARW");
+        assert_eq!(h.app.shoot.as_ref().unwrap().filter(), Filter::Picks);
+        assert!(h.app.shoot.as_ref().unwrap().shown(0));
+        assert!(h.app.shoot.as_ref().unwrap().shown(1));
+
+        // Unmark DSC00001
+        h.press(Modifiers::NONE, Key::U);
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0);
+        // It stays in the filmstrip while current
+        assert_eq!(current(&h), "DSC00001.ARW");
+        assert!(h.app.shoot.as_ref().unwrap().shown(0));
+
+        // Stepping to the next frame moves the cursor
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert_eq!(current(&h), "DSC00002.ARW");
+        // Now that the cursor left it, it's no longer shown
+        assert!(!h.app.shoot.as_ref().unwrap().shown(0));
+    }
+
+    #[test]
+    fn marks_are_flushed_on_exit() {
+        let folder = Folder::new("on-exit", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.press(Modifiers::NONE, Key::P);
+        eframe::App::on_exit(&mut h.app);
+        let raw = folder.0.join("DSC00001.ARW");
+        let xmp = sidecar::read(&raw).unwrap().unwrap();
+        assert_eq!(sidecar::rating(&xmp).unwrap(), Some(1));
     }
 }
