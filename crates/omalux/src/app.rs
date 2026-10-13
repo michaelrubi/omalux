@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use egui::{Align2, FontId, RichText, Ui};
+use lightcraft_codecs::display::DisplayProfile;
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::SourceInfo;
 use omalux_engine::disk::{Disk, Mark, Problem};
@@ -22,6 +23,7 @@ use crate::develop::{self, PanelOut};
 use crate::filmstrip::{Filmstrip, STRIP_HEIGHT};
 use crate::hotkeys::{self, format_shortcut};
 use crate::loupe::{Loupe, News};
+use crate::monitor;
 use crate::render::{Decoder, Renderer, View, Wanted};
 use crate::state::{Place, State};
 use crate::theme::{self, Theme};
@@ -59,6 +61,8 @@ pub struct Paths {
     pub state: Option<PathBuf>,
     /// Where the filmstrip's thumbnails are cached; nowhere in tests.
     pub thumbnails: Option<PathBuf>,
+    /// Where chosen monitor profiles are kept (`monitors.toml`); nowhere in tests.
+    pub monitors: Option<PathBuf>,
 }
 
 /// The threads behind the window: a test's renderer decodes what the
@@ -143,6 +147,8 @@ pub struct App {
     /// The clipping warnings are on: blown highlights and crushed
     /// shadows are coloured in the loupe.
     clipping: bool,
+    watch: monitor::Watch,
+    pub display: Option<Arc<DisplayProfile>>,
 }
 
 impl App {
@@ -181,7 +187,11 @@ impl App {
         let renderer = Renderer::new(Decoder::raw(), gpu, move || wake.request_repaint());
         let wake = ctx.clone();
         let disk = Disk::new(move || wake.request_repaint());
-        let paths = Paths { state: hotkeys::config_dir().map(|dir| dir.join("state.toml")), thumbnails: omalux_engine::thumbs::default_dir() };
+        let paths = Paths {
+            state: hotkeys::config_dir().map(|dir| dir.join("state.toml")),
+            thumbnails: omalux_engine::thumbs::default_dir(),
+            monitors: hotkeys::config_dir().map(|dir| dir.join("monitors.toml")),
+        };
         let mut app = Self::build(theme, theme::watch(ctx.clone()), config, warnings, script, Workers { renderer, disk }, paths);
         if let Some(path) = open {
             app.open(path);
@@ -199,6 +209,11 @@ impl App {
         paths: Paths,
     ) -> Self {
         let state = paths.state.map_or_else(State::default, State::load_from);
+        let watch = paths.monitors.map_or_else(monitor::Watch::off, |dir| monitor::Watch::new(Some(dir)));
+        let display = watch.profile().cloned();
+        let mut filmstrip = Filmstrip::new(paths.thumbnails);
+        filmstrip.set_display(display.clone());
+        workers.renderer.set_display(display.clone());
         Self {
             theme,
             theme_rx,
@@ -221,8 +236,10 @@ impl App {
             message: None,
             title: String::new(),
             disk: workers.disk,
-            filmstrip: Filmstrip::new(paths.thumbnails),
+            filmstrip,
             clipping: false,
+            watch,
+            display,
         }
     }
 
@@ -603,6 +620,13 @@ impl App {
             ctx.set_visuals(theme.visuals());
             self.theme = theme;
         }
+        if self.watch.check(ctx) {
+            self.display = self.watch.profile().cloned();
+            self.filmstrip.set_display(self.display.clone());
+            self.renderer.set_display(self.display.clone());
+            // What the loupe holds was for the other monitor.
+            self.loupe.retain(|_| false);
+        }
         self.finish_picking();
         self.develop(ctx);
         self.finish_exporting();
@@ -882,7 +906,7 @@ mod tests {
 
     impl Harness {
         fn new(script: &[Command]) -> Self {
-            Self::with_paths(script, Paths { state: None, thumbnails: None })
+            Self::with_paths(script, Paths { state: None, thumbnails: None, monitors: None })
         }
 
         fn with_paths(script: &[Command], paths: Paths) -> Self {
@@ -1703,5 +1727,12 @@ mod tests {
         h.press(Modifiers::NONE, Key::J);
         h.settle();
         assert!(!clipping(&h));
+    }
+
+    #[test]
+    fn the_app_runs_with_no_monitor_found() {
+        let mut h = Harness::new(&[]);
+        h.frame(vec![]);
+        assert!(h.app.display.is_none());
     }
 }

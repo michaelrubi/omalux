@@ -23,8 +23,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+use lightcraft_codecs::display::DisplayProfile;
 use lightcraft_develop::DevelopSettings;
-use lightcraft_pipeline::{PixelWindow, Quality, RenderRequest, SourceInfo, StageCache};
+use lightcraft_pipeline::{DisplaySpace, PixelWindow, Quality, RenderRequest, SourceInfo, StageCache};
 use lightcraft_raster::{Histogram, Rgb32f, Rgba8};
 
 /// The long edge the loupe's source is decoded to: enough for the loupe on
@@ -136,6 +137,39 @@ pub enum Done {
     Failed { path: PathBuf, error: String },
 }
 
+/// The monitor's colours: its profile, and the same as the pipeline's
+/// target, so frames are rendered into its primaries.
+#[derive(Clone)]
+struct Display {
+    profile: Arc<DisplayProfile>,
+    space: DisplaySpace,
+}
+
+impl Display {
+    /// A camera's JPEG, in sRGB, as the monitor's device values.
+    fn preview(&self, image: &mut Rgba8) {
+        if let Err(e) = self.profile.from_srgb(image) {
+            log::warn!("display profile: {e}");
+        }
+    }
+
+    /// A render into the monitor's primaries as its device values, in
+    /// place; and its histogram, which is of the frame in sRGB whatever
+    /// it's shown on. As Lightcraft's `finish_render` (`engine/src/display.rs`
+    /// at `701f78e`): only the pixels the histogram reads are converted.
+    fn finish(&self, image: &mut Rgba8) -> Option<Histogram> {
+        let step = ((image.len() as f64 / 1_000_000.0).sqrt().ceil() as usize).max(1);
+        let rows = (0..image.height).step_by(step);
+        let sample: Vec<[u8; 4]> = rows.flat_map(|y| (0..image.width).step_by(step).map(move |x| (x, y))).map(|(x, y)| image.get(x, y)).collect();
+        let sample = Rgba8 { width: image.width.div_ceil(step), height: image.height.div_ceil(step), data: sample };
+        let histogram = self.profile.to_srgb(&sample).map(|srgb| Histogram::of_srgb8(&srgb));
+        if let Err(e) = self.profile.correct(image) {
+            log::warn!("display profile: {e}");
+        }
+        histogram.map_err(|e| log::warn!("display profile: {e}")).ok()
+    }
+}
+
 /// A window to render at 100%: whose, from what, with which stages and
 /// settings, and which window.
 type ZoomJob = (PathBuf, Arc<Source>, Arc<StageCache>, Arc<DevelopSettings>, ZoomKey);
@@ -169,6 +203,8 @@ struct State {
     full_failed: Option<PathBuf>,
     /// The last window rendered at 100%.
     zoomed: Option<ZoomKey>,
+    /// The monitor's colours, where they aren't sRGB's.
+    display: Option<Display>,
     done: Vec<Done>,
     quit: bool,
 }
@@ -234,6 +270,28 @@ impl Renderer {
         }
         state.wanted = frames;
         state.view = view;
+        drop(state);
+        self.shared.changed.notify_all();
+    }
+
+    /// Show everything in this monitor's colours from now on (`None`:
+    /// sRGB). What was decoded and rendered for another is done again.
+    pub fn set_display(&self, profile: Option<Arc<DisplayProfile>>) {
+        let display = profile.and_then(|profile| {
+            let space = DisplaySpace::new(profile.to_rec2020, profile.id);
+            if space.is_none() {
+                log::warn!("display profile {}: its primaries can't be used", profile.description);
+            }
+            Some(Display { space: space?, profile })
+        });
+        let mut state = self.shared.lock();
+        if state.display.as_ref().map(|d| d.profile.id) == display.as_ref().map(|d| d.profile.id) {
+            return;
+        }
+        state.display = display;
+        state.sources.clear();
+        state.rendered.clear();
+        (state.stages, state.full, state.zoomed) = (None, None, None);
         drop(state);
         self.shared.changed.notify_all();
     }
@@ -407,8 +465,11 @@ impl Shared {
             };
             let bytes = std::fs::read(&path).map_err(|e| e.to_string());
             if let Ok(bytes) = &bytes
-                && let Some(preview) = (self.decoder.preview)(bytes)
+                && let Some(mut preview) = (self.decoder.preview)(bytes)
             {
+                if let Some(display) = self.lock().display.clone() {
+                    display.preview(&mut preview);
+                }
                 let image = color_image(&preview);
                 self.finish(&path, |state, wanted| {
                     if wanted {
@@ -455,9 +516,10 @@ impl Shared {
             // window at 100% is in), then that window, then the neighbours.
             let zoom = if fit.as_ref().is_some_and(|(frame, ..)| Some(&frame.path) == current.as_ref()) { None } else { state.next_zoom() };
             state.rendering = true;
+            let display = state.display.clone();
             if let Some((path, source, stages, settings, key)) = zoom {
                 state.zoomed = Some(key);
-                return Some((path, source, settings, Some(stages), Job::Zoom(key)));
+                return Some((path, source, settings, Some(stages), display, Job::Zoom(key)));
             }
             let Some((frame, source, settings, key)) = fit else {
                 state.rendering = false;
@@ -475,9 +537,9 @@ impl Shared {
             });
             // Claimed: not picked again while it's being rendered.
             state.rendered.insert(frame.path.clone(), key);
-            Some((frame.path, source, settings, stages, Job::Fit(key)))
+            Some((frame.path, source, settings, stages, display, Job::Fit(key)))
         };
-        while let Some((path, source, settings, stages, job)) = self.next(claim) {
+        while let Some((path, source, settings, stages, display, job)) = self.next(claim) {
             let (draft, clipping, request) = match job {
                 Job::Fit(key) => (key.draft, key.clipping, RenderRequest::fit(key.size.0, key.size.1)),
                 Job::Zoom(key) => {
@@ -486,7 +548,8 @@ impl Shared {
                     (key.draft, key.clipping, request)
                 }
             };
-            let request = RenderRequest { quality: if draft { Quality::Draft } else { Quality::Full }, ..request };
+            let quality = if draft { Quality::Draft } else { Quality::Full };
+            let request = RenderRequest { quality, display: display.as_ref().map(|d| d.space), ..request };
             let started = Instant::now();
             let on_gpu = self.gpu.then(|| lightcraft_gpu::try_render(&source.image, &source.info, &settings, &request, stages.as_deref()).ok()).flatten();
             let mut rendered = on_gpu.unwrap_or_else(|| match &stages {
@@ -496,6 +559,11 @@ impl Shared {
             let ms = started.elapsed().as_secs_f64() * 1e3;
             if clipping {
                 crate::histogram::clipping_overlay(&mut rendered.image);
+            }
+            // On a monitor with a profile, the render is in its primaries:
+            // take it to its device values, and the histogram back to sRGB.
+            if let Some(histogram) = display.as_ref().and_then(|d| d.finish(&mut rendered.image)) {
+                rendered.histogram = histogram;
             }
             let image = color_image(&rendered.image);
             self.finish(&path, |state, wanted| {
@@ -679,6 +747,40 @@ pub(crate) mod tests {
         renderer.want(frames(&["b.ARW", "a.ARW"]), view);
         assert!(settle(&renderer).is_empty());
         assert!(renderer.shared.lock().full.is_none());
+    }
+
+    #[test]
+    fn on_a_monitor_with_a_profile_frames_are_rendered_in_its_colours() {
+        // A wide-gamut monitor: Display P3's primaries, as a profile.
+        let p3 = lightcraft_codecs::icc::write_matrix_trc(&lightcraft_color::DISPLAY_P3, &lightcraft_codecs::Trc::Srgb);
+        let profile = Arc::new(DisplayProfile::from_icc(&p3).unwrap());
+        let folder = Folder::new("display", &[("a.ARW", "")]);
+        let renderer = Renderer::new(decoder(), false, || {});
+        let view = View { size: (24, 16), ..View::default() };
+        let mut settings = DevelopSettings::for_raw(5200.0, 3.0);
+        settings.wb.temp = 9000.0;
+        settings.wb.mode = lightcraft_develop::WbMode::Custom;
+        let frames = || vec![Wanted { path: folder.0.join("a.ARW"), settings: Some(Arc::new(settings.clone())) }];
+        let pixels = |done: &[Done]| {
+            let preview = done.iter().find_map(|d| if let Done::Preview { image, .. } = d { Some(image.pixels[0]) } else { None });
+            let render = done.iter().find_map(|d| if let Done::Rendered { image, histogram, .. } = d { Some((image.pixels[0], histogram.total)) } else { None });
+            (preview, render)
+        };
+        renderer.want(frames(), view);
+        let (srgb_preview, srgb_render) = pixels(&settle(&renderer));
+
+        // The same frame again for the monitor: the JPEG's and the render's colours are
+        // the monitor's (a warm grey has less red in P3's device values), the histogram still the frame's.
+        renderer.set_display(Some(profile.clone()));
+        let (preview, render) = pixels(&settle(&renderer));
+        assert_ne!(preview, srgb_preview);
+        let (srgb, p3) = (srgb_render.unwrap(), render.unwrap());
+        assert!(p3.0.r() < srgb.0.r() && p3.1 == srgb.1, "{p3:?} {srgb:?}");
+        // Set again, nothing is done again; back to sRGB, it is.
+        renderer.set_display(Some(profile));
+        assert!(settle(&renderer).is_empty());
+        renderer.set_display(None);
+        assert_eq!(pixels(&settle(&renderer)), (srgb_preview, srgb_render));
     }
 
     #[test]

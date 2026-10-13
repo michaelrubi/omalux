@@ -209,8 +209,13 @@ binary.
   two frames and the previous one are developed ahead. Thumbnails are
   the embedded previews, cached in `~/.cache/omalux/thumbnails/`; the
   developed frame in the filmstrip (DESIGN.md's "Pipeline") isn't there
-  yet. Nothing is converted to the monitor's profile yet: *left*, with
-  Omacull's monitor watching to port.
+  yet. Everything shown is in the monitor's colours where
+  Hyprland takes it for sRGB and it isn't: which monitor the window is
+  on comes from `hyprctl`, its profile from
+  `~/.config/omalux/monitors.toml` or else its EDID (Omacull's monitor
+  watching, ported); frames are rendered into its primaries, and the
+  embedded previews and thumbnails converted. The laptop's panel
+  (eDP-2) is found and gets its EDID's profile.
 - Marks: P, X, U, 0 to 5, into `xmp:Rating` as Omacull writes them.
   *Done,* on a disk thread; a mark that can't be written is taken back.
 - The render worker pool (lifted from Lightcraft's pattern): drafts while

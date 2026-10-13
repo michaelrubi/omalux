@@ -559,7 +559,10 @@ crates/
 - **One colour engine** (decided in M0): `moxcms`, Lightcraft's.
   Lightcraft's `DisplayProfile` converts to a monitor's ICC profile and
   its pipeline renders into a display's primaries; OmaLux adds Omacull's
-  EDID reading for monitors without a profile. On three monitor EDIDs it
+  EDID reading for monitors without a profile, and its way of knowing
+  which monitor the window is on (`hyprctl`), with a profile chosen by
+  hand in `~/.config/omalux/monitors.toml`. The histogram stays the
+  frame's in sRGB whatever it's shown on. On three monitor EDIDs it
   agrees with Omacull's Little CMS 2 within 1 LSB on every one of 4096
   sRGB colours, and Omapix's Little CMS 2 reads the TIFFs' profiles.
 - **Config:** `~/.config/omalux/config.toml`, written on first run with

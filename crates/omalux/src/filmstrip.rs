@@ -9,10 +9,12 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use egui::{
     Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Ui, Vec2, pos2, vec2,
 };
+use lightcraft_codecs::display::DisplayProfile;
 use omalux_engine::shoot::{self, Rating, Shoot, stars};
 use omalux_engine::sidecar;
 use omalux_engine::thumbs::{Loaded, Loader};
@@ -41,16 +43,34 @@ pub struct Filmstrip {
     pub cells: Vec<(usize, Rect)>,
     /// Where thumbnails are cached; nowhere in tests.
     cache: Option<PathBuf>,
+    display: Option<Arc<DisplayProfile>>,
 }
 
 impl Filmstrip {
     pub fn new(cache: Option<PathBuf>) -> Self {
-        Self { loader: None, thumbnails: HashMap::new(), wanted: Vec::new(), cells: Vec::new(), cache }
+        Self { loader: None, thumbnails: HashMap::new(), wanted: Vec::new(), cells: Vec::new(), cache, display: None }
     }
 
     /// Forget the shoot: another is opened, or this one closed.
     pub fn reset(&mut self) {
+        let display = self.display.clone();
         *self = Self::new(self.cache.take());
+        self.display = display;
+    }
+
+    /// Show thumbnails in another monitor's colours. Dropped and loaded
+    /// again when the profile changes.
+    pub fn set_display(&mut self, display: Option<Arc<DisplayProfile>>) {
+        let changed = match (&self.display, &display) {
+            (Some(a), Some(b)) => a.id != b.id,
+            (None, None) => false,
+            _ => true,
+        };
+        if changed {
+            self.thumbnails.clear();
+            self.wanted.clear();
+            self.display = display;
+        }
     }
 
     /// Start loading the open shoot's thumbnails, if that hasn't begun.
@@ -72,7 +92,10 @@ impl Filmstrip {
         for Loaded { index, result } in loader.loaded() {
             if near(&index) {
                 match result {
-                    Ok(image) => {
+                    Ok(mut image) => {
+                        if let Some(display) = &self.display {
+                            let _ = display.from_srgb(&mut image);
+                        }
                         let pixels = egui::ColorImage::from_rgba_unmultiplied(
                             [image.width, image.height],
                             image.data.as_flattened(),
@@ -181,4 +204,62 @@ fn label(painter: &egui::Painter, at: Pos2, align: Align2, text: String, colour:
     let rect = align.anchor_size(at, galley.size()).expand2(vec2(size * 0.35, size * 0.15));
     painter.rect_filled(rect, size * 0.2, Color32::from_black_alpha(170));
     painter.galley(align.anchor_size(at, galley.size()).min, galley, colour);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lightcraft_raster::Rgba8;
+
+    #[test]
+    fn thumbnails_converted_with_profile_and_left_alone_without() {
+        // P3 EDID
+        let mut edid = vec![0u8; 128];
+        edid[..8].copy_from_slice(&[0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0]);
+        edid[23] = 120;
+        edid[27..35].copy_from_slice(&[174, 82, 61, 185, 36, 13, 80, 84]);
+        let p3 = omalux_engine::color::display(None, Some(&edid)).unwrap().unwrap();
+
+        let mut img_srgb = Rgba8::filled(1, 1, [255, 0, 0, 255]);
+        let mut img_p3 = img_srgb.clone();
+
+        // Without profile (sRGB): pixels stay as they are
+        let display_none: Option<&DisplayProfile> = None;
+        if let Some(display) = display_none {
+            let _ = display.from_srgb(&mut img_srgb);
+        }
+        assert_eq!(img_srgb.data[0], [255, 0, 0, 255]);
+
+        // With profile: pixels are converted (P3 red drive is lower)
+        p3.from_srgb(&mut img_p3).unwrap();
+        assert!(img_p3.data[0][0] < 240 && img_p3.data[0][1] > 20, "{:?}", img_p3.data[0]);
+    }
+
+    #[test]
+    fn profile_change_drops_thumbnails_and_wanted() {
+        let mut edid = vec![0u8; 128];
+        edid[..8].copy_from_slice(&[0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0]);
+        edid[23] = 120;
+        edid[27..35].copy_from_slice(&[174, 82, 61, 185, 36, 13, 80, 84]);
+        let p3 = Arc::new(omalux_engine::color::display(None, Some(&edid)).unwrap().unwrap());
+
+        let mut strip = Filmstrip::new(None);
+        strip.wanted = vec![0, 1, 2];
+        strip.thumbnails.insert(0, Slot::Failed);
+
+        // Setting same profile (None -> None) changes nothing
+        strip.set_display(None);
+        assert_eq!(strip.wanted, vec![0, 1, 2]);
+        assert_eq!(strip.thumbnails.len(), 1);
+
+        // Setting a new profile drops thumbnails and wanted
+        strip.set_display(Some(p3.clone()));
+        assert!(strip.wanted.is_empty());
+        assert!(strip.thumbnails.is_empty());
+
+        // Setting the same profile again does not drop
+        strip.wanted = vec![3];
+        strip.set_display(Some(p3));
+        assert_eq!(strip.wanted, vec![3]);
+    }
 }
