@@ -3,6 +3,8 @@
 //! go through this list, so they can't disagree. As in Omacull.
 
 use egui::{Key, KeyboardShortcut, Modifiers};
+use omalux_engine::shoot::{PICK, Rating};
+use omalux_engine::sidecar::REJECT;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
@@ -14,13 +16,36 @@ pub enum Command {
     Last,
     /// The picks, or everything.
     Filter,
+    Reject,
+    Unmark,
+    Pick,
+    Star1,
+    Star2,
+    Star3,
+    Star4,
+    Star5,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
 
 impl Command {
-    pub const ALL: &[Command] =
-        &[Command::Quit, Command::Open, Command::Previous, Command::Next, Command::First, Command::Last, Command::Filter];
+    pub const ALL: &[Command] = &[
+        Command::Quit,
+        Command::Open,
+        Command::Previous,
+        Command::Next,
+        Command::First,
+        Command::Last,
+        Command::Filter,
+        Command::Reject,
+        Command::Unmark,
+        Command::Pick,
+        Command::Star1,
+        Command::Star2,
+        Command::Star3,
+        Command::Star4,
+        Command::Star5,
+    ];
 
     /// Look a command up by its name in code, e.g. "Open".
     pub fn from_name(name: &str) -> Option<Command> {
@@ -30,8 +55,23 @@ impl Command {
     /// Every command with a shortcut, most modifiers first. egui matches
     /// Ctrl+Z even when Shift is also held, so Ctrl+Shift+Z has to be
     /// checked before it.
-    pub const KEYBOARD_ORDER: &[Command] =
-        &[Command::Quit, Command::Open, Command::Filter, Command::Previous, Command::Next, Command::First, Command::Last];
+    pub const KEYBOARD_ORDER: &[Command] = &[
+        Command::Quit,
+        Command::Open,
+        Command::Filter,
+        Command::Previous,
+        Command::Next,
+        Command::First,
+        Command::Last,
+        Command::Reject,
+        Command::Unmark,
+        Command::Pick,
+        Command::Star1,
+        Command::Star2,
+        Command::Star3,
+        Command::Star4,
+        Command::Star5,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -42,6 +82,14 @@ impl Command {
             Command::First => "First Frame",
             Command::Last => "Last Frame",
             Command::Filter => "Show the Picks or Everything",
+            Command::Reject => "Reject",
+            Command::Unmark => "Unmark",
+            Command::Pick => "Pick",
+            Command::Star1 => "1 Star",
+            Command::Star2 => "2 Stars",
+            Command::Star3 => "3 Stars",
+            Command::Star4 => "4 Stars",
+            Command::Star5 => "5 Stars",
         }
     }
 
@@ -56,7 +104,30 @@ impl Command {
             Command::Last => s(Modifiers::NONE, Key::End),
             // Lightroom's Enable Filters.
             Command::Filter => s(CMD, Key::L),
+            Command::Reject => s(Modifiers::NONE, Key::X),
+            Command::Unmark => s(Modifiers::NONE, Key::U),
+            Command::Pick => s(Modifiers::NONE, Key::P),
+            Command::Star1 => s(Modifiers::NONE, Key::Num1),
+            Command::Star2 => s(Modifiers::NONE, Key::Num2),
+            Command::Star3 => s(Modifiers::NONE, Key::Num3),
+            Command::Star4 => s(Modifiers::NONE, Key::Num4),
+            Command::Star5 => s(Modifiers::NONE, Key::Num5),
         }
+    }
+
+    /// The mark a marking command makes.
+    pub fn rating(self) -> Option<Rating> {
+        Some(match self {
+            Command::Reject => REJECT,
+            Command::Unmark => 0,
+            Command::Pick => PICK,
+            Command::Star1 => 1,
+            Command::Star2 => 2,
+            Command::Star3 => 3,
+            Command::Star4 => 4,
+            Command::Star5 => 5,
+            _ => return None,
+        })
     }
 
     /// Commands whose shortcut was pressed this frame, consuming the keys.
@@ -67,12 +138,21 @@ impl Command {
     /// [`Self::pressed`] with these shortcuts.
     pub fn pressed_with(ctx: &egui::Context, hotkeys: &crate::hotkeys::Hotkeys) -> Vec<Command> {
         ctx.input_mut(|i| {
-            hotkeys
+            let mut pressed: Vec<Command> = hotkeys
                 .keyboard_order()
                 .iter()
                 .copied()
                 .filter(|&c| hotkeys.command(c).is_some_and(|s| i.consume_shortcut(&s)))
-                .collect()
+                .collect();
+            // 0 is no stars, as in Bridge and Lightroom, unless it was
+            // given to another command (which has consumed it by now).
+            if hotkeys.command(Command::Unmark).is_some()
+                && i.consume_key(Modifiers::NONE, Key::Num0)
+                && !pressed.contains(&Command::Unmark)
+            {
+                pressed.push(Command::Unmark);
+            }
+            pressed
         })
     }
 }
@@ -120,5 +200,22 @@ mod tests {
         assert_eq!(press(&ctx, Modifiers::NONE, Key::ArrowRight), [Command::Next]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::Home), [Command::First]);
         assert_eq!(press(&ctx, CMD, Key::L), [Command::Filter]);
+    }
+
+    #[test]
+    fn marks_and_steps_are_single_keys() {
+        let ctx = egui::Context::default();
+        let none = Modifiers::NONE;
+        assert_eq!(press(&ctx, none, Key::X), [Command::Reject]);
+        assert_eq!(press(&ctx, none, Key::U), [Command::Unmark]);
+        assert_eq!(press(&ctx, none, Key::Num0), [Command::Unmark]);
+        assert_eq!(press(&ctx, none, Key::P), [Command::Pick]);
+        assert_eq!(press(&ctx, none, Key::Num1), [Command::Star1]);
+        assert_eq!(press(&ctx, none, Key::Num2), [Command::Star2]);
+        assert_eq!(press(&ctx, none, Key::Num3), [Command::Star3]);
+        assert_eq!(press(&ctx, none, Key::Num4), [Command::Star4]);
+        assert_eq!(press(&ctx, none, Key::Num5), [Command::Star5]);
+        assert_eq!(press(&ctx, none, Key::ArrowRight), [Command::Next]);
+        assert_eq!(press(&ctx, none, Key::Home), [Command::First]);
     }
 }

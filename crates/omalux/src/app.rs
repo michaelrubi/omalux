@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use egui::{Align2, FontId, RichText, Ui};
-use omalux_engine::shoot::{Filter, Shoot, Step};
+use omalux_engine::disk::{Disk, Mark, Problem};
+use omalux_engine::shoot::{Filter, Shoot, Step, stars};
 
 use crate::commands::Command;
 use crate::hotkeys::{self, format_shortcut};
@@ -33,6 +34,7 @@ pub struct App {
     /// The last thing to tell the user, and whether it's a problem.
     message: Option<(String, bool)>,
     title: String,
+    disk: Disk,
 }
 
 impl App {
@@ -60,14 +62,22 @@ impl App {
                 parsed
             })
             .collect();
-        let mut app = Self::build(theme, theme::watch(ctx.clone()), warnings, script);
+        let wake = ctx.clone();
+        let disk = Disk::new(move || wake.request_repaint());
+        let mut app = Self::build(theme, theme::watch(ctx.clone()), warnings, script, disk);
         if let Some(path) = open {
             app.open(path);
         }
         app
     }
 
-    fn build(theme: Theme, theme_rx: Receiver<Theme>, warnings: Vec<String>, script: VecDeque<Command>) -> Self {
+    fn build(
+        theme: Theme,
+        theme_rx: Receiver<Theme>,
+        warnings: Vec<String>,
+        script: VecDeque<Command>,
+        disk: Disk,
+    ) -> Self {
         Self {
             theme,
             theme_rx,
@@ -77,6 +87,7 @@ impl App {
             picking: None,
             message: None,
             title: String::new(),
+            disk,
         }
     }
 
@@ -142,6 +153,41 @@ impl App {
                     shoot.set_filter(if shoot.filter() == Filter::Picks { Filter::All } else { Filter::Picks });
                 }
             }
+            Command::Pick
+            | Command::Reject
+            | Command::Unmark
+            | Command::Star1
+            | Command::Star2
+            | Command::Star3
+            | Command::Star4
+            | Command::Star5 => {
+                if let Some(rating) = command.rating()
+                    && let Some(shoot) = &mut self.shoot
+                    && let Some(change) = shoot.mark(rating)
+                {
+                    self.disk.write(Mark {
+                        path: shoot.frame().path.clone(),
+                        rating: change.now,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Marks that didn't reach their sidecar are put back as they are on
+    /// disk.
+    fn disk_problems(&mut self) {
+        let problems: Vec<Problem> = self.disk.problems().collect();
+        for problem in problems {
+            let text = match problem {
+                Problem::Sidecar { path, error, on_disk } => {
+                    if let Some(shoot) = &mut self.shoot {
+                        shoot.restore(&path, on_disk);
+                    }
+                    format!("Couldn't mark {}: {error}", file_name(&path))
+                }
+            };
+            self.message = Some((text, true));
         }
     }
 
@@ -167,6 +213,7 @@ impl App {
             self.theme = theme;
         }
         self.finish_picking();
+        self.disk_problems();
         if !ctx.egui_wants_keyboard_input() {
             for command in Command::pressed(ctx) {
                 self.run(command, ctx);
@@ -241,7 +288,7 @@ impl App {
     }
 }
 
-/// The current frame, its place among the frames shown, and the filter.
+/// The current frame, its mark, its place among the frames shown, and the filter.
 fn status(shoot: &Shoot) -> String {
     let shown = shoot.shown_indices();
     let place = shown.iter().position(|&i| i == shoot.current()).map_or(0, |p| p + 1);
@@ -249,7 +296,9 @@ fn status(shoot: &Shoot) -> String {
         Filter::Picks => format!("{} picks of {} frames", shown.len(), shoot.frames().len()),
         Filter::All => format!("{} frames", shown.len()),
     };
-    format!("{}   {place} / {of}", shoot.frame().name())
+    let mark = stars(shoot.frame().rating);
+    let mark = if mark.is_empty() { String::new() } else { format!("{mark}   ") };
+    format!("{}   {mark}{place} / {of}", shoot.frame().name())
 }
 
 fn file_name(path: &Path) -> String {
@@ -263,6 +312,10 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
+    }
+
+    fn on_exit(&mut self) {
+        self.disk.finish();
     }
 }
 
@@ -284,7 +337,9 @@ mod tests {
         fn new(script: &[Command]) -> Self {
             let (_tx, rx) = channel();
             let ctx = egui::Context::default();
-            let app = App::build(Theme::default(), rx, Vec::new(), script.iter().copied().collect());
+            let wake = ctx.clone();
+            let disk = Disk::new(move || wake.request_repaint());
+            let app = App::build(Theme::default(), rx, Vec::new(), script.iter().copied().collect(), disk);
             Self { ctx, app, time: 0.0 }
         }
 
@@ -380,7 +435,7 @@ mod tests {
         assert_eq!(h.app.shoot.as_ref().map(Shoot::dir), Some(dir.as_path()));
         let name = dir.file_name().unwrap().to_string_lossy();
         assert_eq!(titles(&h.frame(vec![])), [format!("{name} — OmaLux")]);
-        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   1 / 2 picks of 3 frames");
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★   1 / 2 picks of 3 frames");
 
         // A raw the filter leaves out is opened all the same.
         h.app.open(dir.join("DSC00002.ARW"));
@@ -408,5 +463,100 @@ mod tests {
         assert_eq!(current(&h), "DSC00001.ARW");
         h.press(Modifiers::NONE, Key::End);
         assert_eq!(current(&h), "DSC00004.ARW");
+    }
+
+    #[test]
+    fn keys_mark_and_reach_the_sidecars() {
+        let folder = Folder::new("keys-mark", &[0, 0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   1 / 2 frames");
+
+        // P marks pick
+        h.press(Modifiers::NONE, Key::P);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★   1 / 2 frames");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 1);
+
+        // 3 marks 3 stars
+        h.press(Modifiers::NONE, Key::Num3);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★★★   1 / 2 frames");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 3);
+
+        // X marks reject
+        h.press(Modifiers::NONE, Key::X);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ✕   1 / 2 frames");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, sidecar::REJECT);
+
+        // 0 unmarks
+        h.press(Modifiers::NONE, Key::Num0);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   1 / 2 frames");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0);
+
+        // Mark 4 stars and check it reached the sidecar
+        h.press(Modifiers::NONE, Key::Num4);
+        h.app.disk.flush();
+        let raw1 = folder.0.join("DSC00001.ARW");
+        let xmp = sidecar::read(&raw1).unwrap().unwrap();
+        assert_eq!(sidecar::rating(&xmp).unwrap(), Some(4));
+    }
+
+    #[test]
+    fn a_failed_write_is_taken_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = Folder::new("failed-write", &[2]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 2);
+
+        // Make directory read-only so sidecar::update fails to create tmp file
+        std::fs::set_permissions(&folder.0, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Marking 5 stars will fail on disk
+        h.press(Modifiers::NONE, Key::Num5);
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 5);
+        h.app.disk.flush();
+        // A new frame lets step() collect disk problems
+        h.frame(vec![]);
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 2);
+        assert!(h.app.message.as_ref().is_some_and(|(msg, prob)| *prob && msg.contains("Couldn't mark DSC00001.ARW")));
+
+        // Restore directory permissions for cleanup
+        std::fs::set_permissions(&folder.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn a_pick_unmarked_while_the_picks_are_shown_stays_until_the_cursor_leaves_it() {
+        let folder = Folder::new("unmark-shown", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert_eq!(current(&h), "DSC00001.ARW");
+        assert_eq!(h.app.shoot.as_ref().unwrap().filter(), Filter::Picks);
+        assert!(h.app.shoot.as_ref().unwrap().shown(0));
+        assert!(h.app.shoot.as_ref().unwrap().shown(1));
+
+        // Unmark DSC00001
+        h.press(Modifiers::NONE, Key::U);
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0);
+        // It stays in the filmstrip while current
+        assert_eq!(current(&h), "DSC00001.ARW");
+        assert!(h.app.shoot.as_ref().unwrap().shown(0));
+
+        // Stepping to the next frame moves the cursor
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert_eq!(current(&h), "DSC00002.ARW");
+        // Now that the cursor left it, it's no longer shown
+        assert!(!h.app.shoot.as_ref().unwrap().shown(0));
+    }
+
+    #[test]
+    fn marks_are_flushed_on_exit() {
+        let folder = Folder::new("on-exit", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.press(Modifiers::NONE, Key::P);
+        eframe::App::on_exit(&mut h.app);
+        let raw = folder.0.join("DSC00001.ARW");
+        let xmp = sidecar::read(&raw).unwrap().unwrap();
+        assert_eq!(sidecar::rating(&xmp).unwrap(), Some(1));
     }
 }
