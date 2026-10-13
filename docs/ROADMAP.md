@@ -8,8 +8,9 @@ Status: scoped on 2026-10-08, and re-planned the same day on
 "Built on Lightcraft" in DESIGN.md). M0 started 2026-10-12: Lightcraft
 vendored, the workspace and an empty window up, and the spikes run on
 the laptop and Michael's frames. On 2026-10-13 what was left of it moved
-to the milestones that need it first; M0 closes on one question, why the
-GPU loupe's times jump between frames (see M0).
+to the milestones that need it first, and M0 closed on its last question,
+why the GPU loupe's times jump between frames: the GPU's power states
+(see M0). M1 started the same day.
 
 Each milestone ends with something Michael can use on a real shoot. M1 is
 the point where OmaLux replaces darktable for a clean, low-ISO shoot;
@@ -34,7 +35,7 @@ Each item says where it stands. "On the laptop" is what needs Michael's
 frames, the RTX 4070 or Lightroom: the tools for it are built, and the
 commands are in AGENTS.md.
 
-M0 closes on the GPU loupe's times (below), since M1's loupe is built on
+M0 closed on the GPU loupe's times (below), since M1's loupe is built on
 them. The rest moved on 2026-10-13 to the milestone that needs it first,
 since M1 needs none of it: the reference set, the 100% comparison and
 the DRO test to M4, the lens comparison to M5, the denoise comparison to
@@ -100,11 +101,21 @@ M6, and the look of the handoff in Omapix to M1's export.
   loupe is 17 to 163 ms on the GPU from frame to frame with no fallback
   to the CPU (29 to 68 on the CPU), and a second run put the slow ones on
   other frames, so it isn't the frames' content; still to explain. The
-  export is about 1.9 s. *Open, and what M0 closes on:* the per-stage
-  GPU times of a fast frame and a slow one (`LIGHTCRAFT_PROFILE=1` on
-  the `spike` example, in `~/spike-profile.txt` on the laptop), and
-  whether the laptop was on battery; if it's the GPU's power states, the
-  loupe needs to keep it awake or prepare frames ahead. Found meanwhile:
+  export is about 1.9 s. *Done (2026-10-13):* it's the GPU's power
+  states. The `idle` example renders the loupe back to back and after
+  the GPU has sat idle: 23 ms back to back (17 for a portrait frame,
+  which fits the loupe with fewer pixels, the other part of the spread),
+  the same after 200 ms idle, and 100 to 250 ms after a second or more,
+  for about a second of steady work, on mains with the performance
+  profile. `spike` decodes each frame on the CPU first, so its GPU
+  renders start cold. Something small for the GPU every 100 ms doesn't
+  hold it up (the driver goes by load), so it can't be kept awake
+  cheaply. A drag isn't touched: drafts from a cold GPU are 3 to 4 ms
+  (9 to 10 on the CPU). So M1's loupe doesn't count on a render in 60
+  ms after a pause: stepping shows the embedded preview at once and
+  the neighbours' renders are prepared ahead, as DESIGN.md has it, and
+  the first render after a pause comes in up to a quarter of a second
+  later. Found meanwhile:
   the GPU writes 8-bit output only, so the 16-bit export renders on the
   CPU (what `spike` times), and Lightcraft refuses software adapters, so
   it can't be tried without a real GPU.

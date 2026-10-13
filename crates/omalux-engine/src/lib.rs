@@ -13,5 +13,6 @@ pub mod compare;
 pub mod export;
 pub mod lens_profiles;
 pub mod raw;
+pub mod shoot;
 pub mod sidecar;
 pub mod sony;

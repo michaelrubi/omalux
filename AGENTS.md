@@ -2,7 +2,7 @@
 
 OmaLux is a fast, keyboard-first raw developer for Omarchy: the picks of a culled folder of raws in, 16-bit TIFFs ready to retouch out. It is the second stage of Michael's workflow and replaces darktable in it: cull in Omacull (`~/dev/omacull`), develop in OmaLux, retouch in Omapix (`~/dev/omapix`), export.
 
-**Status:** scoped on 2026-10-08 and re-planned on [Lightcraft](https://github.com/storytold/lightcraft)'s engine. M0 nearly done: Lightcraft vendored at `701f78e`, the workspace and an empty themed window (seen on Hyprland), the sidecar, the 16-bit export and the colour engine settled, and the `spike` and `lens` examples run on Michael's frames on the laptop (the camera match's gap there is DRO's shadow lift, as DESIGN.md expected). M0 closes on why the GPU loupe's times jump between frames; then M1. What M0 left moved to M4, M5 and M6 (see ROADMAP.md). raw.pixls.us is blocked in the cloud sessions, so real raws only go through the code on the laptop. Read [docs/DESIGN.md](docs/DESIGN.md) for scope and architecture and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones and the "Later" list.
+**Status:** scoped on 2026-10-08 and re-planned on [Lightcraft](https://github.com/storytold/lightcraft)'s engine. M0 is done: Lightcraft vendored at `701f78e`, the workspace and an empty themed window (seen on Hyprland), the sidecar, the 16-bit export and the colour engine settled, and the `spike` and `lens` examples run on Michael's frames on the laptop (the camera match's gap there is DRO's shadow lift, as DESIGN.md expected). The GPU loupe's times jump because the GPU clocks down after half a second idle (the `idle` example), so the loupe prepares frames ahead and doesn't count on a cold render. M1 is under way. What M0 left moved to M4, M5 and M6 (see ROADMAP.md). raw.pixls.us is blocked in the cloud sessions, so real raws only go through the code on the laptop. Read [docs/DESIGN.md](docs/DESIGN.md) for scope and architecture and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones and the "Later" list.
 
 ## Principles
 
@@ -45,9 +45,9 @@ make install
 # Run the app, with a shoot (or a raw in it)
 cargo run --release -p omalux -- path/to/shoot
 
-# Drive the UI without a keyboard: comma-separated Command names (only
-# Open and Quit so far)
-OMALUX_SCRIPT="Quit" cargo run --release -p omalux
+# Drive the UI without a keyboard: comma-separated Command names (see
+# crates/omalux/src/commands.rs)
+OMALUX_SCRIPT="Next,Filter,Quit" cargo run --release -p omalux -- path/to/shoot
 
 # raw.pixls.us's CC0 ILCE-7M3 raws into vendor/lightcraft/corpus/raw
 # (gitignored; SHA-256 checked), for the corpus tests
@@ -58,6 +58,11 @@ scripts/fetch-corpus.sh
 # a drag on the CPU and GPU, the 16-bit export; --out writes the TIFFs and
 # PNGs to compare at 100% (OMALUX_GPU=0 for the CPU only)
 cargo run --release -p omalux-engine --example spike -- path/to/shoot --out /tmp/spike
+
+# M0's GPU question: the loupe rendered back to back and after the GPU has
+# sat idle, and a drag from cold (OMALUX_HEARTBEAT=100 gives the GPU
+# something small to do every 100 ms meanwhile)
+cargo run --release -p omalux-engine --example idle -- path/to/DSC01234.ARW
 
 # M0's lens spike: lensfun's match and Sony's table per frame, and renders
 # with lensfun's correction and without (OMALUX_LENSFUN_DIR, else

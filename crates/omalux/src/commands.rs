@@ -8,12 +8,19 @@ use egui::{Key, KeyboardShortcut, Modifiers};
 pub enum Command {
     Quit,
     Open,
+    Previous,
+    Next,
+    First,
+    Last,
+    /// The picks, or everything.
+    Filter,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
 
 impl Command {
-    pub const ALL: &[Command] = &[Command::Quit, Command::Open];
+    pub const ALL: &[Command] =
+        &[Command::Quit, Command::Open, Command::Previous, Command::Next, Command::First, Command::Last, Command::Filter];
 
     /// Look a command up by its name in code, e.g. "Open".
     pub fn from_name(name: &str) -> Option<Command> {
@@ -23,12 +30,18 @@ impl Command {
     /// Every command with a shortcut, most modifiers first. egui matches
     /// Ctrl+Z even when Shift is also held, so Ctrl+Shift+Z has to be
     /// checked before it.
-    pub const KEYBOARD_ORDER: &[Command] = &[Command::Quit, Command::Open];
+    pub const KEYBOARD_ORDER: &[Command] =
+        &[Command::Quit, Command::Open, Command::Filter, Command::Previous, Command::Next, Command::First, Command::Last];
 
     pub fn label(self) -> &'static str {
         match self {
             Command::Quit => "Quit",
             Command::Open => "Open Folder…",
+            Command::Previous => "Previous Frame",
+            Command::Next => "Next Frame",
+            Command::First => "First Frame",
+            Command::Last => "Last Frame",
+            Command::Filter => "Show the Picks or Everything",
         }
     }
 
@@ -37,6 +50,12 @@ impl Command {
         match self {
             Command::Quit => s(CMD, Key::Q),
             Command::Open => s(CMD, Key::O),
+            Command::Previous => s(Modifiers::NONE, Key::ArrowLeft),
+            Command::Next => s(Modifiers::NONE, Key::ArrowRight),
+            Command::First => s(Modifiers::NONE, Key::Home),
+            Command::Last => s(Modifiers::NONE, Key::End),
+            // Lightroom's Enable Filters.
+            Command::Filter => s(CMD, Key::L),
         }
     }
 
@@ -98,5 +117,8 @@ mod tests {
         assert_eq!(press(&ctx, CMD, Key::Q), [Command::Quit]);
         assert_eq!(press(&ctx, CMD, Key::O), [Command::Open]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::O), []);
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::ArrowRight), [Command::Next]);
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::Home), [Command::First]);
+        assert_eq!(press(&ctx, CMD, Key::L), [Command::Filter]);
     }
 }

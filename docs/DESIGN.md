@@ -152,6 +152,7 @@ Omapix's are.
 | Key | Action |
 |-----|--------|
 | ← → Home End | Step through the frames the filter shows |
+| Ctrl+L | The picks, or everything (Lightroom's Enable Filters) |
 | P X U 0–5 | Pick, reject, unmark, stars |
 | `\` | Before/after |
 | Z | 100% zoom (tap to toggle, hold for a look) |
