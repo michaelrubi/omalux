@@ -8,6 +8,7 @@
 
 pub mod camera_preview;
 pub mod camera_profiles;
+pub mod color;
 pub mod compare;
 pub mod export;
 pub mod lens_profiles;

@@ -22,11 +22,16 @@ pub struct Linear16 {
     pub samples: Vec<u16>,
 }
 
+/// The size `src` exports at under `settings`: the crop at the source's
+/// own resolution.
+pub fn full_size(src: &Rgb32f, settings: &DevelopSettings) -> (usize, usize) {
+    let (w, h) = lightcraft_pipeline::native_output_size(src.width, src.height, settings);
+    ((w.round() as usize).max(1), (h.round() as usize).max(1))
+}
+
 /// Render `src` at full size for export, on the CPU pipeline.
 pub fn render(src: &Rgb32f, info: &SourceInfo, settings: &DevelopSettings) -> Result<Linear16, String> {
-    // the crop at the source's own resolution
-    let (w, h) = lightcraft_pipeline::native_output_size(src.width, src.height, settings);
-    let (w, h) = ((w.round() as usize).max(1), (h.round() as usize).max(1));
+    let (w, h) = full_size(src, settings);
     let request = RenderRequest { space: OutputSpace::ProPhoto, depth: OutputDepth::F32Linear, ..RenderRequest::fit(w, h) };
     let rendered = lightcraft_pipeline::render(src, info, settings, &request);
     let deep = rendered.deep.ok_or("the pipeline made no linear render")?;

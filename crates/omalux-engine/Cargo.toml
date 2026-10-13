@@ -25,3 +25,5 @@ web-time = { workspace = true }
 
 [dev-dependencies]
 tiff = { workspace = true }
+# The spike measures the GPU pipeline too; the library itself never uses it.
+lightcraft-gpu = { workspace = true }
