@@ -139,6 +139,13 @@ fn spike(path: &Path, out: Option<&Path>, gpu: bool, totals: &mut Totals) -> Res
         .map(|(r, s)| format!("{} {:.2} / {:.2} ({:.0} %)", r.label(), s.mean, s.p95, s.share * 100.0))
         .collect();
     println!("  ΔE2000 mean / p95 against the camera's JPEG: {}", line.join(", "));
+    // The middle half of each side: the camera's JPEG has Sony's distortion and
+    // shading corrections in it and this render has none, which costs most at the edges.
+    let (w, h) = (reference.width, reference.height);
+    let centre = |i: &Rgba8| i.crop(w / 4, h / 4, w / 2, h / 2);
+    if let Some((_, s)) = compare::compare(&centre(&matched), &centre(&reference))?.into_iter().find(|(r, _)| *r == Region::All) {
+        println!("  ΔE2000 mean / p95 in the centre (the middle half of each side): {:.2} / {:.2}", s.mean, s.p95);
+    }
     totals.de.push(Region::ALL.map(|r| summaries.iter().find(|(s, _)| *s == r).map_or(f64::NAN, |(_, s)| if s.share > 0.0 { s.mean } else { f64::NAN })));
 
     // The loupe and a drag, CPU then GPU.
