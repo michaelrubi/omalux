@@ -1,6 +1,10 @@
 //! A frame's edit while its shoot is open: its settings, and the steps to
 //! undo and redo. The history lives in memory for the session; what's
 //! saved is the settings, in the sidecar ([`crate::sidecar`]).
+//!
+//! Each frame has its own steps, but a paste reaches several frames at
+//! once and is one step to undo: its step on each frame carries the
+//! paste's number, so whoever undoes it on one can undo it on the rest.
 
 use lightcraft_develop::{DevelopSettings, WbMode, controls};
 use lightcraft_pipeline::SourceInfo;
@@ -15,15 +19,48 @@ pub struct History {
     settings: DevelopSettings,
     /// The settings before the change under way (a drag), while one is.
     before: Option<DevelopSettings>,
-    undo: Vec<DevelopSettings>,
-    redo: Vec<DevelopSettings>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
+}
+
+/// The settings a step goes back (or forward) to, and the paste it was
+/// part of, if it was.
+type Step = (DevelopSettings, Option<u64>);
+
+/// A white balance as shot shows the frame's own Kelvin and tint, whatever
+/// frame it was pasted from, and whatever stood in for them before the
+/// raw was decoded.
+fn own_as_shot(settings: &mut DevelopSettings, fresh: &DevelopSettings) {
+    if settings.wb.mode == WbMode::AsShot {
+        (settings.wb.temp, settings.wb.tint) = (fresh.wb.temp, fresh.wb.tint);
+    }
 }
 
 impl History {
     /// A frame opened: with the edit its sidecar held, or as a fresh raw.
     pub fn new(fresh: DevelopSettings, saved: Option<DevelopSettings>) -> Self {
-        let settings = saved.unwrap_or_else(|| fresh.clone());
+        let mut settings = saved.unwrap_or_else(|| fresh.clone());
+        own_as_shot(&mut settings, &fresh);
         Self { fresh, settings, before: None, undo: Vec::new(), redo: Vec::new() }
+    }
+
+    /// A frame pasted onto before its raw has been decoded: what its white
+    /// balance was as shot isn't known until [`Self::decoded`], which
+    /// changes nothing about how it renders (as shot is read from the
+    /// raw), only the numbers shown.
+    pub fn unseen(saved: Option<DevelopSettings>) -> Self {
+        let wb = DevelopSettings::default().wb;
+        Self::new(DevelopSettings::for_raw(wb.temp, wb.tint), saved)
+    }
+
+    /// The raw of a frame begun [`Self::unseen`] has been decoded: these
+    /// are its fresh settings.
+    pub fn decoded(&mut self, fresh: DevelopSettings) {
+        let steps = self.undo.iter_mut().chain(&mut self.redo).map(|(settings, _)| settings);
+        for settings in steps.chain(&mut self.before).chain([&mut self.settings]) {
+            own_as_shot(settings, &fresh);
+        }
+        self.fresh = fresh;
     }
 
     pub fn settings(&self) -> &DevelopSettings {
@@ -58,12 +95,41 @@ impl History {
     pub fn commit(&mut self) -> bool {
         match self.before.take() {
             Some(before) if before != self.settings => {
-                self.undo.push(before);
+                self.undo.push((before, None));
                 self.redo.clear();
                 true
             }
             _ => false,
         }
+    }
+
+    /// Paste `pasted` over the settings, as a step of paste number
+    /// `paste`. It's a step even if it changed nothing here, so the frame
+    /// a paste was made from can undo it for the frames it reached. True
+    /// if it changed the settings.
+    pub fn paste(&mut self, paste: u64, pasted: DevelopSettings) -> bool {
+        self.commit();
+        let before = std::mem::replace(&mut self.settings, pasted);
+        let changed = before != self.settings;
+        self.undo.push((before, Some(paste)));
+        self.redo.clear();
+        changed
+    }
+
+    /// The paste the next undo would take back, if it's one.
+    pub fn undoes(&self) -> Option<u64> {
+        if self.before.as_ref().is_some_and(|before| *before != self.settings) {
+            return None;
+        }
+        self.undo.last().and_then(|(_, paste)| *paste)
+    }
+
+    /// The paste the next redo would make again, if it's one.
+    pub fn redoes(&self) -> Option<u64> {
+        if self.before.as_ref().is_some_and(|before| *before != self.settings) {
+            return None;
+        }
+        self.redo.last().and_then(|(_, paste)| *paste)
     }
 
     /// Change the settings in one step.
@@ -76,15 +142,15 @@ impl History {
     /// Take back the last step. False if there was none.
     pub fn undo(&mut self) -> bool {
         self.commit();
-        let Some(was) = self.undo.pop() else { return false };
-        self.redo.push(std::mem::replace(&mut self.settings, was));
+        let Some((was, paste)) = self.undo.pop() else { return false };
+        self.redo.push((std::mem::replace(&mut self.settings, was), paste));
         true
     }
 
     pub fn redo(&mut self) -> bool {
         self.commit();
-        let Some(next) = self.redo.pop() else { return false };
-        self.undo.push(std::mem::replace(&mut self.settings, next));
+        let Some((next, paste)) = self.redo.pop() else { return false };
+        self.undo.push((std::mem::replace(&mut self.settings, next), paste));
         true
     }
 
@@ -255,5 +321,57 @@ mod tests {
         assert!(h.undo() && !h.edited());
         assert!(h.redo());
         assert_eq!(h.settings().light.exposure, 0.5);
+    }
+
+    #[test]
+    fn a_paste_is_a_step_that_knows_its_paste_even_where_it_changed_nothing() {
+        let mut h = history();
+        h.set(|s| s.light.exposure = 0.5);
+        assert_eq!(h.undoes(), None);
+        let mut pasted = h.settings().clone();
+        pasted.light.contrast = 20.0;
+        assert!(h.paste(7, pasted.clone()));
+        assert_eq!((h.undoes(), h.redoes()), (Some(7), None));
+        assert!(h.undo());
+        assert_eq!((h.settings().light.contrast, h.undoes(), h.redoes()), (0.0, None, Some(7)));
+        assert!(h.redo());
+        assert_eq!((h.settings(), h.undoes()), (&pasted, Some(7)));
+
+        // Onto the frame it was copied from: nothing changes, and it's a step all the same.
+        assert!(!h.paste(8, pasted.clone()));
+        assert_eq!(h.undoes(), Some(8));
+        assert!(h.undo());
+        assert_eq!((h.settings(), h.undoes()), (&pasted, Some(7)));
+
+        // An edit since is what's undone first.
+        h.set(|s| s.light.shadows = 10.0);
+        assert_eq!((h.undoes(), h.redoes()), (None, None));
+        h.change(|s| s.light.shadows = 20.0);
+        assert_eq!(h.undoes(), None, "so is a drag under way");
+    }
+
+    #[test]
+    fn a_frame_pasted_onto_unseen_gets_its_own_as_shot_once_decoded() {
+        let mut h = History::unseen(None);
+        assert!(!h.edited());
+        let mut pasted = h.settings().clone();
+        pasted.light.exposure = 1.0;
+        assert!(h.paste(1, pasted));
+        h.decoded(DevelopSettings::for_raw(5200.0, 3.0));
+        assert_eq!((h.settings().wb.temp, h.settings().wb.tint, h.settings().light.exposure), (5200.0, 3.0, 1.0));
+        assert!(h.undo());
+        assert!(!h.edited(), "what it was before the paste is a fresh raw");
+        assert_eq!(h.settings(), &DevelopSettings::for_raw(5200.0, 3.0));
+
+        // A custom white balance is its own, and stays.
+        let mut custom = DevelopSettings::for_raw(0.0, 0.0);
+        (custom.wb.mode, custom.wb.temp) = (WbMode::Custom, 4000.0);
+        let mut h = History::unseen(Some(custom.clone()));
+        h.decoded(DevelopSettings::for_raw(5200.0, 3.0));
+        assert_eq!(h.settings(), &custom);
+
+        // An edit saved as shot with another frame's numbers opens with its own.
+        let h = History::new(DevelopSettings::for_raw(5200.0, 3.0), Some(DevelopSettings::for_raw(6100.0, -2.0)));
+        assert!(!h.edited());
     }
 }
