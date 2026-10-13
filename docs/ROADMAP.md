@@ -78,7 +78,11 @@ commands are in AGENTS.md.
   under Hyprland and Vulkan: slider update and loupe times against the
   16 ms and 60 ms budgets, full-size export time, VRAM. That its CPU and
   GPU results agree there too. *On the laptop,* in the `spike` example.
-  Found meanwhile: the GPU writes 8-bit output only, so the 16-bit export
+  First runs (2026-10-13, ISO 100 picks, FE 85): a drag is 1 to 4 ms
+  on the GPU (9.5 on the CPU), and the two agree to 1 level in 255; the
+  loupe is 17 to 163 ms on the GPU from frame to frame with no fallback
+  to the CPU (29 to 68 on the CPU), which is still to explain; the
+  export is about 1.9 s. Found meanwhile: the GPU writes 8-bit output only, so the 16-bit export
   renders on the CPU (what `spike` times), and Lightcraft refuses
   software adapters, so it can't be tried without a real GPU.
 - **Lens data.** lensfun's corrections for the FE 35, 50 and 85 f/1.8
@@ -97,7 +101,10 @@ commands are in AGENTS.md.
   lens on every frame and gives it distortion and vignetting; Sony's
   table is there on every frame and changes from frame to frame at the
   same focal length and aperture, so it follows the focus distance,
-  which lensfun's model doesn't. The FE 35 and 50 are still to run.
+  which lensfun's model doesn't. Over all four of his shoots (1326
+  frames): 1118 on the FE 85 (169 at f/1.8), 208 on the FE 35, all at
+  f/4 to f/8 (so the FE 35's missing f/1.8 vignetting hasn't come up
+  yet), and none on the FE 50. The FE 35 is still to render.
 - **Raw denoise.** RawNIND's Bayer model against RawForge's TreeNet (Light
   and Heavy) on ISO 3200 to 6400 frames, and both against Lightroom's
   Denoise: how they look at 100%, how long they take, how much VRAM.

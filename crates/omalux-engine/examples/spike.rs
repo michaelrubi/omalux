@@ -148,7 +148,7 @@ fn spike(path: &Path, out: Option<&Path>, gpu: bool, totals: &mut Totals) -> Res
     let line: Vec<String> = summaries
         .iter()
         .filter(|(_, s)| s.share > 0.0)
-        .map(|(r, s)| format!("{} {:.2} / {:.2} ({:.0} %)", r.label(), s.mean, s.p95, s.share * 100.0))
+        .map(|(r, s)| format!("{} {:.2} / {:.2} ({:.0} %, L* {:+.1})", r.label(), s.mean, s.p95, s.share * 100.0, s.lightness))
         .collect();
     println!("  ΔE2000 mean / p95 against the camera's JPEG: {}", line.join(", "));
     // The middle half of each side: the camera's JPEG has Sony's distortion and
@@ -156,7 +156,7 @@ fn spike(path: &Path, out: Option<&Path>, gpu: bool, totals: &mut Totals) -> Res
     let (w, h) = (reference.width, reference.height);
     let centre = |i: &Rgba8| i.crop(w / 4, h / 4, w / 2, h / 2);
     if let Some((_, s)) = compare::compare(&centre(&matched), &centre(&reference))?.into_iter().find(|(r, _)| *r == Region::All) {
-        println!("  ΔE2000 mean / p95 in the centre (the middle half of each side): {:.2} / {:.2}", s.mean, s.p95);
+        println!("  ΔE2000 mean / p95 in the centre (the middle half of each side): {:.2} / {:.2} (L* {:+.1})", s.mean, s.p95, s.lightness);
         totals.centre.push(s.mean);
     }
     totals.de.push(Region::ALL.map(|r| summaries.iter().find(|(s, _)| *s == r).map_or(f64::NAN, |(_, s)| if s.share > 0.0 { s.mean } else { f64::NAN })));

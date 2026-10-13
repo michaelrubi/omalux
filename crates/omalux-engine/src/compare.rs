@@ -112,6 +112,9 @@ pub struct Summary {
     pub share: f64,
     pub mean: f64,
     pub p95: f64,
+    /// Mean L* of the image less the reference's: below zero, the image is
+    /// darker (as where the camera's DRO lifted the JPEG's shadows).
+    pub lightness: f64,
 }
 
 /// ΔE2000 of `image` against `reference` (the same size), over each
@@ -121,28 +124,30 @@ pub fn compare(image: &Rgba8, reference: &Rgba8) -> Result<Vec<(Region, Summary)
     if (image.width, image.height) != (reference.width, reference.height) {
         return Err(format!("{}×{} against {}×{}", image.width, image.height, reference.width, reference.height));
     }
-    let pairs: Vec<(Lab, f64)> = image
+    let pairs: Vec<(Lab, f64, f64)> = image
         .data
         .iter()
         .zip(&reference.data)
         .filter(|(_, r)| r[..3].iter().all(|&c| c > 0 && c < 255))
         .map(|(p, r)| {
-            let reference = lab([r[0], r[1], r[2]]);
-            (reference, ciede2000(lab([p[0], p[1], p[2]]), reference))
+            let (reference, image) = (lab([r[0], r[1], r[2]]), lab([p[0], p[1], p[2]]));
+            (reference, ciede2000(image, reference), image[0] - reference[0])
         })
         .collect();
     let total = image.data.len().max(1) as f64;
     Ok(Region::ALL
         .into_iter()
         .map(|region| {
-            let mut de: Vec<f64> = pairs.iter().filter(|(r, _)| region.holds(*r)).map(|(_, d)| *d).collect();
-            if de.is_empty() {
+            let held: Vec<_> = pairs.iter().filter(|(r, ..)| region.holds(*r)).collect();
+            if held.is_empty() {
                 return (region, Summary::default());
             }
+            let mut de: Vec<f64> = held.iter().map(|(_, d, _)| *d).collect();
             de.sort_by(f64::total_cmp);
             let mean = de.iter().sum::<f64>() / de.len() as f64;
             let p95 = de[((de.len() - 1) as f64 * 0.95).round() as usize];
-            (region, Summary { share: de.len() as f64 / total, mean, p95 })
+            let lightness = held.iter().map(|(.., l)| *l).sum::<f64>() / held.len() as f64;
+            (region, Summary { share: de.len() as f64 / total, mean, p95, lightness })
         })
         .collect())
 }
@@ -191,6 +196,11 @@ mod tests {
         // the clipped white is left out; three pixels count, one of them off
         assert_eq!(get(Region::All).share, 0.75);
         assert!(get(Region::Saturated).mean > 1.0 && get(Region::Saturated).share == 0.25);
+        // the changed pixel is darker than the reference's, by its L* difference
+        let want = lab([190, 50, 50])[0] - lab([200, 40, 40])[0];
+        assert!(want < 0.0 && (get(Region::Saturated).lightness - want).abs() < 1e-9);
+        assert!((get(Region::All).lightness - want / 3.0).abs() < 1e-9);
+        assert_eq!(get(Region::Skin).lightness, 0.0);
         assert_eq!(get(Region::Skin).mean, 0.0);
         assert_eq!(get(Region::Skin).share, 0.25);
         assert_eq!(get(Region::Sky).share, 0.25);
