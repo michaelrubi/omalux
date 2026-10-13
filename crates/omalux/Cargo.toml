@@ -9,6 +9,7 @@ description = "A fast, keyboard-first raw developer for Omarchy"
 eframe = { version = "0.36.2", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts"] }
 egui = "0.36.2"
 env_logger = "0.11.11"
+lightcraft-codecs = { workspace = true }
 lightcraft-develop = { workspace = true }
 lightcraft-gpu = { workspace = true }
 lightcraft-pipeline = { workspace = true }
@@ -17,4 +18,5 @@ log = "0.4.34"
 omalux-engine = { version = "0.1.0", path = "../omalux-engine" }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 toml = "1.1.6"

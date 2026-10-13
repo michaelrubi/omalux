@@ -6,6 +6,7 @@ mod filmstrip;
 mod histogram;
 mod hotkeys;
 mod loupe;
+mod monitor;
 mod render;
 mod slider;
 mod state;
