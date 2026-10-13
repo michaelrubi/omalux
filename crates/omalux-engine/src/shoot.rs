@@ -5,13 +5,17 @@
 //! developer needs of it: the picks are what's shown, and a filter shows
 //! everything.
 
+use std::cmp::Reverse;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
+use crate::arw;
 use crate::sidecar::{self, REJECT};
+use crate::stacks::{self, Signature};
 
 /// Sony's raws: the ILCE-7M3 is the only camera so far (other cameras are
 /// on the roadmap's "Later" list).
@@ -44,6 +48,10 @@ pub fn stars(rating: Rating) -> String {
 pub struct Frame {
     pub path: PathBuf,
     pub rating: Rating,
+    /// When it was taken, in seconds, for stacking by time.
+    pub captured: Option<f64>,
+    /// What it looks like, roughly, for stacking by look.
+    pub signature: Option<Signature>,
 }
 
 impl Frame {
@@ -94,6 +102,12 @@ pub struct Shoot {
     filter: Filter,
     /// 1 or -1: the way the cursor last moved, for preparing frames ahead.
     direction: isize,
+    /// The stacks among the frames, in order.
+    stacks: Vec<Vec<usize>>,
+    /// Which stack each frame is in.
+    stack_of: Vec<Option<usize>>,
+    /// Stacks opened out in the filmstrip; the rest show one frame.
+    expanded: BTreeSet<usize>,
 }
 
 fn raw(path: &Path) -> bool {
@@ -121,7 +135,14 @@ impl Shoot {
                     Ok(rating) => (rating.flatten().unwrap_or(0).clamp(REJECT, 5), None),
                     Err(e) => (0, Some(format!("{}: {e}", sidecar::path_for(&path).display()))),
                 };
-                (Frame { path, rating }, problem)
+                let raw = arw::RawFile::open(&path).ok();
+                let captured = raw.as_ref().and_then(|r| r.captured.as_deref()).and_then(stacks::seconds);
+                let signature = raw.as_ref().and_then(|r| {
+                    let jpeg = r.read(r.thumbnail().filter(|j| j.len < 1 << 20)?).ok()?;
+                    let thumb = arw::decode_thumb(&jpeg)?;
+                    Some(Signature::of(&thumb))
+                });
+                (Frame { path, rating, captured, signature }, problem)
             })
             .collect();
         let (frames, problems): (Vec<Frame>, Vec<Option<String>>) = read.into_iter().unzip();
@@ -133,7 +154,21 @@ impl Shoot {
     pub fn new(dir: PathBuf, frames: Vec<Frame>) -> Self {
         let first = frames.iter().position(|f| Filter::Picks.matches(f));
         let filter = if first.is_some() { Filter::Picks } else { Filter::All };
-        Self { dir, frames, current: first.unwrap_or(0), filter, direction: 1 }
+        let mut shoot = Self {
+            dir,
+            frames,
+            current: first.unwrap_or(0),
+            filter,
+            direction: 1,
+            stacks: Vec::new(),
+            stack_of: Vec::new(),
+            expanded: BTreeSet::new(),
+        };
+        shoot.restack();
+        if !shoot.visible(shoot.current) {
+            shoot.current = (0..shoot.frames.len()).find(|&i| shoot.visible(i)).unwrap_or(shoot.current);
+        }
+        shoot
     }
 
     pub fn dir(&self) -> &Path {
@@ -164,11 +199,54 @@ impl Shoot {
         self.filter.matches(&self.frames[index])
     }
 
+    fn restack(&mut self) {
+        let items: Vec<_> = self.frames.iter().map(|f| (f.captured, f.signature.as_ref())).collect();
+        self.stacks = stacks::group(&items);
+        self.stack_of = vec![None; self.frames.len()];
+        for (s, stack) in self.stacks.iter().enumerate() {
+            for &i in stack {
+                self.stack_of[i] = Some(s);
+            }
+        }
+        self.expanded.clear();
+    }
+
+    /// Set capture times on frames and restack (for tests).
+    pub fn set_captured(&mut self, times: impl IntoIterator<Item = (usize, f64)>) {
+        for (i, t) in times {
+            if let Some(frame) = self.frames.get_mut(i) {
+                frame.captured = Some(t);
+            }
+        }
+        self.restack();
+        if !self.visible(self.current) {
+            self.current = (0..self.frames.len()).find(|&i| self.visible(i)).unwrap_or(self.current);
+        }
+    }
+
+    /// The frame a collapsed stack shows: its best-rated frame the filter
+    /// lets through; of equals, the first. None if the filter lets none through.
+    pub fn representative(&self, stack: usize) -> Option<usize> {
+        let members = self.stacks.get(stack)?;
+        let key = |&i: &usize| (self.frames[i].rating, Reverse(i));
+        members.iter().copied().filter(|&i| self.matches(i)).max_by_key(key)
+    }
+
+    /// What the filter lets through, and in a collapsed stack only the
+    /// frame that stands for it.
+    fn visible(&self, index: usize) -> bool {
+        self.matches(index)
+            && match self.stack_of.get(index).copied().flatten() {
+                Some(stack) if !self.expanded.contains(&stack) => self.representative(stack) == Some(index),
+                _ => true,
+            }
+    }
+
     /// Shown in the filmstrip: what the filter lets through, and the
     /// current frame, which stays until the cursor leaves it even if a
     /// mark took it out of the filter.
     pub fn shown(&self, index: usize) -> bool {
-        index == self.current || self.matches(index)
+        index == self.current || self.visible(index)
     }
 
     pub fn shown_indices(&self) -> Vec<usize> {
@@ -179,7 +257,7 @@ impl Shoot {
     fn onward(&self, from: usize, direction: isize) -> impl Iterator<Item = usize> + '_ {
         let indices: Box<dyn Iterator<Item = usize>> =
             if direction > 0 { Box::new(from + 1..self.frames.len()) } else { Box::new((0..from).rev()) };
-        indices.filter(|&i| self.matches(i))
+        indices.filter(|&i| self.visible(i))
     }
 
     /// The next `ahead` frames stepping would visit, the way the cursor
@@ -213,8 +291,8 @@ impl Shoot {
         let to = match step {
             Step::Next => self.onward(self.current, 1).next(),
             Step::Previous => self.onward(self.current, -1).next(),
-            Step::First => (0..self.frames.len()).find(|&i| self.matches(i)),
-            Step::Last => (0..self.frames.len()).rev().find(|&i| self.matches(i)),
+            Step::First => (0..self.frames.len()).find(|&i| self.visible(i)),
+            Step::Last => (0..self.frames.len()).rev().find(|&i| self.visible(i)),
         };
         let moved = to.is_some_and(|to| to != self.current);
         if let Some(to) = to {
@@ -267,18 +345,50 @@ impl Shoot {
         }
     }
 
+    /// Every stack, in order.
+    pub fn stacks(&self) -> &[Vec<usize>] {
+        &self.stacks
+    }
+
     /// The stack a frame is in: the frames shot with it that the filter
     /// lets through, itself among them, in order. None for a frame that
-    /// isn't in a stack of two or more of those. (M2 skeleton: `m2-stacks`
-    /// fills these in.)
-    pub fn stack(&self, _index: usize) -> Option<Vec<usize>> {
-        None
+    /// isn't in a stack of two or more of those.
+    ///
+    /// Unlike Omacull, this returns only members the filter lets through
+    /// (and None when fewer than two pass), because a paste must never
+    /// reach a frame the filter hides. With picks shown, a stack of five
+    /// of which only one is a pick looks like, and is, a plain frame.
+    pub fn stack(&self, index: usize) -> Option<Vec<usize>> {
+        let stack = self.stack_of.get(index).copied().flatten()?;
+        if !self.matches(index) {
+            return None;
+        }
+        let filtered: Vec<usize> = self.stacks[stack].iter().copied().filter(|&i| self.matches(i)).collect();
+        if filtered.len() > 1 {
+            Some(filtered)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the stack a frame is in shows all its frames.
+    pub fn expanded(&self, index: usize) -> bool {
+        self.stack_of.get(index).copied().flatten().is_some_and(|s| self.expanded.contains(&s))
     }
 
     /// Open out the current frame's stack in the filmstrip, or close it
-    /// up. False if it isn't in one.
+    /// up, going to the frame that stands for it. False if it isn't in one.
     pub fn toggle_stack(&mut self) -> bool {
-        false
+        let Some(stack) = self.stack_of.get(self.current).copied().flatten() else { return false };
+        if self.stack(self.current).is_none() && !self.expanded.contains(&stack) {
+            return false;
+        }
+        if !self.expanded.remove(&stack) {
+            self.expanded.insert(stack);
+        } else if let Some(to) = self.representative(stack) {
+            self.go_to(to);
+        }
+        true
     }
 }
 
@@ -287,8 +397,74 @@ mod tests {
     use super::*;
 
     fn shoot(ratings: &[Rating]) -> Shoot {
-        let frames = ratings.iter().enumerate().map(|(i, &rating)| Frame { path: format!("/shoot/DSC{i:05}.ARW").into(), rating });
+        let frames = ratings.iter().enumerate().map(|(i, &rating)| Frame {
+            path: format!("/shoot/DSC{i:05}.ARW").into(),
+            rating,
+            captured: None,
+            signature: None,
+        });
         Shoot::new("/shoot".into(), frames.collect())
+    }
+
+    fn burst(ratings: &[Rating], times: &[f64]) -> Shoot {
+        let frames = ratings.iter().zip(times).enumerate().map(|(i, (&rating, &t))| Frame {
+            path: format!("/shoot/DSC{i:05}.ARW").into(),
+            rating,
+            captured: Some(t),
+            signature: None,
+        });
+        Shoot::new("/shoot".into(), frames.collect())
+    }
+
+    #[test]
+    fn collapsed_stacks_show_one_frame_the_best_rated() {
+        let mut s = burst(&[0, 0, 0, 0, 0, 0], &[0.0, 0.1, 0.2, 10.0, 20.0, 20.3]);
+        s.set_filter(Filter::All);
+        assert_eq!(s.stacks().len(), 2);
+        assert_eq!(s.shown_indices(), [0, 3, 4]);
+        assert!(s.step(Step::Next));
+        assert_eq!(s.current(), 3, "stepping goes stack to stack");
+
+        // A rating makes a frame the one that stands for its stack once cursor leaves it.
+        s.go_to(1);
+        s.mark(4);
+        s.go_to(3);
+        assert_eq!(s.shown_indices(), [1, 3, 4]);
+
+        // Toggle stack opens and closes.
+        s.go_to(1);
+        assert!(s.toggle_stack());
+        assert_eq!(s.shown_indices(), [0, 1, 2, 3, 4]);
+        assert!(s.expanded(1));
+
+        s.go_to(2);
+        assert!(s.toggle_stack());
+        assert_eq!(s.current(), 1, "closing goes to the frame that stands for it");
+        assert!(!s.expanded(1));
+
+        s.go_to(3);
+        assert!(!s.toggle_stack(), "not in a stack");
+    }
+
+    #[test]
+    fn stack_holds_only_what_the_filter_lets_through_and_is_none_for_single_pick() {
+        let mut s = burst(&[0, 1, 0, 0], &[0.0, 0.1, 0.2, 10.0]);
+        // Default filter is Picks: only frame 1 is a pick.
+        assert_eq!(s.filter(), Filter::Picks);
+        assert_eq!(s.stack(1), None, "a stack of three with only one pick is None");
+        assert!(!s.toggle_stack(), "a stack of one pick acts as a plain frame");
+        assert_eq!(s.shown_indices(), [1]);
+
+        // Rate another frame in the stack as a pick.
+        s.set_filter(Filter::All);
+        assert_eq!(s.stack(1), Some(vec![0, 1, 2]));
+        s.go_to(0);
+        s.mark(PICK);
+        s.set_filter(Filter::Picks);
+        assert_eq!(s.stack(0), Some(vec![0, 1]));
+        assert_eq!(s.stack(1), Some(vec![0, 1]));
+        assert!(s.toggle_stack());
+        assert_eq!(s.shown_indices(), [0, 1]);
     }
 
     #[test]

@@ -1940,4 +1940,48 @@ mod tests {
         h.frame(vec![]);
         assert!(h.app.display.is_none());
     }
+
+    #[test]
+    fn g_toggles_the_current_frames_stack_and_another_shoot_starts_collapsed() {
+        let folder1 = Folder::new("stack-toggle-1", &[1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder1.0.clone());
+        h.settle();
+        h.app.shoot.as_mut().unwrap().set_captured([(0, 0.0), (1, 0.5), (2, 1.0)]);
+
+        // Stacks start collapsed.
+        let shoot = h.app.shoot.as_ref().unwrap();
+        assert_eq!(shoot.stacks().len(), 1);
+        assert!(!shoot.expanded(0));
+        assert_eq!(shoot.shown_indices(), [0]);
+
+        // G opens the current frame's stack out.
+        h.press(Modifiers::NONE, Key::G);
+        h.settle();
+        let shoot = h.app.shoot.as_ref().unwrap();
+        assert!(shoot.expanded(0));
+        assert_eq!(shoot.shown_indices(), [0, 1, 2]);
+
+        // G closes it up.
+        h.press(Modifiers::NONE, Key::G);
+        h.settle();
+        let shoot = h.app.shoot.as_ref().unwrap();
+        assert!(!shoot.expanded(0));
+        assert_eq!(shoot.shown_indices(), [0]);
+
+        // Open it out again.
+        h.press(Modifiers::NONE, Key::G);
+        h.settle();
+        assert!(h.app.shoot.as_ref().unwrap().expanded(0));
+
+        // Opening another shoot starts with every stack collapsed.
+        let folder2 = Folder::new("stack-toggle-2", &[1, 1]);
+        h.app.open(folder2.0.clone());
+        h.settle();
+        h.app.shoot.as_mut().unwrap().set_captured([(0, 100.0), (1, 100.5)]);
+        let shoot2 = h.app.shoot.as_ref().unwrap();
+        assert_eq!(shoot2.stacks().len(), 1);
+        assert!(!shoot2.expanded(0), "another shoot starts with every stack collapsed");
+        assert_eq!(shoot2.shown_indices(), [0]);
+    }
 }

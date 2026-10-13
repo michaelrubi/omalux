@@ -144,6 +144,16 @@ impl Filmstrip {
             }
 
             let inner = rect.shrink(6.0);
+            let stack = shoot.stack(i).map(|s| s.len());
+            let collapsed = stack.is_some() && !shoot.expanded(i);
+            if collapsed {
+                // Cards behind, for the frames it stands for.
+                for offset in [4.0, 2.0] {
+                    let card = inner.translate(vec2(offset, -offset));
+                    painter.rect_filled(card, 1.0, theme.lighter_background);
+                    painter.rect_stroke(card, 1.0, Stroke::new(1.0, theme.dark_foreground), StrokeKind::Inside);
+                }
+            }
             match self.thumbnails.get(&i) {
                 Some(Slot::Ready(texture)) => {
                     let image = fit(texture.size_vec2(), inner);
@@ -159,6 +169,18 @@ impl Filmstrip {
                 }
             }
             badge(&painter, inner.center_bottom() - vec2(0.0, 3.0), Align2::CENTER_BOTTOM, rating, 13.0, theme);
+            match stack {
+                Some(n) if collapsed => {
+                    let at = inner.right_top() + vec2(-3.0, 3.0);
+                    label(&painter, at, Align2::RIGHT_TOP, format!("{n}"), theme.foreground, 13.0);
+                }
+                // An open stack's frames are underlined together.
+                Some(_) => {
+                    let line = [rect.left_bottom() + vec2(0.0, -2.0), rect.right_bottom() + vec2(0.0, -2.0)];
+                    painter.line_segment(line, Stroke::new(3.0, theme.accent));
+                }
+                None => {}
+            }
         }
 
         // Ask the loader for what's in or near view, closest to current first.
