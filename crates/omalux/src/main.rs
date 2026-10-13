@@ -2,6 +2,7 @@ mod app;
 mod commands;
 mod config;
 mod develop;
+mod filmstrip;
 mod hotkeys;
 mod loupe;
 mod render;

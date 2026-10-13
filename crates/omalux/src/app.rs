@@ -19,14 +19,13 @@ use omalux_engine::sidecar;
 use crate::commands::Command;
 use crate::config::Config;
 use crate::develop::{self, PanelOut};
+use crate::filmstrip::{Filmstrip, STRIP_HEIGHT};
 use crate::hotkeys::{self, format_shortcut};
 use crate::loupe::{Loupe, News};
 use crate::render::{Decoder, Renderer, View, Wanted};
 use crate::state::{Place, State};
 use crate::theme::{self, Theme};
 
-/// The filmstrip's height, as Omacull's.
-const STRIP_HEIGHT: f32 = 104.0;
 /// The develop panel's width.
 const PANEL_WIDTH: f32 = 300.0;
 /// How many frames are developed ahead of the cursor, the way it's
@@ -58,6 +57,15 @@ impl Editing {
 pub struct Paths {
     /// Where state is saved (`state.toml`); nowhere in most tests.
     pub state: Option<PathBuf>,
+    /// Where the filmstrip's thumbnails are cached; nowhere in tests.
+    pub thumbnails: Option<PathBuf>,
+}
+
+/// The threads behind the window: a test's renderer decodes what the
+/// test gives it.
+pub struct Workers {
+    pub renderer: Renderer,
+    pub disk: Disk,
 }
 
 /// Frames being exported to a folder, and how it's gone so far.
@@ -131,6 +139,7 @@ pub struct App {
     message: Option<(String, bool)>,
     title: String,
     disk: Disk,
+    filmstrip: Filmstrip,
 }
 
 impl App {
@@ -169,8 +178,8 @@ impl App {
         let renderer = Renderer::new(Decoder::raw(), gpu, move || wake.request_repaint());
         let wake = ctx.clone();
         let disk = Disk::new(move || wake.request_repaint());
-        let paths = Paths { state: hotkeys::config_dir().map(|dir| dir.join("state.toml")) };
-        let mut app = Self::build(theme, theme::watch(ctx.clone()), config, warnings, script, renderer, disk, paths);
+        let paths = Paths { state: hotkeys::config_dir().map(|dir| dir.join("state.toml")), thumbnails: omalux_engine::thumbs::default_dir() };
+        let mut app = Self::build(theme, theme::watch(ctx.clone()), config, warnings, script, Workers { renderer, disk }, paths);
         if let Some(path) = open {
             app.open(path);
         }
@@ -183,8 +192,7 @@ impl App {
         config: Config,
         warnings: Vec<String>,
         script: VecDeque<Command>,
-        renderer: Renderer,
-        disk: Disk,
+        workers: Workers,
         paths: Paths,
     ) -> Self {
         let state = paths.state.map_or_else(State::default, State::load_from);
@@ -196,7 +204,7 @@ impl App {
             script,
             state,
             shoot: None,
-            renderer,
+            renderer: workers.renderer,
             loupe: Loupe::default(),
             saved: HashMap::new(),
             unreadable: HashSet::new(),
@@ -209,7 +217,8 @@ impl App {
             exporting: None,
             message: None,
             title: String::new(),
-            disk,
+            disk: workers.disk,
+            filmstrip: Filmstrip::new(paths.thumbnails),
         }
     }
 
@@ -250,6 +259,7 @@ impl App {
                 self.saved.clear();
                 self.unreadable.clear();
                 self.edits.clear();
+                self.filmstrip.reset();
                 self.leave();
             }
             Err(e) => self.message = Some((format!("Couldn't open {}: {e}", dir.display()), true)),
@@ -265,6 +275,7 @@ impl App {
         self.saved.clear();
         self.unreadable.clear();
         self.edits.clear();
+        self.filmstrip.reset();
         self.leave();
     }
 
@@ -584,6 +595,10 @@ impl App {
             }
         }
         self.run_script(ctx);
+        if let Some(shoot) = &self.shoot {
+            self.filmstrip.sync_shoot(shoot, ctx);
+            self.filmstrip.collect(ctx, shoot.current());
+        }
         let title = match &self.shoot {
             Some(shoot) => format!("{} — OmaLux", file_name(shoot.dir())),
             None => "OmaLux".into(),
@@ -678,7 +693,15 @@ impl App {
     }
 
     /// The shown frames' thumbnails, under the loupe.
-    fn filmstrip(&mut self, _ui: &mut Ui) {}
+    fn filmstrip(&mut self, ui: &mut Ui) {
+        let Some(shoot) = &mut self.shoot else { return };
+        if let Some(clicked) = self.filmstrip.show(ui, shoot, &self.theme)
+            && clicked != shoot.current()
+        {
+            shoot.go_to(clicked);
+            self.leave();
+        }
+    }
 
     /// The histogram, and the panels under it: White Balance, Light,
     /// Presence.
@@ -828,7 +851,7 @@ mod tests {
 
     impl Harness {
         fn new(script: &[Command]) -> Self {
-            Self::with_paths(script, Paths { state: None })
+            Self::with_paths(script, Paths { state: None, thumbnails: None })
         }
 
         fn with_paths(script: &[Command], paths: Paths) -> Self {
@@ -837,7 +860,7 @@ mod tests {
             let renderer = Renderer::new(crate::render::tests::decoder(), false, || {});
             let wake = ctx.clone();
             let disk = Disk::new(move || wake.request_repaint());
-            let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect(), renderer, disk, paths);
+            let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect(), Workers { renderer, disk }, paths);
             Self { ctx, app, time: 0.0 }
         }
 
@@ -1544,5 +1567,31 @@ mod tests {
         let raw = folder.0.join("DSC00001.ARW");
         let xmp = sidecar::read(&raw).unwrap().unwrap();
         assert_eq!(sidecar::rating(&xmp).unwrap(), Some(1));
+    }
+
+    #[test]
+    fn clicking_a_thumbnail_goes_to_it() {
+        let folder = Folder::new("click", &[1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+        let cells = h.app.filmstrip.cells.clone();
+        assert!(!cells.is_empty(), "cells are present");
+        let (index, rect) = cells.iter().copied().find(|&(i, _)| i == 2).unwrap();
+        h.click(rect.center());
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), index);
+    }
+
+    #[test]
+    fn only_the_shown_frames_are_in_the_strip() {
+        let folder = Folder::new("strip-filter", &[1, 0, 1, 0, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+        let shown: Vec<usize> = h.app.filmstrip.cells.iter().map(|&(i, _)| i).collect();
+        assert_eq!(shown, vec![0, 2, 4], "picks only");
+        h.press(Modifiers::COMMAND, Key::L);
+        let all: Vec<usize> = h.app.filmstrip.cells.iter().map(|&(i, _)| i).collect();
+        assert_eq!(all, vec![0, 1, 2, 3, 4], "all frames");
     }
 }
