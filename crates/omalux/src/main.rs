@@ -5,6 +5,7 @@ mod hotkeys;
 mod loupe;
 mod render;
 mod slider;
+mod state;
 mod theme;
 
 use std::path::PathBuf;

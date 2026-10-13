@@ -20,6 +20,7 @@ use crate::develop::{self, PanelOut};
 use crate::hotkeys::{self, format_shortcut};
 use crate::loupe::{Loupe, News};
 use crate::render::{Decoder, Renderer, View, Wanted};
+use crate::state::{Place, State};
 use crate::theme::{self, Theme};
 
 /// The filmstrip's height, as Omacull's.
@@ -51,6 +52,12 @@ impl Editing {
     }
 }
 
+/// Where OmaLux keeps what it remembers; somewhere else in tests.
+pub struct Paths {
+    /// Where state is saved (`state.toml`); nowhere in most tests.
+    pub state: Option<PathBuf>,
+}
+
 pub struct App {
     theme: Theme,
     theme_rx: Receiver<Theme>,
@@ -59,6 +66,7 @@ pub struct App {
     /// Commands to run, one a frame, from `OMALUX_SCRIPT` (comma-separated
     /// command names, e.g. `Open,Quit`). For testing without a keyboard.
     script: VecDeque<Command>,
+    state: State,
     shoot: Option<Shoot>,
     renderer: Renderer,
     loupe: Loupe,
@@ -115,19 +123,29 @@ impl App {
         }
         let wake = ctx.clone();
         let renderer = Renderer::new(Decoder::raw(), gpu, move || wake.request_repaint());
-        let mut app = Self::build(theme, theme::watch(ctx.clone()), warnings, script, renderer);
+        let paths = Paths { state: hotkeys::config_dir().map(|dir| dir.join("state.toml")) };
+        let mut app = Self::build(theme, theme::watch(ctx.clone()), warnings, script, renderer, paths);
         if let Some(path) = open {
             app.open(path);
         }
         app
     }
 
-    fn build(theme: Theme, theme_rx: Receiver<Theme>, warnings: Vec<String>, script: VecDeque<Command>, renderer: Renderer) -> Self {
+    fn build(
+        theme: Theme,
+        theme_rx: Receiver<Theme>,
+        warnings: Vec<String>,
+        script: VecDeque<Command>,
+        renderer: Renderer,
+        paths: Paths,
+    ) -> Self {
+        let state = paths.state.map_or_else(State::default, State::load_from);
         Self {
             theme,
             theme_rx,
             warnings,
             script,
+            state,
             shoot: None,
             renderer,
             loupe: Loupe::default(),
@@ -143,19 +161,38 @@ impl App {
         }
     }
 
+    /// Remember where the open shoot was left, to come back to it.
+    fn remember_place(&mut self) {
+        if let Some(shoot) = &self.shoot {
+            let frame = shoot.frame().name();
+            self.state.remember(Place { dir: shoot.dir().to_path_buf(), frame, filter: shoot.filter() });
+        }
+    }
+
     /// Open a shoot: its folder, or a raw in it.
     fn open(&mut self, path: PathBuf) {
         let raw = (!path.is_dir()).then(|| path.clone());
         let dir = if path.is_dir() { path.clone() } else { path.parent().map(Path::to_path_buf).unwrap_or(path.clone()) };
         if !dir.is_dir() {
+            self.state.remove_recent(&dir);
             self.message = Some((format!("Couldn't open {}: there's no such folder", dir.display()), true));
             return;
         }
         match Shoot::open(&dir) {
             Ok((mut shoot, unread)) => {
-                if raw.is_some_and(|raw| !shoot.go_to_path(&raw)) {
-                    log::warn!("{} isn't a raw in the shoot", path.display());
+                self.remember_place();
+                let place = self.state.place(shoot.dir()).cloned();
+                if let Some(raw) = raw {
+                    if !shoot.go_to_path(&raw) {
+                        log::warn!("{} isn't a raw in the shoot", path.display());
+                    }
+                } else if let Some(place) = place {
+                    shoot.set_filter(place.filter);
+                    if let Some(index) = shoot.frames().iter().position(|f| f.name() == place.frame) {
+                        shoot.go_to(index);
+                    }
                 }
+                self.state.add_recent(shoot.dir());
                 self.message = (!unread.is_empty()).then(|| (format!("Couldn't read {}", unread.join("; ")), true));
                 self.shoot = Some(shoot);
                 self.saved.clear();
@@ -164,6 +201,17 @@ impl App {
             }
             Err(e) => self.message = Some((format!("Couldn't open {}: {e}", dir.display()), true)),
         }
+    }
+
+    /// Close the open shoot, back to the empty state: its place is
+    /// remembered, as when another is opened.
+    fn close(&mut self) {
+        self.remember_place();
+        self.shoot = None;
+        self.message = None;
+        self.saved.clear();
+        self.edits.clear();
+        self.leave();
     }
 
     fn pick(&mut self, ctx: &egui::Context) {
@@ -199,6 +247,7 @@ impl App {
         match command {
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Command::Open => self.pick(ctx),
+            Command::Close => self.close(),
             Command::Previous => self.step_to(Step::Previous),
             Command::Next => self.step_to(Step::Next),
             Command::First => self.step_to(Step::First),
@@ -405,6 +454,7 @@ impl App {
         }
         let pasteboard = egui::Frame::new().fill(self.theme.pasteboard());
         let mut picked = None;
+        let mut clicked = None;
         egui::CentralPanel::no_frame().frame(pasteboard).show(ui, |ui| match &self.shoot {
             Some(shoot) => {
                 picked = self.loupe.show(ui, &shoot.frame().path, self.selector);
@@ -413,10 +463,13 @@ impl App {
                     ui.painter().text(corner, Align2::LEFT_TOP, "Before", FontId::proportional(13.0), self.theme.foreground);
                 }
             }
-            None => self.empty_state(ui),
+            None => clicked = self.empty_state(ui),
         });
         if let Some(at) = picked {
             self.pick_white_balance(at);
+        }
+        if let Some(dir) = clicked {
+            self.open(dir);
         }
     }
 
@@ -431,14 +484,52 @@ impl App {
         self.panel(out);
     }
 
-    /// With no shoot open: how to open one.
-    fn empty_state(&self, ui: &mut Ui) {
+    /// With no shoot open: how to open one, and the shoots opened recently.
+    /// Returns the path clicked, if one was.
+    fn empty_state(&self, ui: &mut Ui) -> Option<PathBuf> {
         let hint = match hotkeys::current().command(Command::Open) {
             Some(s) => format!("{} to open a shoot", format_shortcut(&s)),
             None => "Open a shoot".to_owned(),
         };
-        let rect = ui.max_rect();
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, hint, FontId::proportional(16.0), self.theme.dark_foreground);
+        let mut clicked = None;
+        ui.vertical_centered(|ui| {
+            let space = if self.state.recent.is_empty() { 0.45 } else { 0.2 };
+            ui.add_space(ui.available_height() * space);
+            ui.label(RichText::new(hint).size(16.0).color(self.theme.dark_foreground));
+            if self.state.recent.is_empty() {
+                return;
+            }
+            ui.add_space(20.0);
+            ui.label(RichText::new("Recent shoots").strong().color(self.theme.foreground));
+            ui.add_space(6.0);
+            egui::Frame::new()
+                .fill(self.theme.dark_background)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_max_width(450.0);
+                    let (big, small) = (FontId::proportional(13.0), FontId::proportional(11.0));
+                    for dir in self.state.recent.iter().take(8) {
+                        let size = egui::vec2(ui.available_width(), 26.0);
+                        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                        if response.hovered() {
+                            ui.painter().rect_filled(rect, 0.0, self.theme.lighter_background);
+                        }
+                        let painter = ui.painter();
+                        let left = egui::pos2(rect.left() + 6.0, rect.center().y);
+                        let (name, foreground) = (file_name(dir), self.theme.foreground);
+                        let name = painter.text(left, Align2::LEFT_CENTER, name, big.clone(), foreground);
+                        // The folder it's in, shortened from the left to fit.
+                        let room = rect.right() - 6.0 - (name.right() + 24.0);
+                        let parent = elided(painter, &home_relative(dir.parent().unwrap_or(dir)), &small, room);
+                        let right = egui::pos2(rect.right() - 6.0, rect.center().y);
+                        painter.text(right, Align2::RIGHT_CENTER, parent, small.clone(), self.theme.dark_foreground);
+                        if response.clicked() {
+                            clicked = Some(dir.clone());
+                        }
+                    }
+                });
+        });
+        clicked
     }
 
     fn status_bar(&self, ui: &mut Ui) {
@@ -478,6 +569,28 @@ fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
+/// A path with the home folder written as ~.
+fn home_relative(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match home.as_deref().and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) => Path::new("~").join(rest).display().to_string(),
+        None => path.display().to_string(),
+    }
+}
+
+/// `text` without as much of its start as it takes to fit `width`.
+fn elided(painter: &egui::Painter, text: &str, font: &FontId, width: f32) -> String {
+    let fits = |t: &str| painter.layout_no_wrap(t.to_owned(), font.clone(), egui::Color32::WHITE).size().x <= width;
+    if fits(text) {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    (1..chars.len())
+        .map(|skip| format!("…{}", chars[skip..].iter().collect::<String>()))
+        .find(|t| fits(t))
+        .unwrap_or_default()
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.step(ctx);
@@ -485,6 +598,10 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
+    }
+
+    fn on_exit(&mut self) {
+        self.remember_place();
     }
 }
 
@@ -504,10 +621,14 @@ mod tests {
 
     impl Harness {
         fn new(script: &[Command]) -> Self {
+            Self::with_paths(script, Paths { state: None })
+        }
+
+        fn with_paths(script: &[Command], paths: Paths) -> Self {
             let (_tx, rx) = channel();
             let ctx = egui::Context::default();
             let renderer = Renderer::new(crate::render::tests::decoder(), false, || {});
-            let app = App::build(Theme::default(), rx, Vec::new(), script.iter().copied().collect(), renderer);
+            let app = App::build(Theme::default(), rx, Vec::new(), script.iter().copied().collect(), renderer, paths);
             Self { ctx, app, time: 0.0 }
         }
 
@@ -577,6 +698,36 @@ mod tests {
             let mut events = key_events(modifiers, key, true);
             events.extend(key_events(modifiers, key, false));
             self.frame(events)
+        }
+
+        fn click(&mut self, at: egui::Pos2) {
+            let button =
+                |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            self.frame(vec![Event::PointerMoved(at), button(true)]);
+            self.frame(vec![button(false)]);
+        }
+    }
+
+    fn texts(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        let mut out = Vec::new();
+        for cs in &output.shapes {
+            collect_texts(&cs.shape, &mut out);
+        }
+        out
+    }
+
+    fn collect_texts(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::epaint::Shape::Text(t) => {
+                let rect = egui::Rect::from_min_size(t.pos, t.galley.size());
+                out.push((t.galley.text().to_string(), rect));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for s in shapes {
+                    collect_texts(s, out);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -844,5 +995,94 @@ mod tests {
         assert_eq!(current(&h), "DSC00001.ARW");
         h.press(Modifiers::NONE, Key::End);
         assert_eq!(current(&h), "DSC00004.ARW");
+    }
+
+    #[test]
+    fn a_shoot_is_reopened_where_it_was_left_with_its_filter() {
+        let folder = Folder::new("reopen", &[1, 0, 1, 2]);
+        let dir = folder.0.clone();
+        let mut h = Harness::new(&[]);
+        h.app.open(dir.clone());
+        assert_eq!(current(&h), "DSC00001.ARW");
+        assert_eq!(h.app.shoot.as_ref().unwrap().filter(), Filter::Picks);
+
+        // Step to DSC00004.ARW and toggle filter to All.
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert_eq!(current(&h), "DSC00003.ARW");
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert_eq!(current(&h), "DSC00004.ARW");
+        h.press(Modifiers::COMMAND, Key::L);
+        assert_eq!(h.app.shoot.as_ref().unwrap().filter(), Filter::All);
+
+        // Close the shoot (Ctrl+W).
+        h.press(Modifiers::COMMAND, Key::W);
+        assert!(h.app.shoot.is_none());
+
+        // Reopen the shoot by its folder: goes back to frame 4 and Filter::All.
+        h.app.open(dir.clone());
+        assert_eq!(current(&h), "DSC00004.ARW");
+        assert_eq!(h.app.shoot.as_ref().unwrap().filter(), Filter::All);
+    }
+
+    #[test]
+    fn naming_a_raw_wins_over_the_remembered_place() {
+        let folder = Folder::new("named", &[1, 0, 1]);
+        let dir = folder.0.clone();
+        let mut h = Harness::new(&[]);
+        h.app.open(dir.clone());
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert_eq!(current(&h), "DSC00003.ARW");
+
+        // Close the shoot.
+        h.press(Modifiers::COMMAND, Key::W);
+        assert!(h.app.shoot.is_none());
+
+        // Open naming DSC00001.ARW specifically: opens at DSC00001.ARW rather than 3.
+        h.app.open(dir.join("DSC00001.ARW"));
+        assert_eq!(current(&h), "DSC00001.ARW");
+    }
+
+    #[test]
+    fn ctrl_w_closes_the_shoot_and_keeps_its_place() {
+        let folder = Folder::new("close", &[1, 1, 1]);
+        let dir = folder.0.clone();
+        let mut h = Harness::new(&[]);
+        h.app.open(dir.clone());
+        assert_eq!(current(&h), "DSC00001.ARW");
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert_eq!(current(&h), "DSC00002.ARW");
+
+        // Ctrl+W closes the shoot.
+        let output = h.press(Modifiers::COMMAND, Key::W);
+        assert!(h.app.shoot.is_none());
+        assert_eq!(titles(&output), ["OmaLux"]);
+        assert_eq!(h.app.title, "OmaLux");
+
+        // The place was kept.
+        let place = h.app.state.place(&dir);
+        assert_eq!(place.map(|p| p.frame.as_str()), Some("DSC00002.ARW"));
+    }
+
+    #[test]
+    fn recent_shoots_are_listed_and_clicking_one_opens_it() {
+        let folder = Folder::new("recent", &[1, 0, 1]);
+        let dir = folder.0.clone();
+        let mut h = Harness::new(&[]);
+        h.app.open(dir.clone());
+        h.press(Modifiers::COMMAND, Key::W);
+        assert!(h.app.shoot.is_none());
+
+        // An empty-state frame lists the recent shoot by name.
+        let output = h.frame(vec![]);
+        let rendered = texts(&output);
+        let name = file_name(&dir);
+        let target = rendered.iter().find(|(t, _)| t == &name);
+        assert!(target.is_some(), "expected recent list to show {name}, got {rendered:?}");
+
+        // Clicking it opens the shoot.
+        let rect = target.unwrap().1;
+        h.click(rect.center());
+        assert!(h.app.shoot.is_some());
+        assert_eq!(h.app.shoot.as_ref().map(Shoot::dir), Some(dir.as_path()));
     }
 }

@@ -8,6 +8,7 @@ use egui::{Key, KeyboardShortcut, Modifiers};
 pub enum Command {
     Quit,
     Open,
+    Close,
     Previous,
     Next,
     First,
@@ -36,6 +37,7 @@ impl Command {
     pub const ALL: &[Command] = &[
         Command::Quit,
         Command::Open,
+        Command::Close,
         Command::Previous,
         Command::Next,
         Command::First,
@@ -68,6 +70,7 @@ impl Command {
         Command::Undo,
         Command::Quit,
         Command::Open,
+        Command::Close,
         Command::Filter,
         Command::Previous,
         Command::Next,
@@ -87,6 +90,7 @@ impl Command {
         match self {
             Command::Quit => "Quit",
             Command::Open => "Open Folder…",
+            Command::Close => "Close Folder",
             Command::Previous => "Previous Frame",
             Command::Next => "Next Frame",
             Command::First => "First Frame",
@@ -111,6 +115,7 @@ impl Command {
         match self {
             Command::Quit => s(CMD, Key::Q),
             Command::Open => s(CMD, Key::O),
+            Command::Close => s(CMD, Key::W),
             Command::Previous => s(Modifiers::NONE, Key::ArrowLeft),
             Command::Next => s(Modifiers::NONE, Key::ArrowRight),
             Command::First => s(Modifiers::NONE, Key::Home),
@@ -189,6 +194,7 @@ mod tests {
         let ctx = egui::Context::default();
         assert_eq!(press(&ctx, CMD, Key::Q), [Command::Quit]);
         assert_eq!(press(&ctx, CMD, Key::O), [Command::Open]);
+        assert_eq!(press(&ctx, CMD, Key::W), [Command::Close]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::O), []);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::ArrowRight), [Command::Next]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::Home), [Command::First]);
