@@ -21,7 +21,7 @@ use omalux_engine::sidecar;
 use crate::commands::Command;
 use crate::config::Config;
 use crate::develop::{self, PanelOut};
-use crate::filmstrip::{Filmstrip, STRIP_HEIGHT};
+use crate::filmstrip::{Click, Filmstrip, STRIP_HEIGHT};
 use crate::hotkeys::{self, format_shortcut};
 use crate::loupe::{Loupe, News};
 use crate::monitor;
@@ -953,9 +953,9 @@ impl App {
         let Some((clicked, click)) = self.filmstrip.show(ui, shoot, &self.theme) else { return };
         let was = shoot.current();
         match click {
-            crate::filmstrip::Click::Toggle => shoot.toggle_selected(clicked),
-            crate::filmstrip::Click::Range => shoot.select_to(clicked),
-            crate::filmstrip::Click::Plain => {
+            Click::Toggle => shoot.toggle_selected(clicked),
+            Click::Range => shoot.select_to(clicked),
+            Click::Plain => {
                 shoot.clear_selection();
                 shoot.go_to(clicked);
             }
@@ -1843,6 +1843,29 @@ mod tests {
         h.press(Modifiers::COMMAND, Key::Z);
         h.press(Modifiers::COMMAND, Key::Z);
         assert_eq!(h.settings().light.exposure, first.light.exposure, "back to the first paste");
+    }
+
+    #[test]
+    fn ctrl_v_pastes_onto_the_selection_and_ctrl_z_takes_it_back_from_all_of_it() {
+        let (_folder, mut h) = copied("paste-selection", 5);
+        let first = h.settings().clone();
+        let fresh = DevelopSettings::for_raw(5200.0, 3.0);
+        // The second to the fourth, the cursor on the fourth.
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        paste(&mut h, Modifiers::COMMAND);
+        assert_eq!(h.said(), "Pasted onto 3 frames");
+        for name in ["DSC00002.ARW", "DSC00003.ARW", "DSC00004.ARW"] {
+            assert_eq!((h.settings_of(name), h.saved_of(name)), (first.clone(), Some(first.clone())), "{name}");
+        }
+        assert_eq!((h.settings_of("DSC00005.ARW"), h.saved_of("DSC00005.ARW")), (fresh.clone(), None), "and no further");
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.said(), "Took the paste back from 3 frames");
+        for name in ["DSC00002.ARW", "DSC00003.ARW", "DSC00004.ARW"] {
+            assert_eq!(h.settings_of(name).light.exposure, 0.0, "{name}");
+        }
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [1, 2, 3], "the selection stays, to paste something else");
     }
 
     #[test]

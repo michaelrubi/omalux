@@ -211,6 +211,7 @@ impl Shoot {
         true
     }
 
+    /// Move the cursor among the shown frames, leaving the selection as it is.
     fn move_step(&mut self, step: Step) -> bool {
         let to = match step {
             Step::Next => self.onward(self.current, 1).next(),
@@ -248,9 +249,10 @@ impl Shoot {
 
     /// The frames picked out in the filmstrip, in order: what a paste or an
     /// export reaches. None until a frame is picked out; the current frame
-    /// alone is no selection.
+    /// alone is no selection. Never a frame a mark has since taken out of
+    /// the filter: a paste mustn't reach what isn't shown.
     pub fn selection(&self) -> Vec<usize> {
-        self.selected.iter().copied().collect()
+        self.selected.iter().copied().filter(|&i| i == self.current || self.matches(i)).collect()
     }
 
     pub fn is_selected(&self, index: usize) -> bool {
@@ -434,6 +436,16 @@ mod tests {
         assert_eq!((s.selection(), s.current()), (vec![2, 4], 2));
         s.select_all();
         assert_eq!(s.selection(), [0, 2, 4]);
+    }
+
+    #[test]
+    fn a_frame_marked_out_of_the_filter_leaves_the_selection_with_the_cursor() {
+        let mut s = shoot(&[1, 1, 1]);
+        s.extend(Step::Next);
+        s.mark(0);
+        assert_eq!(s.selection(), [0, 1], "the current frame stays until it's left");
+        s.extend(Step::Next);
+        assert_eq!((s.selection(), s.shown_indices()), (vec![0, 2], vec![0, 2]));
     }
 
     #[test]
