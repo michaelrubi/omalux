@@ -6,6 +6,7 @@
 // Lightcraft allows these, and the modules lifted from it keep its ways.
 #![allow(clippy::type_complexity)]
 
+pub mod arw;
 pub mod camera_preview;
 pub mod camera_profiles;
 pub mod color;
@@ -21,4 +22,5 @@ mod reference;
 pub mod shoot;
 pub mod sidecar;
 pub mod sony;
+pub mod stacks;
 pub mod thumbs;

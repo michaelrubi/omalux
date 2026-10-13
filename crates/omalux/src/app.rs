@@ -1187,6 +1187,7 @@ mod tests {
     use super::*;
 
     use egui::{Event, Key, Modifiers};
+    use omalux_engine::shoot::Frame;
     use omalux_engine::sidecar;
 
     /// The app driven with synthetic events, with no window or GPU.
@@ -2660,5 +2661,72 @@ mod tests {
         assert!(h.app.choosing.is_some());
         h.app.open(folder.0.clone());
         assert!(h.app.choosing.is_none());
+    }
+
+    /// Open `folder` as if its frames had been shot at these times, in
+    /// seconds: the tests' raws are empty files, which hold none.
+    fn open_shot_at(h: &mut Harness, folder: &Folder, times: &[f64]) {
+        h.app.open(folder.0.clone());
+        let shoot = h.app.shoot.as_ref().unwrap();
+        let frames = shoot.frames().iter().zip(times).map(|(frame, &at)| Frame { captured: Some(at), ..frame.clone() });
+        h.app.shoot = Some(Shoot::new(shoot.dir().to_path_buf(), frames.collect()));
+    }
+
+    #[test]
+    fn g_opens_the_current_frames_stack_out_and_closes_it_up() {
+        let folder = Folder::new("stack-toggle", &[1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        open_shot_at(&mut h, &folder, &[0.0, 0.5, 1.0, 60.0]);
+        h.settle();
+        let shown = |h: &Harness| h.app.shoot.as_ref().unwrap().shown_indices();
+        assert_eq!(shown(&h), [0, 3], "stacks start closed up");
+        h.press(Modifiers::NONE, Key::G);
+        assert_eq!(shown(&h), [0, 1, 2, 3]);
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.press(Modifiers::NONE, Key::G);
+        assert_eq!((shown(&h), current(&h).as_str()), (vec![0, 3], "DSC00001.ARW"), "closed from any frame in it");
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.press(Modifiers::NONE, Key::G);
+        assert_eq!((shown(&h), current(&h).as_str()), (vec![0, 3], "DSC00004.ARW"), "a frame on its own has nothing to open");
+
+        // Another shoot's stacks are its own, closed up.
+        h.press(Modifiers::NONE, Key::Home);
+        h.press(Modifiers::NONE, Key::G);
+        let other = Folder::new("stack-toggle-other", &[1, 1, 1]);
+        open_shot_at(&mut h, &other, &[0.0, 0.5, 1.0]);
+        assert_eq!(shown(&h), [0]);
+    }
+
+    #[test]
+    fn ctrl_shift_v_pastes_onto_the_whole_stack_and_nothing_the_filter_hides() {
+        // Four frames shot together, the second not a pick, and one on its own.
+        let folder = Folder::new("paste-stack", &[1, 0, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        open_shot_at(&mut h, &folder, &[0.0, 0.5, 1.0, 1.5, 60.0]);
+        h.settle();
+        assert_eq!(h.app.shoot.as_ref().unwrap().shown_indices(), [0, 4]);
+        h.press(Modifiers::NONE, Key::Equals);
+        h.press(Modifiers::NONE, Key::Equals);
+        let first = h.settings().clone();
+        copy(&mut h);
+        paste(&mut h, Modifiers::COMMAND | Modifiers::SHIFT);
+        assert_eq!(h.said(), "Pasted onto 2 frames");
+        // Closed up, they haven't been decoded: as shot is each one's own all the same.
+        for name in ["DSC00003.ARW", "DSC00004.ARW"] {
+            let saved = h.saved_of(name).unwrap();
+            assert_eq!((saved.light.exposure, saved.wb.mode), (first.light.exposure, lightcraft_develop::WbMode::AsShot), "{name}");
+        }
+        assert_eq!((h.saved_of("DSC00002.ARW"), h.saved_of("DSC00005.ARW")), (None, None), "not the frame the filter hides, nor the next stack");
+
+        // Undone from the frame that stands for the stack, which it didn't change.
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.said(), "Took the paste back from 2 frames");
+        assert_eq!((h.settings_of("DSC00003.ARW").light.exposure, h.settings()), (0.0, &first));
+
+        h.press(Modifiers::NONE, Key::End);
+        h.settle();
+        paste(&mut h, Modifiers::COMMAND | Modifiers::SHIFT);
+        assert_eq!(h.said(), "DSC00005.ARW isn't in a stack");
+        assert_eq!(h.saved(), None);
     }
 }

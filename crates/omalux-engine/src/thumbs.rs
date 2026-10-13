@@ -79,7 +79,7 @@ fn encode_thumb(thumbnail: &Rgba8) -> io::Result<Vec<u8>> {
     .map_err(|e| io::Error::other(e.to_string()))
 }
 
-fn decode_thumb(jpeg: &[u8]) -> io::Result<Rgba8> {
+pub(crate) fn decode_thumb(jpeg: &[u8]) -> io::Result<Rgba8> {
     let decoded = lightcraft_codecs::decode(jpeg, lightcraft_codecs::DecodeOptions::default())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     Ok(decoded.to_srgb8())
@@ -285,6 +285,10 @@ pub(crate) mod testing {
 
     impl FakeArw {
         pub fn bytes(&self) -> Vec<u8> {
+            self.bytes_with_captured(None)
+        }
+
+        pub fn bytes_with_captured(&self, captured: Option<&str>) -> Vec<u8> {
             let px = vec![self.rgb; usize::from(self.width) * usize::from(self.height)];
             let img = lightcraft_codecs::EncodeImage::new(
                 u32::from(self.width),
@@ -304,13 +308,26 @@ pub(crate) mod testing {
             tiff.extend_from_slice(b"II\x2a\0");
             tiff.extend_from_slice(&8u32.to_le_bytes());
 
-            let entries_count: u16 = 7;
+            let (date, frac) = captured.map_or(("", ""), |cap| cap.split_once('.').unwrap_or((cap, "")));
+            let has_date = captured.is_some();
+            let has_frac = !frac.is_empty();
+
+            let mut entries_count: u16 = 7;
+            if has_date {
+                entries_count += 1;
+            }
+            if has_frac {
+                entries_count += 1;
+            }
+
             let ifd_len = 2 + usize::from(entries_count) * 12 + 4;
             let data_start = 8 + ifd_len;
 
             let make_offset = data_start as u32;
             let model_offset = make_offset + 6;
-            let jpeg_offset = model_offset + 10;
+            let date_offset = model_offset + 10;
+            let date_len = if has_date { 20 } else { 0 };
+            let jpeg_offset = date_offset + date_len;
 
             tiff.extend_from_slice(&entries_count.to_le_bytes());
             let mut entry = |tag: u16, kind: u16, count: u32, val: u32| {
@@ -326,11 +343,26 @@ pub(crate) mod testing {
             entry(0x0112, 3, 1, u32::from(self.orientation));
             entry(0x0201, 4, 1, jpeg_offset);
             entry(0x0202, 4, 1, jpeg.len() as u32);
+            if has_date {
+                entry(0x9003, 2, 20, date_offset);
+            }
+            if has_frac {
+                let mut frac_bytes = [0u8; 4];
+                let len = frac.len().min(3);
+                frac_bytes[..len].copy_from_slice(&frac.as_bytes()[..len]);
+                entry(0x9291, 2, (len + 1) as u32, u32::from_ne_bytes(frac_bytes));
+            }
 
             tiff.extend_from_slice(&0u32.to_le_bytes());
 
             tiff.extend_from_slice(b"SONY\0\0");
             tiff.extend_from_slice(b"ILCE-7M3\0\0");
+            if has_date {
+                let mut date_bytes = [0u8; 20];
+                let len = date.len().min(19);
+                date_bytes[..len].copy_from_slice(&date.as_bytes()[..len]);
+                tiff.extend_from_slice(&date_bytes);
+            }
             assert_eq!(tiff.len(), jpeg_offset as usize);
             tiff.extend_from_slice(&jpeg);
 
@@ -339,6 +371,10 @@ pub(crate) mod testing {
 
         pub fn write(&self, path: &Path) {
             fs::write(path, self.bytes()).unwrap();
+        }
+
+        pub fn write_with_captured(&self, path: &Path, captured: &str) {
+            fs::write(path, self.bytes_with_captured(Some(captured))).unwrap();
         }
     }
 
