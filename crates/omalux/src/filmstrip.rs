@@ -33,6 +33,16 @@ pub enum Slot {
     Failed,
 }
 
+/// How a filmstrip click was meant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Click {
+    Plain,
+    /// Ctrl: in or out of the selection.
+    Toggle,
+    /// Shift: the selection runs to here.
+    Range,
+}
+
 /// A shoot's filmstrip: its thumbnails' loader, the ones on the GPU, and
 /// where each frame was last drawn.
 pub struct Filmstrip {
@@ -117,8 +127,8 @@ impl Filmstrip {
     }
 
     /// Draw the filmstrip: thumbnails in a row that scrolls sideways and
-    /// keeps the current frame in view. Returns the frame clicked, if any.
-    pub fn show(&mut self, ui: &mut Ui, shoot: &Shoot, theme: &Theme) -> Option<usize> {
+    /// keeps the current frame in view. Returns the frame clicked, and how.
+    pub fn show(&mut self, ui: &mut Ui, shoot: &Shoot, theme: &Theme) -> Option<(usize, Click)> {
         let (strip, response) = ui.allocate_exact_size(vec2(ui.available_width(), STRIP_HEIGHT), Sense::click());
         let painter = ui.painter_at(strip);
         let cell = vec2(STRIP_HEIGHT * 1.5, STRIP_HEIGHT);
@@ -138,8 +148,10 @@ impl Filmstrip {
             self.cells.push((i, rect));
             let rating = shoot.frames()[i].rating;
 
-            if i == current {
+            if i == current || shoot.is_selected(i) {
                 painter.rect_filled(rect.shrink(1.0), 0.0, theme.selection);
+            }
+            if i == current {
                 painter.rect_stroke(rect.shrink(2.0), 0.0, Stroke::new(2.0, theme.accent), StrokeKind::Inside);
             }
 
@@ -174,7 +186,13 @@ impl Filmstrip {
         }
 
         let pointer = response.interact_pointer_pos().filter(|_| response.clicked())?;
-        self.cells.iter().find(|(_, rect)| rect.contains(pointer)).map(|&(i, _)| i)
+        let modifiers = ui.input(|i| i.modifiers);
+        let click = match () {
+            () if modifiers.command => Click::Toggle,
+            () if modifiers.shift => Click::Range,
+            () => Click::Plain,
+        };
+        self.cells.iter().find(|(_, rect)| rect.contains(pointer)).map(|&(i, _)| (i, click))
     }
 }
 
