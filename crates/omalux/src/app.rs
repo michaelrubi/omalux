@@ -140,6 +140,9 @@ pub struct App {
     title: String,
     disk: Disk,
     filmstrip: Filmstrip,
+    /// The clipping warnings are on: blown highlights and crushed
+    /// shadows are coloured in the loupe.
+    clipping: bool,
 }
 
 impl App {
@@ -219,6 +222,7 @@ impl App {
             title: String::new(),
             disk: workers.disk,
             filmstrip: Filmstrip::new(paths.thumbnails),
+            clipping: false,
         }
     }
 
@@ -433,6 +437,7 @@ impl App {
             Command::DecreaseMore => self.nudge(-5.0),
             Command::WhiteBalance => self.selector = !self.selector && self.shoot.is_some(),
             Command::BeforeAfter => self.before = !self.before && self.shoot.is_some(),
+            Command::Clipping => self.clipping = !self.clipping,
             Command::Pick
             | Command::Reject
             | Command::Unmark
@@ -622,7 +627,7 @@ impl App {
             current.settings = None;
         }
         self.loupe.retain(|path| wanted.iter().any(|w| w.path == path));
-        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging });
+        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping });
         for news in self.loupe.take(ctx, self.renderer.done()) {
             match news {
                 News::Decoded(path, info) => {
@@ -706,6 +711,13 @@ impl App {
     /// The histogram, and the panels under it: White Balance, Light,
     /// Presence.
     fn develop_panel(&mut self, ui: &mut Ui) {
+        // The histogram of the frame as the loupe shows it.
+        let path = self.shoot.as_ref().map(|shoot| &shoot.frame().path);
+        let histogram = path.and_then(|path| self.loupe.histogram(path));
+        if crate::histogram::show(ui, &self.theme, histogram, self.clipping) {
+            self.clipping = !self.clipping;
+        }
+        ui.add_space(6.0);
         let Some(editing) = self.shoot.as_ref().and_then(|shoot| self.edits.get(&shoot.frame().path)) else { return };
         let out = develop::show(ui, &self.theme, editing.history.settings(), editing.history.fresh(), self.selected);
         self.panel(out);
@@ -1593,5 +1605,39 @@ mod tests {
         h.press(Modifiers::COMMAND, Key::L);
         let all: Vec<usize> = h.app.filmstrip.cells.iter().map(|&(i, _)| i).collect();
         assert_eq!(all, vec![0, 1, 2, 3, 4], "all frames");
+    }
+
+    #[test]
+    fn j_toggles_clipping_warnings() {
+        let mut h = Harness::new(&[]);
+        assert!(!h.app.clipping);
+        h.press(Modifiers::NONE, Key::J);
+        assert!(h.app.clipping);
+        h.press(Modifiers::NONE, Key::J);
+        assert!(!h.app.clipping);
+    }
+
+    #[test]
+    fn the_histogram_is_the_renders_and_its_triangle_turns_the_warnings_on() {
+        let folder = Folder::new("histogram", &[1]);
+        let raw = folder.0.join("DSC00001.ARW");
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+        assert!(h.app.loupe.histogram(&raw).is_none(), "an empty plate until the frame is rendered");
+        h.settle();
+        assert_eq!(h.app.loupe.histogram(&raw).map(|histogram| histogram.total), Some(48 * 32));
+        let clipping = |h: &Harness| h.app.loupe.shown(&raw).unwrap().render.as_ref().unwrap().key.clipping;
+        assert!(!clipping(&h));
+
+        // A click on a triangle, like J, colours the clipped pixels in the loupe.
+        let triangle: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("highlight clipping"))).unwrap();
+        h.click(triangle.center());
+        assert!(h.app.clipping);
+        h.settle();
+        assert!(clipping(&h));
+        h.press(Modifiers::NONE, Key::J);
+        h.settle();
+        assert!(!clipping(&h));
     }
 }

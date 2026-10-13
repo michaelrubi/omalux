@@ -68,6 +68,11 @@ impl Loupe {
         self.shown.get(path)
     }
 
+    /// The histogram of a frame's render, once it has one.
+    pub fn histogram(&self, path: &Path) -> Option<&Histogram> {
+        Some(&self.shown.get(path)?.render.as_ref()?.histogram)
+    }
+
     /// Forget every frame `keep` doesn't name.
     pub fn retain(&mut self, keep: impl Fn(&Path) -> bool) {
         self.shown.retain(|path, _| keep(path));

@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod develop;
 mod filmstrip;
+mod histogram;
 mod hotkeys;
 mod loupe;
 mod render;

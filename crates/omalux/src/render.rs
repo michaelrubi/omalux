@@ -72,6 +72,8 @@ pub struct Wanted {
 pub struct View {
     pub size: (usize, usize),
     pub dragging: bool,
+    /// The clipping warnings are on: clipped pixels are coloured.
+    pub clipping: bool,
 }
 
 /// Which render of a frame this is: of what settings, how large, how good.
@@ -80,6 +82,8 @@ pub struct Key {
     pub settings: u64,
     pub size: (usize, usize),
     pub draft: bool,
+    /// Its clipped pixels are coloured.
+    pub clipping: bool,
 }
 
 pub enum Done {
@@ -228,7 +232,7 @@ impl State {
         // No larger than the source: there's nothing more in it to show.
         let (w, h) = (self.view.size.0.min(source.image.width), self.view.size.1.min(source.image.height));
         let size = if draft { (w.min(DRAFT.0), h.min(DRAFT.1)) } else { (w, h) };
-        Key { settings: settings.hash64(), size, draft }
+        Key { settings: settings.hash64(), size, draft, clipping: self.view.clipping }
     }
 
     /// The most wanted frame that's decoded and whose render isn't the one
@@ -342,6 +346,10 @@ impl Shared {
                 None => lightcraft_pipeline::render(&source.image, &source.info, &settings, &request),
             });
             let ms = started.elapsed().as_secs_f64() * 1e3;
+            let mut rendered = rendered;
+            if key.clipping {
+                crate::histogram::clipping_overlay(&mut rendered.image);
+            }
             let image = color_image(&rendered.image);
             self.finish(&path, |state, wanted| {
                 state.rendering = false;
@@ -424,7 +432,7 @@ pub(crate) mod tests {
     fn a_frame_comes_back_as_its_preview_then_its_render_and_neighbours_follow() {
         let folder = Folder::new("order", &[("a.ARW", ""), ("b.ARW", ""), ("c.ARW", "broken")]);
         let renderer = Renderer::new(decoder(), false, || {});
-        let view = View { size: (24, 16), dragging: false };
+        let view = View { size: (24, 16), ..View::default() };
         renderer.want(vec![wanted(&folder.0, "a.ARW"), wanted(&folder.0, "b.ARW"), wanted(&folder.0, "c.ARW")], view);
         let done = settle(&renderer);
 
@@ -457,15 +465,15 @@ pub(crate) mod tests {
             vec![Wanted { path: folder.0.join("a.ARW"), settings: Some(Arc::new(settings)) }, wanted(&folder.0, "b.ARW")]
         };
         let size = (40, 30);
-        renderer.want(frames(0.0), View { size, dragging: false });
+        renderer.want(frames(0.0), View { size, ..View::default() });
         assert_eq!(renders(&settle(&renderer)).iter().map(|(name, key)| (name.as_str(), key.draft)).collect::<Vec<_>>(), [("a.ARW", false), ("b.ARW", false)]);
 
         // Dragging: a draft of the current frame, small; the neighbour's render stands.
-        renderer.want(frames(0.5), View { size, dragging: true });
+        renderer.want(frames(0.5), View { size, dragging: true, ..View::default() });
         let drafts = renders(&settle(&renderer));
         assert!(matches!(drafts[..], [(ref name, Key { draft: true, size: (40, 30), .. })] if name == "a.ARW"), "{drafts:?}");
         // Let go: the same settings at full quality.
-        renderer.want(frames(0.5), View { size, dragging: false });
+        renderer.want(frames(0.5), View { size, ..View::default() });
         let full = renders(&settle(&renderer));
         assert!(matches!(full[..], [(ref name, Key { draft: false, size: (40, 30), .. })] if name == "a.ARW"), "{full:?}");
         assert_eq!(full[0].1.settings, drafts[0].1.settings);
@@ -475,7 +483,7 @@ pub(crate) mod tests {
     fn drafts_are_small_and_nothing_is_larger_than_its_source() {
         let source = Source { image: Arc::new(Rgb32f::new(2560, 1707)), info: Arc::default() };
         let settings = DevelopSettings::default();
-        let mut state = State { view: View { size: (3000, 1500), dragging: false }, ..State::default() };
+        let mut state = State { view: View { size: (3000, 1500), ..View::default() }, ..State::default() };
         assert_eq!(state.key(0, &source, &settings).size, (2560, 1500));
         state.view.dragging = true;
         assert_eq!((state.key(0, &source, &settings).size, state.key(0, &source, &settings).draft), (DRAFT, true));
@@ -486,7 +494,7 @@ pub(crate) mod tests {
     fn what_is_no_longer_wanted_is_dropped() {
         let folder = Folder::new("dropped", &[("a.ARW", ""), ("b.ARW", "")]);
         let renderer = Renderer::new(decoder(), false, || {});
-        let view = View { size: (24, 16), dragging: false };
+        let view = View { size: (24, 16), ..View::default() };
         renderer.want(vec![wanted(&folder.0, "a.ARW")], view);
         settle(&renderer);
         renderer.want(vec![wanted(&folder.0, "b.ARW")], view);

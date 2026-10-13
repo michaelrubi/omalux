@@ -40,6 +40,8 @@ pub enum Command {
     Star3,
     Star4,
     Star5,
+    /// Highlight and shadow clipping warnings.
+    Clipping,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -76,6 +78,7 @@ impl Command {
         Command::Star3,
         Command::Star4,
         Command::Star5,
+        Command::Clipping,
     ];
 
     /// Look a command up by its name in code, e.g. "Open".
@@ -116,6 +119,7 @@ impl Command {
         Command::Star3,
         Command::Star4,
         Command::Star5,
+        Command::Clipping,
     ];
 
     pub fn label(self) -> &'static str {
@@ -149,6 +153,7 @@ impl Command {
             Command::Star3 => "3 Stars",
             Command::Star4 => "4 Stars",
             Command::Star5 => "5 Stars",
+            Command::Clipping => "Clipping Warnings",
         }
     }
 
@@ -186,6 +191,8 @@ impl Command {
             Command::Star3 => s(Modifiers::NONE, Key::Num3),
             Command::Star4 => s(Modifiers::NONE, Key::Num4),
             Command::Star5 => s(Modifiers::NONE, Key::Num5),
+            // Lightroom's Show Clipping.
+            Command::Clipping => s(Modifiers::NONE, Key::J),
         }
     }
 
@@ -303,5 +310,6 @@ mod tests {
         assert_eq!(press(&ctx, none, Key::Num5), [Command::Star5]);
         assert_eq!(press(&ctx, none, Key::ArrowRight), [Command::Next]);
         assert_eq!(press(&ctx, none, Key::Home), [Command::First]);
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::J), [Command::Clipping]);
     }
 }
