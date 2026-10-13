@@ -1,6 +1,7 @@
 mod app;
 mod commands;
 mod hotkeys;
+mod state;
 mod theme;
 
 use std::path::PathBuf;
