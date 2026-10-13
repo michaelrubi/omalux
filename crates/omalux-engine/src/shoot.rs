@@ -5,6 +5,7 @@
 //! developer needs of it: the picks are what's shown, and a filter shows
 //! everything.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -94,6 +95,8 @@ pub struct Shoot {
     filter: Filter,
     /// 1 or -1: the way the cursor last moved, for preparing frames ahead.
     direction: isize,
+    /// Frames picked out in the filmstrip, for paste and export.
+    selected: BTreeSet<usize>,
 }
 
 fn raw(path: &Path) -> bool {
@@ -133,7 +136,7 @@ impl Shoot {
     pub fn new(dir: PathBuf, frames: Vec<Frame>) -> Self {
         let first = frames.iter().position(|f| Filter::Picks.matches(f));
         let filter = if first.is_some() { Filter::Picks } else { Filter::All };
-        Self { dir, frames, current: first.unwrap_or(0), filter, direction: 1 }
+        Self { dir, frames, current: first.unwrap_or(0), filter, direction: 1, selected: BTreeSet::new() }
     }
 
     pub fn dir(&self) -> &Path {
@@ -208,8 +211,7 @@ impl Shoot {
         true
     }
 
-    /// Move the cursor among the shown frames. False if it can't go further.
-    pub fn step(&mut self, step: Step) -> bool {
+    fn move_step(&mut self, step: Step) -> bool {
         let to = match step {
             Step::Next => self.onward(self.current, 1).next(),
             Step::Previous => self.onward(self.current, -1).next(),
@@ -223,9 +225,18 @@ impl Shoot {
         moved
     }
 
+    /// Move the cursor among the shown frames. False if it can't go further.
+    /// Clears the selection, as in Lightroom.
+    pub fn step(&mut self, step: Step) -> bool {
+        self.clear_selection();
+        self.move_step(step)
+    }
+
     /// Show only what `filter` lets through. If that leaves out the current
     /// frame, the cursor moves to the nearest frame that's in, next first.
+    /// Clears the selection.
     pub fn set_filter(&mut self, filter: Filter) {
+        self.clear_selection();
         self.filter = filter;
         if !filter.matches(self.frame()) {
             let to = self.onward(self.current, 1).next().or_else(|| self.onward(self.current, -1).next());
@@ -237,20 +248,52 @@ impl Shoot {
 
     /// The frames picked out in the filmstrip, in order: what a paste or an
     /// export reaches. None until a frame is picked out; the current frame
-    /// alone is no selection. (M2 skeleton: `m2-select` fills these in.)
+    /// alone is no selection.
     pub fn selection(&self) -> Vec<usize> {
-        Vec::new()
+        self.selected.iter().copied().collect()
+    }
+
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.selected.contains(&index)
+    }
+
+    /// Ctrl+click: add a frame to the selection, or take it out, and go to
+    /// it. The current frame is in the selection it starts.
+    pub fn toggle_selected(&mut self, index: usize) {
+        if self.selected.is_empty() {
+            self.selected.insert(self.current);
+        }
+        if !self.selected.remove(&index) {
+            self.selected.insert(index);
+        }
+        self.go_to(index);
+    }
+
+    /// Shift+click: select the shown frames from the current one to `index`,
+    /// and go there.
+    pub fn select_to(&mut self, index: usize) {
+        let (from, to) = (self.current.min(index), self.current.max(index));
+        self.selected = (from..=to).filter(|&i| self.shown(i)).collect();
+        self.go_to(index);
+    }
+
+    /// Shift+arrow: step, taking the frames passed into the selection.
+    /// Steps without clearing the selection.
+    pub fn extend(&mut self, step: Step) -> bool {
+        self.selected.insert(self.current);
+        let moved = self.move_step(step);
+        self.selected.insert(self.current);
+        moved
     }
 
     /// Ctrl+A: select every shown frame.
-    pub fn select_all(&mut self) {}
+    pub fn select_all(&mut self) {
+        self.selected = self.shown_indices().into_iter().collect();
+    }
 
     /// Ctrl+D: select nothing.
-    pub fn clear_selection(&mut self) {}
-
-    /// Shift+arrow: step, taking the frames passed into the selection.
-    pub fn extend(&mut self, step: Step) -> bool {
-        self.step(step)
+    pub fn clear_selection(&mut self) {
+        self.selected.clear();
     }
 
     /// Mark the current frame. None if it already had that mark.
@@ -375,5 +418,86 @@ mod tests {
         assert_eq!(stars(PICK), "★");
         assert_eq!(stars(0), "");
         assert_eq!(stars(REJECT), "✕");
+    }
+
+    #[test]
+    fn frames_are_selected_by_ctrl_shift_and_arrows() {
+        let mut s = shoot(&[1, 0, 1, 0, 1]);
+        s.toggle_selected(2);
+        assert_eq!((s.selection(), s.current()), (vec![0, 2], 2), "starting from the current frame");
+        s.toggle_selected(0);
+        assert_eq!((s.selection(), s.current()), (vec![2], 0));
+        s.select_to(4);
+        assert_eq!(s.selection(), [0, 2, 4], "only shown frames");
+        s.clear_selection();
+        s.extend(Step::Previous);
+        assert_eq!((s.selection(), s.current()), (vec![2, 4], 2));
+        s.select_all();
+        assert_eq!(s.selection(), [0, 2, 4]);
+    }
+
+    #[test]
+    fn a_plain_step_clears_the_selection() {
+        let mut s = shoot(&[1, 1, 1]);
+        s.select_all();
+        assert_eq!(s.selection(), [0, 1, 2]);
+        assert!(s.step(Step::Next));
+        assert!(s.selection().is_empty());
+        assert_eq!(s.current(), 1);
+
+        s.select_all();
+        assert_eq!(s.selection(), [0, 1, 2]);
+        s.step(Step::First);
+        assert!(s.selection().is_empty());
+        assert_eq!(s.current(), 0);
+    }
+
+    #[test]
+    fn extend_at_the_end_of_the_strip_keeps_whats_selected() {
+        let mut s = shoot(&[1, 1, 1]);
+        s.select_to(2);
+        assert_eq!(s.selection(), [0, 1, 2]);
+        assert_eq!(s.current(), 2);
+        assert!(!s.extend(Step::Next));
+        assert_eq!(s.selection(), [0, 1, 2]);
+        assert_eq!(s.current(), 2);
+
+        s.go_to(0);
+        s.clear_selection();
+        s.extend(Step::Next);
+        assert_eq!(s.selection(), [0, 1]);
+        assert_eq!(s.current(), 1);
+        s.step(Step::First);
+        s.extend(Step::Next);
+        assert_eq!(s.selection(), [0, 1]);
+        s.go_to(0);
+        assert!(!s.extend(Step::Previous));
+        assert_eq!(s.selection(), [0, 1]);
+    }
+
+    #[test]
+    fn set_filter_clears_the_selection() {
+        let mut s = shoot(&[1, 0, 1]);
+        s.select_all();
+        assert_eq!(s.selection(), [0, 2]);
+        s.set_filter(Filter::All);
+        assert!(s.selection().is_empty());
+
+        s.select_all();
+        assert_eq!(s.selection(), [0, 1, 2]);
+        s.set_filter(Filter::Picks);
+        assert!(s.selection().is_empty());
+    }
+
+    #[test]
+    fn select_all_takes_only_the_shown_frames() {
+        let mut s = shoot(&[1, 0, 1, REJECT, 1]);
+        assert_eq!(s.filter(), Filter::Picks);
+        s.select_all();
+        assert_eq!(s.selection(), [0, 2, 4]);
+
+        s.set_filter(Filter::All);
+        s.select_all();
+        assert_eq!(s.selection(), [0, 1, 2, 3, 4]);
     }
 }

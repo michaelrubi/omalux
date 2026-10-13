@@ -950,10 +950,17 @@ impl App {
     /// The shown frames' thumbnails, under the loupe.
     fn filmstrip(&mut self, ui: &mut Ui) {
         let Some(shoot) = &mut self.shoot else { return };
-        if let Some(clicked) = self.filmstrip.show(ui, shoot, &self.theme)
-            && clicked != shoot.current()
-        {
-            shoot.go_to(clicked);
+        let Some((clicked, click)) = self.filmstrip.show(ui, shoot, &self.theme) else { return };
+        let was = shoot.current();
+        match click {
+            crate::filmstrip::Click::Toggle => shoot.toggle_selected(clicked),
+            crate::filmstrip::Click::Range => shoot.select_to(clicked),
+            crate::filmstrip::Click::Plain => {
+                shoot.clear_selection();
+                shoot.go_to(clicked);
+            }
+        }
+        if shoot.current() != was {
             self.leave();
         }
     }
@@ -1055,7 +1062,11 @@ fn status(shoot: &Shoot) -> String {
     };
     let mark = stars(shoot.frame().rating);
     let mark = if mark.is_empty() { String::new() } else { format!("{mark}   ") };
-    format!("{}   {mark}{place} / {of}", shoot.frame().name())
+    let selected = match shoot.selection().len() {
+        0 => String::new(),
+        n => format!("   {n} selected"),
+    };
+    format!("{}   {mark}{place} / {of}{selected}", shoot.frame().name())
 }
 
 /// How a paste went.
@@ -1275,10 +1286,17 @@ mod tests {
         }
 
         fn click(&mut self, at: egui::Pos2) {
+            self.click_with(at, Modifiers::NONE);
+        }
+
+        fn click_with(&mut self, at: egui::Pos2, modifiers: Modifiers) {
             let button =
-                |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
-            self.frame(vec![Event::PointerMoved(at), button(true)]);
-            self.frame(vec![button(false)]);
+                |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers };
+            self.frame(vec![Event::ModifiersChanged(modifiers), Event::PointerMoved(at), button(true)]);
+            self.frame(vec![Event::ModifiersChanged(modifiers), button(false)]);
+            if modifiers != Modifiers::NONE {
+                self.frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+            }
         }
     }
 
@@ -2335,5 +2353,160 @@ mod tests {
         let mut h = Harness::new(&[]);
         h.frame(vec![]);
         assert!(h.app.display.is_none());
+    }
+
+    #[test]
+    fn filmstrip_ctrl_click_and_shift_click_selects_frames() {
+        let folder = Folder::new("clicks", &[1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+
+        let cell = |h: &Harness, index: usize| {
+            h.app.filmstrip.cells.iter().find(|(i, _)| *i == index).map(|(_, r)| *r).expect("filmstrip cell")
+        };
+
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 0);
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+
+        // Ctrl+click on cell 1: selects 0 and 1, goes to 1.
+        h.click_with(cell(&h, 1).center(), Modifiers::COMMAND);
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 1);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1]);
+        assert!(h.app.shoot.as_ref().unwrap().is_selected(0));
+        assert!(h.app.shoot.as_ref().unwrap().is_selected(1));
+
+        // Ctrl+click on cell 0: deselects 0, goes to 0.
+        h.click_with(cell(&h, 0).center(), Modifiers::COMMAND);
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 0);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [1]);
+        assert!(!h.app.shoot.as_ref().unwrap().is_selected(0));
+        assert!(h.app.shoot.as_ref().unwrap().is_selected(1));
+
+        // Shift+click on cell 2: selects from current (0) to 2, goes to 2.
+        h.click_with(cell(&h, 2).center(), Modifiers::SHIFT);
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 2);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1, 2]);
+
+        // Plain click on cell 1: clears selection, goes to 1.
+        h.click(cell(&h, 1).center());
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 1);
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+    }
+
+    #[test]
+    fn shift_arrows_extend_the_selection() {
+        let folder = Folder::new("shift-arrows", &[1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 0);
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+
+        // Shift+Right: extends from 0 to 1.
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 1);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1]);
+
+        // Shift+Right again: extends to 2.
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 2);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1, 2]);
+
+        // Shift+Left: extends to 1 (keeps 2 in selection).
+        h.press(Modifiers::SHIFT, Key::ArrowLeft);
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 1);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn ctrl_a_selects_all_and_ctrl_d_clears_selection() {
+        let folder = Folder::new("ctrl-a-d", &[1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+
+        h.press(Modifiers::COMMAND, Key::A);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1, 2]);
+
+        h.press(Modifiers::COMMAND, Key::D);
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+    }
+
+    #[test]
+    fn a_plain_arrow_clears_the_selection() {
+        let folder = Folder::new("plain-arrow-clears", &[1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+
+        h.press(Modifiers::COMMAND, Key::A);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1, 2]);
+
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 1);
+    }
+
+    #[test]
+    fn opening_another_shoot_starts_with_no_selection() {
+        let folder1 = Folder::new("open-first", &[1, 1]);
+        let folder2 = Folder::new("open-second", &[1, 1]);
+        let mut h = Harness::new(&[]);
+
+        h.app.open(folder1.0.clone());
+        h.press(Modifiers::COMMAND, Key::A);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1]);
+
+        h.app.open(folder2.0.clone());
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+    }
+
+    #[test]
+    fn status_bar_shows_selection_count() {
+        let folder = Folder::new("status-count", &[1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★   1 / 4 picks of 4 frames");
+
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection().len(), 3);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00003.ARW   ★   3 / 4 picks of 4 frames   3 selected");
+
+        h.press(Modifiers::COMMAND, Key::D);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00003.ARW   ★   3 / 4 picks of 4 frames");
+    }
+
+    #[test]
+    fn ctrl_shift_e_exports_the_selection() {
+        let folder = Folder::new("export-selection", &[1, 1, 1, 1]);
+        let out_dir = folder.0.join("omalux");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        for name in ["DSC00001.tif", "DSC00002.tif", "DSC00003.tif"] {
+            std::fs::write(out_dir.join(name), b"existing tiff").unwrap();
+        }
+
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+
+        // Select three frames (0, 1, 2)
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1, 2]);
+
+        h.press(Modifiers { shift: true, ..Modifiers::COMMAND }, Key::E);
+        assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exporting 1 of 3…", false)));
+
+        let started = std::time::Instant::now();
+        while h.app.exporting.is_some() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "export timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.frame(vec![]);
+        }
+
+        assert_eq!(
+            h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)),
+            Some(("Exported 0 of 3 to omalux; 3 were there already", false))
+        );
     }
 }
