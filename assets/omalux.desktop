@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=OmaLux
+GenericName=Raw Developer
+Comment=Develop a culled shoot's picks into 16-bit TIFFs for retouching
+Exec=omalux %f
+Icon=omalux
+Terminal=false
+Categories=Graphics;Photography;RasterGraphics;
+StartupWMClass=omalux

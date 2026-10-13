@@ -198,8 +198,8 @@ stack (Rust 2024, egui 0.36, wgpu). Checked against Lightcraft at
 `7b47ba7` (2026-10-09).
 
 Since then (looked at `701f78e`, 2026-10-12), Lightcraft has added two
-things OmaLux was going to build itself. M0 decides whether to vendor
-them:
+things OmaLux was going to build itself. M0 vendored them; its spikes
+decide whether they stay:
 
 - **`denoise` and `denoise-core`:** AI denoise on the Bayer data before
   demosaicing. They pack the mosaic, tile and blend it, cache the result
@@ -224,6 +224,8 @@ them:
 | `pipeline` | The CPU pipeline: scene-referred, linear Rec. 2020 float; white balance, Light with edge-aware local tone mapping, Presence, Detail (sharpening, noise reduction), Optics (distortion, vignetting, lateral CA auto and manual, defringe), crop, straighten and Upright, auto tone and white balance, output |
 | `gpu` | The same stages as wgpu compute shaders, checked against the CPU pipeline to within 1/255, with a CPU fallback and careful backend selection |
 | `scenes` | Procedural test photos, for tests that can't ship real raws |
+| `inpaint`, `heif` | Not wanted for themselves: `pipeline` needs `inpaint` (spot healing), and `codecs` names `heif` (its feature stays off) |
+| `denoise`, `denoise-core`, `lensdb` | Raw AI denoise and lensfun's database, while M0's spikes decide |
 
 ### What's lifted in part (copied from `engine` and `ui-egui`)
 
@@ -371,9 +373,12 @@ frame in a per-file fit is the fit's error, not the camera.
   mapping take over. That's where the raw should look better than the
   camera.
 - **Flat** skips the fitted curve and keeps a gentle one that never clips.
-- **White balance is relative** without a DCP: Lightcraft doesn't assume
-  Sony's colour matrix is a DNG one, so Temp and Tint are a scale around
-  As Shot (6500/0 is its neutral reference), not measured Kelvin.
+- **White balance is in Kelvin** even without a DCP (found in M0): at
+  `701f78e` Lightcraft has the ILCE-7M3's colour matrices measured from
+  its spectral sensitivities (rawtoaces's data), and uses them for Temp
+  and Tint's scale only, so As Shot reads as Kelvin and tint while the
+  look stays the fitted one. Cameras without measured matrices get the
+  relative scale (6500/0 meaning as shot).
 - **Sony's look, rendered as well as Lightroom and Capture One render
   it.** Michael likes Lightroom's and Capture One's colour better than
   Lightcraft's or darktable's (2026-10-12), and Sony's look is the target
@@ -471,7 +476,8 @@ What OmaLux adds, and where:
 How it runs in the app:
 
 - **On the GPU**, with the UI in egui on the same device, as Omacull and
-  Omapix do. Lightcraft's backend selection (only the backends meant, so
+  Omapix do. Lightcraft's GPU pipeline writes 8-bit output only, so the
+  16-bit export renders on the CPU pipeline (found in M0). Lightcraft's backend selection (only the backends meant, so
   a crashing driver elsewhere can't take the process down) is kept.
 - **Drafts during drags, full quality on release,** on a worker pool off
   the UI thread; at 100% only what's on screen at full size.
@@ -547,9 +553,12 @@ crates/
   an `OMALUX_SCRIPT` hook, the headless `Harness`, packaging, copied from
   them and not shared. The vendored crates keep Lightcraft's (its
   never-crash lints, its tests, the CPU pipeline as the GPU's oracle).
-- **One colour engine.** Lightcraft uses `moxcms` (pure Rust); Omacull
-  and Omapix use Little CMS 2 for monitor profiles. OmaLux uses `moxcms`
-  for both unless M0 finds the monitor handling needs lcms2.
+- **One colour engine** (decided in M0): `moxcms`, Lightcraft's.
+  Lightcraft's `DisplayProfile` converts to a monitor's ICC profile and
+  its pipeline renders into a display's primaries; OmaLux adds Omacull's
+  EDID reading for monitors without a profile. On three monitor EDIDs it
+  agrees with Omacull's Little CMS 2 within 1 LSB on every one of 4096
+  sRGB colours, and Omapix's Little CMS 2 reads the TIFFs' profiles.
 - **Config:** `~/.config/omalux/config.toml`, written on first run with
   every setting explained: where exports go, the program Ctrl+E opens.
 - **Omacull hands over** with its existing `developer = "omalux"`

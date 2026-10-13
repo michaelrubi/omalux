@@ -13,7 +13,8 @@ It's the second stage of one workflow: cull in
 [Omacull](https://github.com/michaelrubi/omacull), develop in OmaLux,
 retouch in Omapix, export.
 
-**Status:** scoped, not built yet. [docs/DESIGN.md](docs/DESIGN.md) has
+**Status:** M0 under way: Lightcraft's engine vendored and an empty
+window, nothing to develop with yet. [docs/DESIGN.md](docs/DESIGN.md) has
 the design and [docs/ROADMAP.md](docs/ROADMAP.md) the plan.
 
 ## Credits
