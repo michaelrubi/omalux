@@ -152,12 +152,15 @@ Omapix's are.
 | Key | Action |
 |-----|--------|
 | ← → Home End | Step through the frames the filter shows |
-| P X U 0–5 | Pick, reject, unmark, stars |
+| Ctrl+L | The picks, or everything (Lightroom's Enable Filters) |
+| P X U 0–5 | Pick, reject, unmark, stars (0 unmarks) |
 | `\` | Before/after |
 | Z | 100% zoom (tap to toggle, hold for a look) |
 | , . | Select the previous or next slider |
 | = − (Shift for more) | Nudge the selected slider |
-| Double-click a slider's name | Reset it |
+| Double-click a slider's name or thumb | Reset it |
+| The wheel, over the selected slider | Nudge it |
+| Click a slider's number | Type a value (Return applies, Esc doesn't) |
 | Shift+double-click a slider | Set it automatically |
 | W | White balance eyedropper |
 | Ctrl+U | Auto tone |
@@ -171,6 +174,7 @@ Omapix's are.
 | Ctrl+E | Export and edit in Omapix |
 | Ctrl+Shift+E | Export |
 | Ctrl+O | Open a folder |
+| Ctrl+W | Close the folder |
 
 Keys inside a tool (crop's X to swap the aspect, for one) only apply
 while it's open, as in Lightroom.
@@ -556,11 +560,16 @@ crates/
 - **One colour engine** (decided in M0): `moxcms`, Lightcraft's.
   Lightcraft's `DisplayProfile` converts to a monitor's ICC profile and
   its pipeline renders into a display's primaries; OmaLux adds Omacull's
-  EDID reading for monitors without a profile. On three monitor EDIDs it
+  EDID reading for monitors without a profile, and its way of knowing
+  which monitor the window is on (`hyprctl`), with a profile chosen by
+  hand in `~/.config/omalux/monitors.toml`. The histogram stays the
+  frame's in sRGB whatever it's shown on. On three monitor EDIDs it
   agrees with Omacull's Little CMS 2 within 1 LSB on every one of 4096
   sRGB colours, and Omapix's Little CMS 2 reads the TIFFs' profiles.
 - **Config:** `~/.config/omalux/config.toml`, written on first run with
-  every setting explained: where exports go, the program Ctrl+E opens.
+  every setting explained: where exports go (`export_folder`), the
+  program Ctrl+E opens (`editor`). What's remembered between sessions
+  (the recent shoots, where each was left) is in `state.toml` beside it.
 - **Omacull hands over** with its existing `developer = "omalux"`
   setting: Ctrl+E in Omacull starts `omalux <folder>`.
 

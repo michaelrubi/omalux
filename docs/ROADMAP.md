@@ -8,8 +8,9 @@ Status: scoped on 2026-10-08, and re-planned the same day on
 "Built on Lightcraft" in DESIGN.md). M0 started 2026-10-12: Lightcraft
 vendored, the workspace and an empty window up, and the spikes run on
 the laptop and Michael's frames. On 2026-10-13 what was left of it moved
-to the milestones that need it first; M0 closes on one question, why the
-GPU loupe's times jump between frames (see M0).
+to the milestones that need it first, and M0 closed on its last question,
+why the GPU loupe's times jump between frames: the GPU's power states
+(see M0). M1 started the same day.
 
 Each milestone ends with something Michael can use on a real shoot. M1 is
 the point where OmaLux replaces darktable for a clean, low-ISO shoot;
@@ -34,7 +35,7 @@ Each item says where it stands. "On the laptop" is what needs Michael's
 frames, the RTX 4070 or Lightroom: the tools for it are built, and the
 commands are in AGENTS.md.
 
-M0 closes on the GPU loupe's times (below), since M1's loupe is built on
+M0 closed on the GPU loupe's times (below), since M1's loupe is built on
 them. The rest moved on 2026-10-13 to the milestone that needs it first,
 since M1 needs none of it: the reference set, the 100% comparison and
 the DRO test to M4, the lens comparison to M5, the denoise comparison to
@@ -100,11 +101,21 @@ M6, and the look of the handoff in Omapix to M1's export.
   loupe is 17 to 163 ms on the GPU from frame to frame with no fallback
   to the CPU (29 to 68 on the CPU), and a second run put the slow ones on
   other frames, so it isn't the frames' content; still to explain. The
-  export is about 1.9 s. *Open, and what M0 closes on:* the per-stage
-  GPU times of a fast frame and a slow one (`LIGHTCRAFT_PROFILE=1` on
-  the `spike` example, in `~/spike-profile.txt` on the laptop), and
-  whether the laptop was on battery; if it's the GPU's power states, the
-  loupe needs to keep it awake or prepare frames ahead. Found meanwhile:
+  export is about 1.9 s. *Done (2026-10-13):* it's the GPU's power
+  states. The `idle` example renders the loupe back to back and after
+  the GPU has sat idle: 23 ms back to back (17 for a portrait frame,
+  which fits the loupe with fewer pixels, the other part of the spread),
+  the same after 200 ms idle, and 100 to 250 ms after a second or more,
+  for about a second of steady work, on mains with the performance
+  profile. `spike` decodes each frame on the CPU first, so its GPU
+  renders start cold. Something small for the GPU every 100 ms doesn't
+  hold it up (the driver goes by load), so it can't be kept awake
+  cheaply. A drag isn't touched: drafts from a cold GPU are 3 to 4 ms
+  (9 to 10 on the CPU). So M1's loupe doesn't count on a render in 60
+  ms after a pause: stepping shows the embedded preview at once and
+  the neighbours' renders are prepared ahead, as DESIGN.md has it, and
+  the first render after a pause comes in up to a quarter of a second
+  later. Found meanwhile:
   the GPU writes 8-bit output only, so the 16-bit export renders on the
   CPU (what `spike` times), and Lightcraft refuses software adapters, so
   it can't be tried without a real GPU.
@@ -179,32 +190,84 @@ The minimum that replaces darktable for a clean shoot that needs no
 denoising: open it, set exposure and white balance, send it to Omapix.
 The controls are Lightcraft's; the work is OmaLux's shell around them.
 
+Each item says where it stands. Built on 2026-10-13, Claude on the render
+path and Antigravity on the parts ported from Omacull (the recent list,
+marks, the filmstrip, export, the histogram), each on a branch of its own
+merged into `m1`. Everything here has headless tests; none of it has
+been tried by hand yet, which is Michael's to do from the installed
+binary.
+
 - Open a folder from the command line (so Omacull's Ctrl+E with
   `developer = "omalux"` works), a picker, or the recent list. Shows the
-  picks; a filter shows all.
+  picks; a filter shows all. *Done:* Ctrl+O, the recent shoots listed
+  when none is open, Ctrl+W to close, Ctrl+L for the picks or everything
+  (Lightroom's Enable Filters). A shoot reopens on the frame and filter
+  it was left with (`~/.config/omalux/state.toml`); one with no picks
+  yet opens on all of it.
 - Filmstrip and loupe, stepping with the arrows: the embedded preview at
-  once, the render after it, neighbours prepared ahead.
+  once, the render after it, neighbours prepared ahead. *Done:* the next
+  two frames and the previous one are developed ahead. Thumbnails are
+  the embedded previews, cached in `~/.cache/omalux/thumbnails/`; the
+  developed frame in the filmstrip (DESIGN.md's "Pipeline") isn't there
+  yet. Everything shown is in the monitor's colours where
+  Hyprland takes it for sRGB and it isn't: which monitor the window is
+  on comes from `hyprctl`, its profile from
+  `~/.config/omalux/monitors.toml` or else its EDID (Omacull's monitor
+  watching, ported); frames are rendered into its primaries, and the
+  embedded previews and thumbnails converted. The laptop's panel
+  (eDP-2) is found and gets its EDID's profile.
 - Marks: P, X, U, 0 to 5, into `xmp:Rating` as Omacull writes them.
+  *Done,* on a disk thread; a mark that can't be written is taken back.
 - The render worker pool (lifted from Lightcraft's pattern): drafts while
   dragging, full quality on release, on the GPU with the CPU fallback.
+  *Done:* two threads decode and one renders, and what's wanted replaces
+  what was waiting. `OMALUX_GPU=0` renders on the CPU.
 - Lightcraft's per-file camera match as the starting look, until M4's
-  pooled profile.
+  pooled profile. *Done.*
 - **White balance:** As Shot, Temp, Tint (Kelvin, through Lightcraft's
-  spectral matrices for the ILCE-7M3), the eyedropper (W).
+  spectral matrices for the ILCE-7M3), the eyedropper (W). *Done.* Temp's
+  track is spaced by ratio, as Lightroom's is, not by Kelvin as
+  Lightcraft's.
 - **Light:** Exposure, Contrast, Highlights, Shadows, Whites, Blacks.
-- **Presence:** Vibrance, Saturation.
+  *Done.*
+- **Presence:** Vibrance, Saturation. *Done.*
 - The histogram at the top of the right panel, with clipping warnings
-  (J).
-- Before/after (`\`), 100% zoom (Z).
+  (J). *Done:* the render's own histogram; J or a click on a triangle
+  colours blown highlights red and crushed shadows blue in the loupe.
+- Before/after (`\`), 100% zoom (Z). *Done.* Z, or a click on the frame:
+  a tap toggles and a hold is a look, a drag or the wheel pans, and
+  stepping stays at 100% on the same spot, all as Omacull's zoom behaves.
+  The current frame is decoded at full size when it's first zoomed, and
+  only the window on screen is rendered from it; until that's in, the
+  render that fits is shown enlarged. On a copy of one of Michael's
+  frames: the first window (2532×1596) in 150 ms, the next after a
+  slider nudge in 7.
 - Sliders by mouse (drag, wheel, double-click to reset) and by key (`,`
   `.` to select, `=` `−` to nudge), Lightroom's behaviour as Lightcraft
-  implements it, in Omarchy's theme.
+  implements it, in Omarchy's theme. *Done,* with typing a value: click
+  a slider's number, and Return, Tab or a click elsewhere applies what
+  was typed, Esc keeps the old one.
 - Edits saved in the sidecar as DESIGN.md describes, with the process
   version; undo, redo, reset. The reference renders the process version
-  guards, set up from the first build.
+  guards, set up from the first build. *Done:* a drag is one step, saved
+  when it ends, on the same disk thread as the marks; undo history is
+  per frame, for the session. An edit made with a newer OmaLux is shown
+  as a fresh raw and never written over. The reference renders are the
+  two CC0 ILCE-7M3 raws developed five ways (fresh, and edits that
+  between them move every control M1 shows), kept as small PNGs in
+  `crates/omalux-engine/testdata/reference/`; a test renders them again
+  and fails on a change as small as 0.05 EV, saying to bump the process
+  version. `OMALUX_REFERENCE` adds a folder of Michael's own frames,
+  with their references beside them, outside the repo.
 - **Export:** 16-bit TIFF with ICC into `<shoot>/omalux/` (set in
   `config.toml`); Ctrl+E opens them in Omapix, Ctrl+Shift+E just exports.
-  From M0: that they look right in Omapix, as tabs.
+  From M0: that they look right in Omapix, as tabs. *Done* for the
+  current frame (the selection is M2's): `export_folder` and `editor` in
+  `config.toml`. A TIFF that's already there is never written over,
+  since Omapix saves its retouching back into it and keeps its layers
+  beside it; Ctrl+E opens the one that's there. *Open:* how a frame is
+  exported again after its edit changes, which that rule leaves no way
+  to do short of deleting the TIFF; and Michael's look at them in Omapix.
 
 ## M2. Copy, paste and stacks
 

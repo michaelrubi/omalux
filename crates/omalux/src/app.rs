@@ -1,33 +1,154 @@
-//! The window. For now (M0) an empty one: the theme, the keys, the status
-//! bar and a folder to open, the shell M1 builds the develop view in. Its
-//! patterns (a `Command` a key or a script runs, `build` for tests, the
-//! `Harness`) are Omacull's.
+//! The window: a shoot's frames in the loupe, the filmstrip under it and
+//! the develop panel on the right, as Lightroom's Develop module has them.
+//! Its patterns (a `Command` a key or a script runs, `build` for tests,
+//! the `Harness`) are Omacull's.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use egui::{Align2, FontId, RichText, Ui};
+use lightcraft_codecs::display::DisplayProfile;
+use lightcraft_develop::DevelopSettings;
+use lightcraft_pipeline::SourceInfo;
+use omalux_engine::disk::{Disk, Mark, Problem};
+use omalux_engine::edit::{self, History};
+use omalux_engine::shoot::{Filter, Shoot, Step, stars};
+use omalux_engine::sidecar;
 
 use crate::commands::Command;
+use crate::config::Config;
+use crate::develop::{self, PanelOut};
+use crate::filmstrip::{Filmstrip, STRIP_HEIGHT};
 use crate::hotkeys::{self, format_shortcut};
+use crate::loupe::{Loupe, News};
+use crate::monitor;
+use crate::render::{Decoder, Renderer, View, Wanted};
+use crate::state::{Place, State};
 use crate::theme::{self, Theme};
+
+/// The develop panel's width.
+const PANEL_WIDTH: f32 = 300.0;
+/// How many frames are developed ahead of the cursor, the way it's
+/// going, and behind it.
+const AHEAD: usize = 2;
+const BEHIND: usize = 1;
+
+/// A frame whose raw has been decoded this session: its edit, and what
+/// its settings are read against.
+struct Editing {
+    history: History,
+    info: Arc<SourceInfo>,
+    /// The history's settings, as the renderer is handed them.
+    settings: Arc<DevelopSettings>,
+}
+
+impl Editing {
+    /// Change the edit with `change`, which says whether it did.
+    fn edit(&mut self, change: impl FnOnce(&mut History, &SourceInfo) -> bool) -> bool {
+        let changed = change(&mut self.history, &self.info);
+        if *self.settings != *self.history.settings() {
+            self.settings = Arc::new(self.history.settings().clone());
+        }
+        changed
+    }
+}
+
+/// Where OmaLux keeps what it remembers; somewhere else in tests.
+pub struct Paths {
+    /// Where state is saved (`state.toml`); nowhere in most tests.
+    pub state: Option<PathBuf>,
+    /// Where the filmstrip's thumbnails are cached; nowhere in tests.
+    pub thumbnails: Option<PathBuf>,
+    /// Where chosen monitor profiles are kept (`monitors.toml`); nowhere in tests.
+    pub monitors: Option<PathBuf>,
+}
+
+/// The threads behind the window: a test's renderer decodes what the
+/// test gives it.
+pub struct Workers {
+    pub renderer: Renderer,
+    pub disk: Disk,
+}
+
+/// Frames being exported to a folder, and how it's gone so far.
+struct Exporting {
+    to: PathBuf,
+    /// The TIFF files that were asked for, including those already present.
+    tiffs: Vec<PathBuf>,
+    total: usize,
+    exported: usize,
+    /// There already, and left as they were.
+    there: usize,
+    /// Those that couldn't be exported, and why.
+    failed: Vec<String>,
+    /// Whether to open in the configured program once done.
+    edit: bool,
+    /// Whether each was exported, as it's dealt with.
+    results: Receiver<Result<bool, String>>,
+}
+
+impl Exporting {
+    /// How it went, and whether that's a problem.
+    fn said(&self) -> (String, bool) {
+        let to = file_name(&self.to);
+        if let Some(first) = self.failed.first() {
+            return (format!("Couldn't export {} of {} to {to}, e.g. {first}", self.failed.len(), self.total), true);
+        }
+        let there = match self.there {
+            0 => String::new(),
+            1 => "; 1 was there already".to_owned(),
+            n => format!("; {n} were there already"),
+        };
+        (format!("Exported {} of {} to {to}{there}", self.exported, self.total), false)
+    }
+}
 
 pub struct App {
     theme: Theme,
     theme_rx: Receiver<Theme>,
+    config: Config,
     /// Problems found at startup, shown in the status bar.
     warnings: Vec<String>,
     /// Commands to run, one a frame, from `OMALUX_SCRIPT` (comma-separated
     /// command names, e.g. `Open,Quit`). For testing without a keyboard.
     script: VecDeque<Command>,
-    /// The shoot open, its folder.
-    folder: Option<PathBuf>,
+    state: State,
+    shoot: Option<Shoot>,
+    renderer: Renderer,
+    loupe: Loupe,
+    /// The edits their sidecars held, of frames not decoded yet: read
+    /// when a frame is first wanted.
+    saved: HashMap<PathBuf, Option<Arc<DevelopSettings>>>,
+    /// Frames whose sidecar holds an edit this OmaLux can't read (a newer
+    /// one's, say): shown as fresh raws and never written over.
+    unreadable: HashSet<PathBuf>,
+    /// The frames edited or looked at this session, each with its steps
+    /// to undo.
+    edits: HashMap<PathBuf, Editing>,
+    /// The slider the keys act on, by its place in the panel.
+    selected: usize,
+    /// A slider is being dragged: the loupe gets drafts.
+    dragging: bool,
+    /// The White Balance Selector is out: a click on the frame picks.
+    selector: bool,
+    /// The loupe shows the current frame with no edit, until it's left.
+    before: bool,
     /// The folder picker, while it's open.
     picking: Option<Receiver<Option<PathBuf>>>,
+    /// Frames being exported, while the export runs.
+    exporting: Option<Exporting>,
     /// The last thing to tell the user, and whether it's a problem.
     message: Option<(String, bool)>,
     title: String,
+    disk: Disk,
+    filmstrip: Filmstrip,
+    /// The clipping warnings are on: blown highlights and crushed
+    /// shadows are coloured in the loupe.
+    clipping: bool,
+    watch: monitor::Watch,
+    pub display: Option<Arc<DisplayProfile>>,
 }
 
 impl App {
@@ -39,7 +160,9 @@ impl App {
         let theme = Theme::load();
         ctx.set_visuals(theme.visuals());
 
-        let warnings = hotkeys::load();
+        let (config, config_warnings) = Config::load();
+        let mut warnings = hotkeys::load();
+        warnings.extend(config_warnings);
         for w in &warnings {
             log::warn!("{w}");
         }
@@ -55,35 +178,126 @@ impl App {
                 parsed
             })
             .collect();
-        let mut app = Self::build(theme, theme::watch(ctx.clone()), warnings, script);
+        // OMALUX_GPU=0 develops on the CPU.
+        let gpu = std::env::var("OMALUX_GPU").as_deref() != Ok("0");
+        if gpu {
+            lightcraft_gpu::warm_up();
+        }
+        let wake = ctx.clone();
+        let renderer = Renderer::new(Decoder::raw(), gpu, move || wake.request_repaint());
+        let wake = ctx.clone();
+        let disk = Disk::new(move || wake.request_repaint());
+        let paths = Paths {
+            state: hotkeys::config_dir().map(|dir| dir.join("state.toml")),
+            thumbnails: omalux_engine::thumbs::default_dir(),
+            monitors: hotkeys::config_dir().map(|dir| dir.join("monitors.toml")),
+        };
+        let mut app = Self::build(theme, theme::watch(ctx.clone()), config, warnings, script, Workers { renderer, disk }, paths);
         if let Some(path) = open {
             app.open(path);
         }
         app
     }
 
-    fn build(theme: Theme, theme_rx: Receiver<Theme>, warnings: Vec<String>, script: VecDeque<Command>) -> Self {
+    fn build(
+        theme: Theme,
+        theme_rx: Receiver<Theme>,
+        config: Config,
+        warnings: Vec<String>,
+        script: VecDeque<Command>,
+        workers: Workers,
+        paths: Paths,
+    ) -> Self {
+        let state = paths.state.map_or_else(State::default, State::load_from);
+        let watch = paths.monitors.map_or_else(monitor::Watch::off, |dir| monitor::Watch::new(Some(dir)));
+        let display = watch.profile().cloned();
+        let mut filmstrip = Filmstrip::new(paths.thumbnails);
+        filmstrip.set_display(display.clone());
+        workers.renderer.set_display(display.clone());
         Self {
             theme,
             theme_rx,
+            config,
             warnings,
             script,
-            folder: None,
+            state,
+            shoot: None,
+            renderer: workers.renderer,
+            loupe: Loupe::default(),
+            saved: HashMap::new(),
+            unreadable: HashSet::new(),
+            edits: HashMap::new(),
+            selected: develop::sliders().position(|spec| spec.id == "light.exposure").unwrap_or(0),
+            dragging: false,
+            selector: false,
+            before: false,
             picking: None,
+            exporting: None,
             message: None,
             title: String::new(),
+            disk: workers.disk,
+            filmstrip,
+            clipping: false,
+            watch,
+            display,
+        }
+    }
+
+    /// Remember where the open shoot was left, to come back to it.
+    fn remember_place(&mut self) {
+        if let Some(shoot) = &self.shoot {
+            let frame = shoot.frame().name();
+            self.state.remember(Place { dir: shoot.dir().to_path_buf(), frame, filter: shoot.filter() });
         }
     }
 
     /// Open a shoot: its folder, or a raw in it.
     fn open(&mut self, path: PathBuf) {
-        let dir = if path.is_dir() { path } else { path.parent().map(Path::to_path_buf).unwrap_or(path) };
+        let raw = (!path.is_dir()).then(|| path.clone());
+        let dir = if path.is_dir() { path.clone() } else { path.parent().map(Path::to_path_buf).unwrap_or(path.clone()) };
         if !dir.is_dir() {
+            self.state.remove_recent(&dir);
             self.message = Some((format!("Couldn't open {}: there's no such folder", dir.display()), true));
             return;
         }
-        self.folder = Some(dir);
+        match Shoot::open(&dir) {
+            Ok((mut shoot, unread)) => {
+                self.remember_place();
+                let place = self.state.place(shoot.dir()).cloned();
+                if let Some(raw) = raw {
+                    if !shoot.go_to_path(&raw) {
+                        log::warn!("{} isn't a raw in the shoot", path.display());
+                    }
+                } else if let Some(place) = place {
+                    shoot.set_filter(place.filter);
+                    if let Some(index) = shoot.frames().iter().position(|f| f.name() == place.frame) {
+                        shoot.go_to(index);
+                    }
+                }
+                self.state.add_recent(shoot.dir());
+                self.message = (!unread.is_empty()).then(|| (format!("Couldn't read {}", unread.join("; ")), true));
+                self.shoot = Some(shoot);
+                self.saved.clear();
+                self.unreadable.clear();
+                self.edits.clear();
+                self.filmstrip.reset();
+                self.leave();
+            }
+            Err(e) => self.message = Some((format!("Couldn't open {}: {e}", dir.display()), true)),
+        }
+    }
+
+    /// Close the open shoot, back to the empty state: its place is
+    /// remembered, as when another is opened.
+    fn close(&mut self) {
+        self.remember_place();
+        self.shoot = None;
         self.message = None;
+        self.saved.clear();
+        self.unreadable.clear();
+        self.edits.clear();
+        self.filmstrip.reset();
+        self.leave();
     }
 
     fn pick(&mut self, ctx: &egui::Context) {
@@ -91,8 +305,8 @@ impl App {
             return;
         }
         let mut dialog = rfd::FileDialog::new().set_title("Open Folder");
-        if let Some(dir) = &self.folder {
-            dialog = dialog.set_directory(dir);
+        if let Some(shoot) = &self.shoot {
+            dialog = dialog.set_directory(shoot.dir());
         }
         let (tx, rx) = channel();
         let ctx = ctx.clone();
@@ -115,14 +329,283 @@ impl App {
         }
     }
 
+    fn export(&mut self, edit: bool, ctx: &egui::Context) {
+        let Some(shoot) = &self.shoot else { return };
+        if self.exporting.is_some() {
+            return;
+        }
+        let frames = vec![shoot.frame().path.clone()];
+        self.export_frames(frames, edit, ctx);
+    }
+
+    fn export_frames(&mut self, frames: Vec<PathBuf>, edit: bool, ctx: &egui::Context) {
+        let Some(shoot) = &self.shoot else { return };
+        if frames.is_empty() || self.exporting.is_some() {
+            return;
+        }
+        let to = shoot.dir().join(&self.config.export_folder);
+        let tiffs: Vec<PathBuf> = frames
+            .iter()
+            .map(|f| {
+                let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                to.join(format!("{stem}.tif"))
+            })
+            .collect();
+        let (tx, rx) = channel();
+        // Each with its edit as it stands, where it's been opened this
+        // session; the rest are exported with what their sidecars hold.
+        let to_export: Vec<(PathBuf, Option<Arc<DevelopSettings>>)> =
+            frames.iter().map(|frame| (frame.clone(), self.edits.get(frame).map(|editing| editing.settings.clone()))).collect();
+        let (ctx, target) = (ctx.clone(), to.clone());
+        let total = frames.len();
+        self.message = Some((format!("Exporting 1 of {total}…"), false));
+        self.exporting = Some(Exporting {
+            to,
+            tiffs,
+            total,
+            exported: 0,
+            there: 0,
+            failed: Vec::new(),
+            edit,
+            results: rx,
+        });
+        std::thread::spawn(move || {
+            for (frame, settings) in to_export {
+                let res = omalux_engine::export::export(&frame, &target, settings.as_deref())
+                    .map_err(|e| format!("{}: {e}", file_name(&frame)));
+                if tx.send(res).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    fn finish_exporting(&mut self) {
+        let Some(exporting) = &mut self.exporting else { return };
+        let mut more = false;
+        loop {
+            match exporting.results.try_recv() {
+                Ok(Ok(true)) => exporting.exported += 1,
+                Ok(Ok(false)) => exporting.there += 1,
+                Ok(Err(why)) => exporting.failed.push(why),
+                Err(TryRecvError::Empty) if more => {
+                    let done = exporting.exported + exporting.there + exporting.failed.len();
+                    if done < exporting.total {
+                        let text = format!("Exporting {} of {}…", done + 1, exporting.total);
+                        return self.message = Some((text, false));
+                    }
+                    return;
+                }
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => break,
+            }
+            more = true;
+        }
+        let Some(exporting) = self.exporting.take() else { return };
+        // Only what's there: a frame that couldn't be exported has no TIFF.
+        let tiffs: Vec<&PathBuf> = exporting.tiffs.iter().filter(|tiff| tiff.exists()).collect();
+        if exporting.edit && !tiffs.is_empty() {
+            let started = std::process::Command::new(&self.config.editor)
+                .arg("--round-trip")
+                .args(tiffs)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match started {
+                Ok(mut child) => {
+                    std::thread::spawn(move || child.wait());
+                    self.message = Some(exporting.said());
+                }
+                Err(e) => {
+                    self.message = Some((format!("Couldn't start {}: {e}", self.config.editor), true));
+                }
+            }
+        } else {
+            self.message = Some(exporting.said());
+        }
+    }
+
     fn run(&mut self, command: Command, ctx: &egui::Context) {
         match command {
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Command::Open => self.pick(ctx),
+            Command::Close => self.close(),
+            Command::Export => self.export(false, ctx),
+            Command::ExportAndEdit => self.export(true, ctx),
+            Command::Previous => self.step_to(Step::Previous),
+            Command::Next => self.step_to(Step::Next),
+            Command::First => self.step_to(Step::First),
+            Command::Last => self.step_to(Step::Last),
+            Command::Filter => {
+                if let Some(shoot) = &mut self.shoot {
+                    shoot.set_filter(if shoot.filter() == Filter::Picks { Filter::All } else { Filter::Picks });
+                }
+            }
+            Command::Undo => self.edit(|history, _| history.undo()),
+            Command::Redo => self.edit(|history, _| history.redo()),
+            Command::Reset => self.edit(|history, _| history.reset()),
+            Command::SliderPrevious => self.selected = self.selected.saturating_sub(1),
+            Command::SliderNext => self.selected = (self.selected + 1).min(develop::sliders().count() - 1),
+            Command::Increase => self.nudge(1.0),
+            Command::Decrease => self.nudge(-1.0),
+            Command::IncreaseMore => self.nudge(5.0),
+            Command::DecreaseMore => self.nudge(-5.0),
+            Command::WhiteBalance => self.selector = !self.selector && self.shoot.is_some(),
+            Command::BeforeAfter => self.before = !self.before && self.shoot.is_some(),
+            Command::Clipping => self.clipping = !self.clipping,
+            Command::Zoom => {
+                let (pointer, time) = ctx.input(|i| (i.pointer.hover_pos(), i.time));
+                self.loupe.key_down(pointer, time);
+            }
+            Command::Pick
+            | Command::Reject
+            | Command::Unmark
+            | Command::Star1
+            | Command::Star2
+            | Command::Star3
+            | Command::Star4
+            | Command::Star5 => {
+                if let Some(rating) = command.rating()
+                    && let Some(shoot) = &mut self.shoot
+                    && let Some(change) = shoot.mark(rating)
+                {
+                    self.disk.write(Mark {
+                        path: shoot.frame().path.clone(),
+                        rating: change.now,
+                    });
+                }
+            }
         }
     }
 
+    /// Marks that didn't reach their sidecar are put back as they are on
+    /// disk; an edit that didn't is said.
+    fn disk_problems(&mut self) {
+        let problems: Vec<Problem> = self.disk.problems().collect();
+        for problem in problems {
+            let text = match problem {
+                Problem::Sidecar { path, error, on_disk } => {
+                    if let Some(shoot) = &mut self.shoot {
+                        shoot.restore(&path, on_disk);
+                    }
+                    format!("Couldn't mark {}: {error}", file_name(&path))
+                }
+                Problem::Edit { path, error } => format!("Couldn't save {}: {error}", file_name(&sidecar::path_for(&path))),
+            };
+            self.message = Some((text, true));
+        }
+    }
+
+    fn step_to(&mut self, step: Step) {
+        if let Some(shoot) = &mut self.shoot
+            && shoot.step(step)
+        {
+            self.leave();
+        }
+    }
+
+    /// What ends when the cursor leaves a frame: a drag, the White Balance
+    /// Selector, the look at Before.
+    fn leave(&mut self) {
+        (self.dragging, self.selector, self.before) = (false, false, false);
+    }
+
+    /// The White Balance Selector clicked the current frame at `at`, a
+    /// share of its width and height: what's there becomes neutral, and
+    /// the selector is put away, as Lightroom's is.
+    fn pick_white_balance(&mut self, at: [f64; 2]) {
+        self.selector = false;
+        let Some(source) = self.shoot.as_ref().and_then(|shoot| self.renderer.source(&shoot.frame().path)) else { return };
+        self.edit(|history, info| history.set(|settings| edit::pick_white_balance(settings, info, &source, at)));
+    }
+
+    /// Change the current frame's edit in one step, and save it. `change`
+    /// says whether it changed anything. Nothing happens until the frame's
+    /// raw has been decoded.
+    fn edit(&mut self, change: impl FnOnce(&mut History, &SourceInfo) -> bool) {
+        let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
+        if self.locked(&path) {
+            return;
+        }
+        if self.edits.get_mut(&path).is_some_and(|editing| editing.edit(change)) {
+            self.save(&path);
+        }
+    }
+
+    /// Whether a frame's edit is one this OmaLux can't read, and so mustn't
+    /// change: says so if it is.
+    fn locked(&mut self, path: &Path) -> bool {
+        let locked = self.unreadable.contains(path);
+        if locked {
+            let text = format!("{}'s edit can't be read by this OmaLux, so it's left as it is", file_name(path));
+            self.message = Some((text, true));
+        }
+        locked
+    }
+
+    /// Send a frame's edit to its sidecar, on the disk thread.
+    fn save(&mut self, path: &Path) {
+        let Some(editing) = self.edits.get(path) else { return };
+        self.disk.save(path.to_path_buf(), sidecar::Edit::new(editing.history.settings().clone()));
+    }
+
+    /// Move the selected slider by `steps` nudges.
+    fn nudge(&mut self, steps: f64) {
+        let Some(spec) = develop::sliders().nth(self.selected) else { return };
+        self.edit(|history, info| {
+            let value = lightcraft_develop::controls::get(history.settings(), spec.id).unwrap_or(spec.default);
+            history.set(|settings| {
+                edit::set_control(settings, info, spec.id, crate::slider::nudged(spec, value, steps));
+            })
+        });
+    }
+
+    /// What was done in the develop panel: a drag's changes are drafts
+    /// in the loupe and one step once it ends, saved then.
+    fn panel(&mut self, out: PanelOut) {
+        let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
+        if out != PanelOut::default() && self.locked(&path) {
+            return;
+        }
+        let Some(editing) = self.edits.get_mut(&path) else { return };
+        let mut save = false;
+        if out.as_shot {
+            save = editing.edit(|history, info| history.set(|settings| edit::as_shot(settings, info)));
+        }
+        if let Some((index, slid)) = out.slider {
+            if slid.touched {
+                self.selected = index;
+            }
+            if let (Some(value), Some(spec)) = (slid.value, develop::sliders().nth(index)) {
+                editing.edit(|history, info| {
+                    history.change(|settings| {
+                        edit::set_control(settings, info, spec.id, value);
+                    });
+                    true
+                });
+            }
+            self.dragging = (self.dragging || slid.drag_started) && !slid.drag_stopped;
+            if slid.drag_stopped {
+                save = editing.edit(|history, _| history.commit());
+            }
+        }
+        if save {
+            self.save(&path);
+        }
+    }
+
+    /// The script's next command, once everything wanted has been
+    /// developed: so a script sees what its last command led to, and
+    /// `Next,Zoom,Quit` on real raws renders each step before the next.
     fn run_script(&mut self, ctx: &egui::Context) {
+        if self.script.is_empty() {
+            return;
+        }
+        if self.renderer.busy() {
+            return ctx.request_repaint();
+        }
         let Some(command) = self.script.pop_front() else {
             return;
         };
@@ -137,15 +620,35 @@ impl App {
             ctx.set_visuals(theme.visuals());
             self.theme = theme;
         }
+        if self.watch.check(ctx) {
+            self.display = self.watch.profile().cloned();
+            self.filmstrip.set_display(self.display.clone());
+            self.renderer.set_display(self.display.clone());
+            // What the loupe holds was for the other monitor.
+            self.loupe.retain(|_| false);
+        }
         self.finish_picking();
+        self.develop(ctx);
+        self.finish_exporting();
+        self.disk_problems();
         if !ctx.egui_wants_keyboard_input() {
             for command in Command::pressed(ctx) {
                 self.run(command, ctx);
             }
         }
         self.run_script(ctx);
-        let title = match &self.folder {
-            Some(dir) => format!("{} — OmaLux", file_name(dir)),
+        // The zoom key let go ends a look.
+        if let Some(key) = hotkeys::current().command(Command::Zoom).map(|s| s.logical_key)
+            && let (false, time) = ctx.input(|i| (i.key_down(key), i.time))
+        {
+            self.loupe.key_up(time);
+        }
+        if let Some(shoot) = &self.shoot {
+            self.filmstrip.sync_shoot(shoot, ctx);
+            self.filmstrip.collect(ctx, shoot.current());
+        }
+        let title = match &self.shoot {
+            Some(shoot) => format!("{} — OmaLux", file_name(shoot.dir())),
             None => "OmaLux".into(),
         };
         if title != self.title {
@@ -154,20 +657,161 @@ impl App {
         }
     }
 
+    /// Ask for the current frame and its neighbours to be developed, and
+    /// take in what's been finished.
+    fn develop(&mut self, ctx: &egui::Context) {
+        let paths: Vec<PathBuf> = self.shoot.as_ref().map_or_else(Vec::new, |shoot| {
+            let frames = std::iter::once(shoot.current()).chain(shoot.neighbours(AHEAD, BEHIND));
+            frames.map(|i| shoot.frames()[i].path.clone()).collect()
+        });
+        let mut wanted: Vec<Wanted> = paths.into_iter().map(|path| Wanted { settings: self.settings_of(&path), path }).collect();
+        // Before: the current frame as a fresh raw (`None` is one).
+        if let Some(current) = wanted.first_mut().filter(|_| self.before) {
+            current.settings = None;
+        }
+        self.loupe.retain(|path| wanted.iter().any(|w| w.path == path));
+        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom: self.loupe.zoom() });
+        for news in self.loupe.take(ctx, self.renderer.done()) {
+            match news {
+                News::Decoded(path, info) => {
+                    // Its edit starts from what its sidecar held, or as a fresh raw.
+                    let fresh = DevelopSettings::for_raw(info.as_shot_temp, info.as_shot_tint);
+                    let saved = self.saved.remove(&path).flatten().map(|settings| (*settings).clone());
+                    let history = History::new(fresh, saved);
+                    let settings = Arc::new(history.settings().clone());
+                    self.edits.entry(path).or_insert(Editing { history, info, settings });
+                }
+                News::Failed(path, error) => self.message = Some((format!("Couldn't develop {}: {error}", file_name(&path)), true)),
+            }
+        }
+    }
+
+    /// A frame's settings as they stand: its edit this session, or else
+    /// the one in its sidecar, read the first time it's asked for. `None`
+    /// for a frame with neither.
+    fn settings_of(&mut self, path: &Path) -> Option<Arc<DevelopSettings>> {
+        if let Some(editing) = self.edits.get(path) {
+            return Some(editing.settings.clone());
+        }
+        if let Some(saved) = self.saved.get(path) {
+            return saved.clone();
+        }
+        let read = sidecar::read(path).and_then(|xmp| xmp.as_deref().map(sidecar::edit).transpose());
+        let saved = match read {
+            Ok(saved) => saved.flatten(),
+            Err(e) => {
+                self.message = Some((format!("Couldn't read the edit in {}: {e}", file_name(&sidecar::path_for(path))), true));
+                self.unreadable.insert(path.to_path_buf());
+                None
+            }
+        };
+        let settings = saved.map(|edit| Arc::new(edit.settings));
+        self.saved.insert(path.to_path_buf(), settings.clone());
+        settings
+    }
+
     fn show(&mut self, ui: &mut Ui) {
         let bar = egui::Frame::new().fill(self.theme.dark_background).inner_margin(egui::Margin::symmetric(8, 4));
         egui::Panel::bottom("status").frame(bar).show(ui, |ui| self.status_bar(ui));
+        if self.shoot.is_some() {
+            let strip = egui::Frame::new().fill(self.theme.darker_background);
+            egui::Panel::bottom("filmstrip").frame(strip).resizable(false).exact_size(STRIP_HEIGHT).show(ui, |ui| self.filmstrip(ui));
+            let side = egui::Frame::new().fill(self.theme.dark_background).inner_margin(egui::Margin::same(6));
+            egui::Panel::right("develop").frame(side).resizable(false).exact_size(PANEL_WIDTH).show(ui, |ui| self.develop_panel(ui));
+        }
         let pasteboard = egui::Frame::new().fill(self.theme.pasteboard());
-        egui::CentralPanel::no_frame().frame(pasteboard).show(ui, |ui| {
-            if self.folder.is_none() {
-                let hint = match hotkeys::current().command(Command::Open) {
-                    Some(s) => format!("{} to open a shoot", format_shortcut(&s)),
-                    None => "Open a shoot".to_owned(),
-                };
-                let rect = ui.max_rect();
-                ui.painter().text(rect.center(), Align2::CENTER_CENTER, hint, FontId::proportional(16.0), self.theme.dark_foreground);
+        let mut picked = None;
+        let mut clicked = None;
+        egui::CentralPanel::no_frame().frame(pasteboard).show(ui, |ui| match &self.shoot {
+            Some(shoot) => {
+                picked = self.loupe.show(ui, &shoot.frame().path, self.selector);
+                if self.before {
+                    let corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);
+                    ui.painter().text(corner, Align2::LEFT_TOP, "Before", FontId::proportional(13.0), self.theme.foreground);
+                }
             }
+            None => clicked = self.empty_state(ui),
         });
+        if let Some(at) = picked {
+            self.pick_white_balance(at);
+        }
+        if let Some(dir) = clicked {
+            self.open(dir);
+        }
+    }
+
+    /// The shown frames' thumbnails, under the loupe.
+    fn filmstrip(&mut self, ui: &mut Ui) {
+        let Some(shoot) = &mut self.shoot else { return };
+        if let Some(clicked) = self.filmstrip.show(ui, shoot, &self.theme)
+            && clicked != shoot.current()
+        {
+            shoot.go_to(clicked);
+            self.leave();
+        }
+    }
+
+    /// The histogram, and the panels under it: White Balance, Light,
+    /// Presence.
+    fn develop_panel(&mut self, ui: &mut Ui) {
+        // The histogram of the frame as the loupe shows it.
+        let path = self.shoot.as_ref().map(|shoot| &shoot.frame().path);
+        let histogram = path.and_then(|path| self.loupe.histogram(path));
+        if crate::histogram::show(ui, &self.theme, histogram, self.clipping) {
+            self.clipping = !self.clipping;
+        }
+        ui.add_space(6.0);
+        let Some(editing) = self.shoot.as_ref().and_then(|shoot| self.edits.get(&shoot.frame().path)) else { return };
+        let out = develop::show(ui, &self.theme, editing.history.settings(), editing.history.fresh(), self.selected);
+        self.panel(out);
+    }
+
+    /// With no shoot open: how to open one, and the shoots opened recently.
+    /// Returns the path clicked, if one was.
+    fn empty_state(&self, ui: &mut Ui) -> Option<PathBuf> {
+        let hint = match hotkeys::current().command(Command::Open) {
+            Some(s) => format!("{} to open a shoot", format_shortcut(&s)),
+            None => "Open a shoot".to_owned(),
+        };
+        let mut clicked = None;
+        ui.vertical_centered(|ui| {
+            let space = if self.state.recent.is_empty() { 0.45 } else { 0.2 };
+            ui.add_space(ui.available_height() * space);
+            ui.label(RichText::new(hint).size(16.0).color(self.theme.dark_foreground));
+            if self.state.recent.is_empty() {
+                return;
+            }
+            ui.add_space(20.0);
+            ui.label(RichText::new("Recent shoots").strong().color(self.theme.foreground));
+            ui.add_space(6.0);
+            egui::Frame::new()
+                .fill(self.theme.dark_background)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_max_width(450.0);
+                    let (big, small) = (FontId::proportional(13.0), FontId::proportional(11.0));
+                    for dir in self.state.recent.iter().take(8) {
+                        let size = egui::vec2(ui.available_width(), 26.0);
+                        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                        if response.hovered() {
+                            ui.painter().rect_filled(rect, 0.0, self.theme.lighter_background);
+                        }
+                        let painter = ui.painter();
+                        let left = egui::pos2(rect.left() + 6.0, rect.center().y);
+                        let (name, foreground) = (file_name(dir), self.theme.foreground);
+                        let name = painter.text(left, Align2::LEFT_CENTER, name, big.clone(), foreground);
+                        // The folder it's in, shortened from the left to fit.
+                        let room = rect.right() - 6.0 - (name.right() + 24.0);
+                        let parent = elided(painter, &home_relative(dir.parent().unwrap_or(dir)), &small, room);
+                        let right = egui::pos2(rect.right() - 6.0, rect.center().y);
+                        painter.text(right, Align2::RIGHT_CENTER, parent, small.clone(), self.theme.dark_foreground);
+                        if response.clicked() {
+                            clicked = Some(dir.clone());
+                        }
+                    }
+                });
+        });
+        clicked
     }
 
     fn status_bar(&self, ui: &mut Ui) {
@@ -181,8 +825,8 @@ impl App {
                 // The room that's left is the status line's, cut short in a
                 // narrow window.
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    let (text, colour) = match &self.folder {
-                        Some(dir) => (dir.display().to_string(), self.theme.foreground),
+                    let (text, colour) = match &self.shoot {
+                        Some(shoot) => (status(shoot), self.theme.foreground),
                         None => ("No folder open".to_owned(), self.theme.dark_foreground),
                     };
                     ui.add(egui::Label::new(RichText::new(text).color(colour)).truncate());
@@ -192,8 +836,43 @@ impl App {
     }
 }
 
+/// The current frame, its mark, its place among the frames shown, and the filter.
+fn status(shoot: &Shoot) -> String {
+    let shown = shoot.shown_indices();
+    let place = shown.iter().position(|&i| i == shoot.current()).map_or(0, |p| p + 1);
+    let of = match shoot.filter() {
+        Filter::Picks => format!("{} picks of {} frames", shown.len(), shoot.frames().len()),
+        Filter::All => format!("{} frames", shown.len()),
+    };
+    let mark = stars(shoot.frame().rating);
+    let mark = if mark.is_empty() { String::new() } else { format!("{mark}   ") };
+    format!("{}   {mark}{place} / {of}", shoot.frame().name())
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// A path with the home folder written as ~.
+fn home_relative(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match home.as_deref().and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) => Path::new("~").join(rest).display().to_string(),
+        None => path.display().to_string(),
+    }
+}
+
+/// `text` without as much of its start as it takes to fit `width`.
+fn elided(painter: &egui::Painter, text: &str, font: &FontId, width: f32) -> String {
+    let fits = |t: &str| painter.layout_no_wrap(t.to_owned(), font.clone(), egui::Color32::WHITE).size().x <= width;
+    if fits(text) {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    (1..chars.len())
+        .map(|skip| format!("…{}", chars[skip..].iter().collect::<String>()))
+        .find(|t| fits(t))
+        .unwrap_or_default()
 }
 
 impl eframe::App for App {
@@ -204,6 +883,11 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
     }
+
+    fn on_exit(&mut self) {
+        self.remember_place();
+        self.disk.finish();
+    }
 }
 
 #[cfg(test)]
@@ -211,6 +895,7 @@ mod tests {
     use super::*;
 
     use egui::{Event, Key, Modifiers};
+    use omalux_engine::sidecar;
 
     /// The app driven with synthetic events, with no window or GPU.
     struct Harness {
@@ -221,9 +906,16 @@ mod tests {
 
     impl Harness {
         fn new(script: &[Command]) -> Self {
+            Self::with_paths(script, Paths { state: None, thumbnails: None, monitors: None })
+        }
+
+        fn with_paths(script: &[Command], paths: Paths) -> Self {
             let (_tx, rx) = channel();
             let ctx = egui::Context::default();
-            let app = App::build(Theme::default(), rx, Vec::new(), script.iter().copied().collect());
+            let renderer = Renderer::new(crate::render::tests::decoder(), false, || {});
+            let wake = ctx.clone();
+            let disk = Disk::new(move || wake.request_repaint());
+            let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect(), Workers { renderer, disk }, paths);
             Self { ctx, app, time: 0.0 }
         }
 
@@ -244,11 +936,95 @@ mod tests {
             output
         }
 
+        /// Frames until everything wanted has been developed and shown.
+        fn settle(&mut self) {
+            for _ in 0..2000 {
+                // A frame can ask for more (the first one drawn tells the
+                // renderer how much room the loupe has), so it's settled
+                // when a frame leaves the renderer with nothing to do and
+                // the next has taken in what was done.
+                self.frame(vec![]);
+                if !self.app.renderer.busy() {
+                    self.frame(vec![]);
+                    if !self.app.renderer.busy() {
+                        return;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            panic!("the renderer never finished");
+        }
+
+        /// Where a slider's track is on screen.
+        fn track(&self, id: &'static str) -> egui::Rect {
+            self.ctx.data(|d| d.get_temp(egui::Id::new(id))).expect("the slider has been drawn")
+        }
+
+        /// Where a slider's value is on screen.
+        fn value(&self, id: &'static str) -> egui::Rect {
+            self.ctx.data(|d| d.get_temp(egui::Id::new((id, "value")))).expect("the slider value has been drawn")
+        }
+
+        fn type_text(&mut self, text: &str) -> egui::FullOutput {
+            self.frame(vec![Event::Text(text.to_owned())])
+        }
+
+        fn pointer(&mut self, at: egui::Pos2, pressed: Option<bool>) {
+            let mut events = vec![Event::PointerMoved(at)];
+            if let Some(pressed) = pressed {
+                events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+            }
+            self.frame(events);
+        }
+
+        /// The current frame's settings.
+        fn settings(&self) -> &DevelopSettings {
+            let path = &self.app.shoot.as_ref().unwrap().frame().path;
+            self.app.edits[path].history.settings()
+        }
+
+        /// The edit in the current frame's sidecar.
+        fn saved(&self) -> Option<DevelopSettings> {
+            self.app.disk.flush();
+            let path = &self.app.shoot.as_ref().unwrap().frame().path;
+            sidecar::edit(&sidecar::read(path).unwrap()?).unwrap().map(|edit| edit.settings)
+        }
+
         /// A key pressed and let go in one frame.
         fn press(&mut self, modifiers: Modifiers, key: Key) -> egui::FullOutput {
             let mut events = key_events(modifiers, key, true);
             events.extend(key_events(modifiers, key, false));
             self.frame(events)
+        }
+
+        fn click(&mut self, at: egui::Pos2) {
+            let button =
+                |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            self.frame(vec![Event::PointerMoved(at), button(true)]);
+            self.frame(vec![button(false)]);
+        }
+    }
+
+    fn texts(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        let mut out = Vec::new();
+        for cs in &output.shapes {
+            collect_texts(&cs.shape, &mut out);
+        }
+        out
+    }
+
+    fn collect_texts(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::epaint::Shape::Text(t) => {
+                let rect = egui::Rect::from_min_size(t.pos, t.galley.size());
+                out.push((t.galley.text().to_string(), rect));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for s in shapes {
+                    collect_texts(s, out);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -280,20 +1056,820 @@ mod tests {
         assert!(!closes(&h.frame(vec![])));
     }
 
+    /// A folder of raws (empty files: nothing here decodes them) rated as
+    /// given, removed when dropped.
+    struct Folder(PathBuf);
+
+    impl Folder {
+        fn new(name: &str, ratings: &[i32]) -> Self {
+            let dir = std::env::temp_dir().join(format!("omalux-app-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            for (i, &rating) in ratings.iter().enumerate() {
+                let raw = dir.join(format!("DSC{:05}.ARW", i + 1));
+                std::fs::write(&raw, "").unwrap();
+                if rating != 0 {
+                    sidecar::update(&raw, |xmp| sidecar::with_rating(xmp, rating)).unwrap();
+                }
+            }
+            Self(dir)
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn current(h: &Harness) -> String {
+        h.app.shoot.as_ref().unwrap().frame().name()
+    }
+
     #[test]
     fn a_shoot_opens_by_its_folder_or_a_raw_in_it() {
-        let dir = std::env::temp_dir().join(format!("omalux-app-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let folder = Folder::new("open", &[1, 0, 1]);
+        let dir = &folder.0;
         let mut h = Harness::new(&[]);
         assert_eq!(titles(&h.frame(vec![])), ["OmaLux"]);
-        h.app.open(dir.join("DSC01234.ARW"));
-        assert_eq!(h.app.folder.as_deref(), Some(dir.as_path()));
+        h.app.open(dir.clone());
+        assert_eq!(h.app.shoot.as_ref().map(Shoot::dir), Some(dir.as_path()));
         let name = dir.file_name().unwrap().to_string_lossy();
         assert_eq!(titles(&h.frame(vec![])), [format!("{name} — OmaLux")]);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★   1 / 2 picks of 3 frames");
+
+        // A raw the filter leaves out is opened all the same.
+        h.app.open(dir.join("DSC00002.ARW"));
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00002.ARW   2 / 3 frames");
 
         h.app.open(dir.join("gone/DSC01234.ARW"));
-        assert_eq!(h.app.folder.as_deref(), Some(dir.as_path()));
+        assert_eq!(current(&h), "DSC00002.ARW", "the shoot that was open stays");
         assert!(h.app.message.as_ref().is_some_and(|(text, problem)| *problem && text.contains("no such folder")));
-        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_loupe_shows_the_cameras_jpeg_then_the_render_and_neighbours_are_ready() {
+        let folder = Folder::new("loupe", &[1, 1, 1, 1, 1]);
+        std::fs::write(folder.0.join("DSC00003.ARW"), "broken").unwrap();
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let size = |h: &Harness, name: &str| {
+            let shown = h.app.loupe.shown(&folder.0.join(name))?;
+            Some((shown.preview.as_ref().map(|t| t.size()), shown.render.as_ref().map(|r| (r.texture.size(), r.settings.wb.temp))))
+        };
+        // The test decoder's 12×8 JPEG and 48×32 raw, the raw developed as shot at its own size or the loupe's.
+        let developed = Some((Some([12, 8]), Some(([48, 32], 5200.0))));
+        assert_eq!(size(&h, "DSC00001.ARW"), developed);
+        assert_eq!(size(&h, "DSC00002.ARW"), developed, "the next frame is ready before it's stepped to");
+        assert_eq!(size(&h, "DSC00003.ARW"), Some((Some([12, 8]), None)), "a raw that can't be developed keeps its JPEG");
+        assert!(h.app.message.as_ref().is_some_and(|(text, _)| text.contains("Couldn't develop DSC00003.ARW")), "{:?}", h.app.message);
+        assert_eq!(size(&h, "DSC00004.ARW"), None, "two ahead and no further");
+
+        h.press(Modifiers::NONE, Key::End);
+        h.settle();
+        assert_eq!(size(&h, "DSC00005.ARW"), developed);
+        assert_eq!(size(&h, "DSC00001.ARW"), None, "frames the cursor has left are forgotten");
+    }
+
+    #[test]
+    fn the_keys_nudge_the_selected_slider_and_every_step_is_saved_and_undone() {
+        let folder = Folder::new("keys", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        assert_eq!(h.saved(), None, "nothing is written on opening a frame");
+
+        // Exposure is selected to begin with.
+        h.press(Modifiers::NONE, Key::Equals);
+        h.press(Modifiers::NONE, Key::Equals);
+        assert!((h.settings().light.exposure - 0.10).abs() < 1e-9);
+        h.press(Modifiers::SHIFT, Key::Minus);
+        assert!((h.settings().light.exposure + 0.15).abs() < 1e-9, "Shift: five nudges");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        assert_eq!(sidecar::rating(&sidecar::read(&folder.0.join("DSC00001.ARW")).unwrap().unwrap()).unwrap(), Some(1), "the mark stays");
+
+        // . and , move the selection: Contrast, then back past Exposure to Tint.
+        h.press(Modifiers::NONE, Key::Period);
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(h.settings().light.contrast, 1.0);
+        h.press(Modifiers::NONE, Key::Comma);
+        h.press(Modifiers::NONE, Key::Comma);
+        h.press(Modifiers::NONE, Key::Minus);
+        let wb = h.settings().wb;
+        assert_eq!((wb.mode, wb.temp, wb.tint), (lightcraft_develop::WbMode::Custom, 5200.0, 1.0), "from as shot, 3");
+
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!((h.settings().wb.mode, h.settings().light.contrast), (lightcraft_develop::WbMode::AsShot, 1.0));
+        assert_eq!(h.saved().as_ref(), Some(h.settings()), "undo is saved too");
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        assert_eq!(h.settings().wb.tint, 1.0);
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::R);
+        assert_eq!(h.settings(), &DevelopSettings::for_raw(5200.0, 3.0), "reset");
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().wb.tint, 1.0, "and reset is a step like any other");
+
+        // Each frame has its own steps: the next one has none to undo.
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.settle();
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!((h.settings(), h.saved()), (&DevelopSettings::for_raw(5200.0, 3.0), None));
+        h.press(Modifiers::NONE, Key::ArrowLeft);
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().wb.mode, lightcraft_develop::WbMode::AsShot, "and the first one's are still there");
+    }
+
+    #[test]
+    fn a_drag_shows_drafts_and_is_one_step_saved_when_it_ends() {
+        let folder = Folder::new("drag", &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let raw = folder.0.join("DSC00001.ARW");
+        let render = |h: &Harness| h.app.loupe.shown(&raw).unwrap().render.as_ref().map(|r| (r.key.draft, r.settings.light.contrast)).unwrap();
+
+        let track = h.track("light.contrast");
+        h.pointer(track.center(), None);
+        h.pointer(track.center(), Some(true));
+        for step in 1..=4 {
+            h.pointer(track.center() + egui::vec2(track.width() / 16.0 * step as f32, 0.0), None);
+        }
+        assert_eq!(h.settings().light.contrast, 50.0, "a quarter of the track right of the middle");
+        assert!(h.app.dragging && h.app.selected == 3, "the slider dragged is the selected one");
+        assert_eq!(h.saved(), None, "nothing is saved until the drag ends");
+        h.settle();
+        assert_eq!(render(&h), (true, 50.0), "a draft while it's dragged");
+
+        h.pointer(track.center() + egui::vec2(track.width() / 4.0, 0.0), Some(false));
+        assert!(!h.app.dragging);
+        assert_eq!(h.saved().map(|s| s.light.contrast), Some(50.0));
+        h.settle();
+        assert_eq!(render(&h), (false, 50.0), "and the full render once it's let go");
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().light.contrast, 0.0, "the whole drag is one step");
+
+        // A double-click on the track puts a slider back.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        for _ in 0..2 {
+            h.pointer(track.center(), Some(true));
+            h.pointer(track.center(), Some(false));
+        }
+        assert_eq!((h.settings().light.contrast, h.saved().map(|s| s.light.contrast)), (0.0, Some(0.0)));
+    }
+
+    #[test]
+    fn typing_a_value_into_a_slider_applies_and_saves_it_as_one_step() {
+        let folder = Folder::new("type-slider", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        assert_eq!(h.settings().light.exposure, 0.0);
+        assert_eq!(h.saved(), None);
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.type_text("0.5");
+        h.press(Modifiers::NONE, Key::Enter);
+
+        assert_eq!(h.settings().light.exposure, 0.5);
+        assert_eq!(h.saved().map(|s| s.light.exposure), Some(0.5));
+
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().light.exposure, 0.0, "one Ctrl+Z takes it back");
+        assert_eq!(h.saved().map(|s| s.light.exposure), Some(0.0));
+    }
+
+    #[test]
+    fn escape_keeps_the_old_slider_value() {
+        let folder = Folder::new("type-esc", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        assert_eq!(h.settings().light.exposure, 0.0);
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.type_text("1.5");
+        h.press(Modifiers::NONE, Key::Escape);
+
+        assert_eq!(h.settings().light.exposure, 0.0);
+        assert_eq!(h.saved(), None, "nothing saved on escape");
+    }
+
+    #[test]
+    fn typing_letters_does_not_fire_app_commands() {
+        let folder = Folder::new("type-cmd", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let raw = folder.0.join("DSC00001.ARW");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0);
+        assert_eq!(sidecar::read(&raw).unwrap(), None, "no sidecar initially");
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.press(Modifiers::NONE, Key::P);
+        h.type_text("p");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0, "p did not pick the frame");
+
+        h.press(Modifiers::NONE, Key::Num5);
+        h.type_text("5");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0, "5 did not rate the frame");
+        assert_eq!(sidecar::read(&raw).unwrap(), None, "5 did not write to sidecar");
+
+        h.press(Modifiers::NONE, Key::Escape);
+        assert_eq!(h.settings().light.exposure, 0.0);
+    }
+
+    #[test]
+    fn typed_value_past_the_range_is_clamped() {
+        let folder = Folder::new("type-clamp", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.type_text("10");
+        h.press(Modifiers::NONE, Key::Enter);
+
+        assert_eq!(h.settings().light.exposure, 5.0, "clamped to max of 5.0");
+        assert_eq!(h.saved().map(|s| s.light.exposure), Some(5.0));
+    }
+
+    #[test]
+    fn non_numeric_typed_text_keeps_the_old_value() {
+        let folder = Folder::new("type-bad", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.type_text("abc");
+        h.press(Modifiers::NONE, Key::Enter);
+
+        assert_eq!(h.settings().light.exposure, 0.0);
+        assert_eq!(h.saved(), None);
+    }
+
+    #[test]
+    fn tab_applies_the_typed_value() {
+        let folder = Folder::new("type-tab", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.type_text("0.5");
+        h.press(Modifiers::NONE, Key::Tab);
+
+        assert_eq!(h.settings().light.exposure, 0.5);
+        assert_eq!(h.saved().map(|s| s.light.exposure), Some(0.5));
+    }
+
+    #[test]
+    fn clicking_away_applies_the_typed_value() {
+        let folder = Folder::new("type-away", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.type_text("1.0");
+        h.click(egui::pos2(100.0, 100.0));
+
+        assert_eq!(h.settings().light.exposure, 1.0);
+        assert_eq!(h.saved().map(|s| s.light.exposure), Some(1.0));
+    }
+
+    #[test]
+    fn w_picks_the_white_balance_from_a_click_and_backslash_shows_before() {
+        use lightcraft_develop::WbMode;
+        let folder = Folder::new("selector", &[1, 1]);
+        let raw = folder.0.join("DSC00001.ARW");
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let frame: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("loupe frame"))).unwrap();
+
+        // A click on the frame does nothing until the selector is out.
+        h.pointer(frame.center(), Some(true));
+        h.pointer(frame.center(), Some(false));
+        assert_eq!(h.settings().wb.mode, WbMode::AsShot);
+        h.press(Modifiers::NONE, Key::W);
+        h.frame(vec![]);
+        h.pointer(frame.center(), Some(true));
+        h.pointer(frame.center(), Some(false));
+        assert_eq!(h.settings().wb.mode, WbMode::Custom);
+        assert!(!h.app.selector, "one click and the selector is put away");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.settle();
+        let rendered = |h: &Harness| h.app.loupe.shown(&raw).unwrap().render.as_ref().unwrap().settings.wb.mode;
+        assert_eq!(rendered(&h), WbMode::Custom);
+
+        // Before: the frame with no edit, in the loupe only.
+        h.press(Modifiers::NONE, Key::Backslash);
+        h.settle();
+        assert_eq!((rendered(&h), h.settings().wb.mode), (WbMode::AsShot, WbMode::Custom));
+        h.press(Modifiers::NONE, Key::Backslash);
+        h.settle();
+        assert_eq!(rendered(&h), WbMode::Custom);
+        // Leaving the frame ends it.
+        h.press(Modifiers::NONE, Key::Backslash);
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert!(!h.app.before);
+    }
+
+    #[test]
+    fn an_edit_from_a_newer_omalux_is_shown_fresh_and_never_written_over() {
+        let folder = Folder::new("newer", &[1]);
+        let raw = folder.0.join("DSC00001.ARW");
+        let mut edited = DevelopSettings::for_raw(5200.0, 3.0);
+        edited.light.exposure = 0.7;
+        sidecar::update(&raw, |xmp| {
+            let with = sidecar::with_edit(xmp, &sidecar::Edit::new(edited.clone()))?;
+            Ok(with.replace(">1</omalux:processVersion>", ">99</omalux:processVersion>"))
+        })
+        .unwrap();
+        let newer = std::fs::read_to_string(sidecar::path_for(&raw)).unwrap();
+        assert!(newer.contains(">99<"));
+
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        assert!(h.app.message.as_ref().is_some_and(|(text, _)| text.contains("newer OmaLux")), "{:?}", h.app.message);
+        assert_eq!(h.settings().light.exposure, 0.0, "shown as a fresh raw");
+        h.press(Modifiers::NONE, Key::Equals);
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::R);
+        let track = h.track("light.contrast");
+        h.pointer(track.center() + egui::vec2(20.0, 0.0), Some(true));
+        h.pointer(track.center() + egui::vec2(20.0, 0.0), Some(false));
+        assert_eq!((h.settings().light.exposure, h.settings().light.contrast), (0.0, 0.0), "and not changed");
+        assert!(h.app.message.as_ref().is_some_and(|(text, _)| text.contains("left as it is")), "{:?}", h.app.message);
+        h.app.disk.flush();
+        assert_eq!(std::fs::read_to_string(sidecar::path_for(&raw)).unwrap(), newer);
+        // The mark is still the frame's to change.
+        h.press(Modifiers::NONE, Key::Num3);
+        h.app.disk.flush();
+        assert_eq!(std::fs::read_to_string(sidecar::path_for(&raw)).unwrap(), newer.replace("xmp:Rating=\"1\"", "xmp:Rating=\"3\""));
+    }
+
+    #[test]
+    fn z_and_a_click_zoom_to_100_percent_where_the_full_size_is_rendered() {
+        let folder = Folder::new("zoom", &[1, 1]);
+        let raw = |name: &str| folder.0.join(name);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let window = |h: &Harness, name: &str| h.app.loupe.shown(&raw(name)).unwrap().zoomed.as_ref().map(|z| (z.key.window, z.key.full));
+        let fitted: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("loupe frame"))).unwrap();
+        assert!(h.app.loupe.zoom().is_none() && window(&h, "DSC00001.ARW").is_none());
+
+        // A tap of Z: at 100%, and the window on screen rendered from the full size
+        // (the test decoder's is 192×128, smaller than the loupe: all of it).
+        h.press(Modifiers::NONE, Key::Z);
+        assert_eq!(h.app.loupe.zoom(), Some([0.5, 0.5]));
+        h.settle();
+        assert_eq!(window(&h, "DSC00001.ARW"), Some(([0, 0, 192, 128], (192, 128))));
+        let zoomed: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("loupe frame"))).unwrap();
+        assert_eq!((zoomed.size(), zoomed.center()), (egui::vec2(192.0, 128.0), fitted.center()), "a pixel of the frame to a pixel of the screen");
+
+        // Stepping stays at 100%, on the next frame's own full size.
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.settle();
+        assert_eq!(window(&h, "DSC00002.ARW"), Some(([0, 0, 192, 128], (192, 128))));
+        // Another tap: back to the whole frame.
+        h.press(Modifiers::NONE, Key::Z);
+        h.settle();
+        assert!(h.app.loupe.zoom().is_none());
+
+        // Held longer than a tap, Z is a look that ends when it's let go.
+        h.frame(key_events(Modifiers::NONE, Key::Z, true));
+        assert!(h.app.loupe.zoom().is_some());
+        for _ in 0..10 {
+            h.frame(vec![]);
+        }
+        h.frame(key_events(Modifiers::NONE, Key::Z, false));
+        assert!(h.app.loupe.zoom().is_none());
+
+        // A click zooms in, and a click again out.
+        h.click(fitted.center());
+        assert!(h.app.loupe.zoom().is_some());
+        h.click(fitted.center());
+        assert!(h.app.loupe.zoom().is_none());
+    }
+
+    #[test]
+    fn a_frame_opens_with_the_edit_in_its_sidecar() {
+        let folder = Folder::new("saved", &[1, 1]);
+        let raw = folder.0.join("DSC00002.ARW");
+        let mut edited = DevelopSettings::for_raw(5200.0, 3.0);
+        edited.light.exposure = 0.7;
+        sidecar::update(&raw, |xmp| sidecar::with_edit(xmp, &sidecar::Edit::new(edited.clone()))).unwrap();
+
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let ahead = h.app.loupe.shown(&raw).unwrap().render.as_ref().unwrap();
+        assert_eq!(ahead.settings.light.exposure, 0.7, "prepared ahead with its own edit");
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.settle();
+        assert_eq!(h.settings(), &edited);
+        // Reset goes back to a fresh raw, not to the saved edit.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::R);
+        assert_eq!(h.settings().light.exposure, 0.0);
+    }
+
+    #[test]
+    fn the_arrows_step_through_the_picks_and_ctrl_l_shows_everything() {
+        let folder = Folder::new("step", &[1, 0, sidecar::REJECT, 2]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert_eq!(current(&h), "DSC00001.ARW");
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert_eq!(current(&h), "DSC00004.ARW");
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert_eq!(current(&h), "DSC00004.ARW", "the last pick");
+        h.press(Modifiers::COMMAND, Key::L);
+        h.press(Modifiers::NONE, Key::ArrowLeft);
+        assert_eq!(current(&h), "DSC00003.ARW");
+        h.press(Modifiers::NONE, Key::Home);
+        assert_eq!(current(&h), "DSC00001.ARW");
+        h.press(Modifiers::NONE, Key::End);
+        assert_eq!(current(&h), "DSC00004.ARW");
+    }
+
+    #[test]
+    fn a_shoot_is_reopened_where_it_was_left_with_its_filter() {
+        let folder = Folder::new("reopen", &[1, 0, 1, 2]);
+        let dir = folder.0.clone();
+        let mut h = Harness::new(&[]);
+        h.app.open(dir.clone());
+        assert_eq!(current(&h), "DSC00001.ARW");
+        assert_eq!(h.app.shoot.as_ref().unwrap().filter(), Filter::Picks);
+
+        // Step to DSC00004.ARW and toggle filter to All.
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert_eq!(current(&h), "DSC00003.ARW");
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert_eq!(current(&h), "DSC00004.ARW");
+        h.press(Modifiers::COMMAND, Key::L);
+        assert_eq!(h.app.shoot.as_ref().unwrap().filter(), Filter::All);
+
+        // Close the shoot (Ctrl+W).
+        h.press(Modifiers::COMMAND, Key::W);
+        assert!(h.app.shoot.is_none());
+
+        // Reopen the shoot by its folder: goes back to frame 4 and Filter::All.
+        h.app.open(dir.clone());
+        assert_eq!(current(&h), "DSC00004.ARW");
+        assert_eq!(h.app.shoot.as_ref().unwrap().filter(), Filter::All);
+    }
+
+    #[test]
+    fn naming_a_raw_wins_over_the_remembered_place() {
+        let folder = Folder::new("named", &[1, 0, 1]);
+        let dir = folder.0.clone();
+        let mut h = Harness::new(&[]);
+        h.app.open(dir.clone());
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert_eq!(current(&h), "DSC00003.ARW");
+
+        // Close the shoot.
+        h.press(Modifiers::COMMAND, Key::W);
+        assert!(h.app.shoot.is_none());
+
+        // Open naming DSC00001.ARW specifically: opens at DSC00001.ARW rather than 3.
+        h.app.open(dir.join("DSC00001.ARW"));
+        assert_eq!(current(&h), "DSC00001.ARW");
+    }
+
+    #[test]
+    fn ctrl_w_closes_the_shoot_and_keeps_its_place() {
+        let folder = Folder::new("close", &[1, 1, 1]);
+        let dir = folder.0.clone();
+        let mut h = Harness::new(&[]);
+        h.app.open(dir.clone());
+        assert_eq!(current(&h), "DSC00001.ARW");
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert_eq!(current(&h), "DSC00002.ARW");
+
+        // Ctrl+W closes the shoot.
+        let output = h.press(Modifiers::COMMAND, Key::W);
+        assert!(h.app.shoot.is_none());
+        assert_eq!(titles(&output), ["OmaLux"]);
+        assert_eq!(h.app.title, "OmaLux");
+
+        // The place was kept.
+        let place = h.app.state.place(&dir);
+        assert_eq!(place.map(|p| p.frame.as_str()), Some("DSC00002.ARW"));
+    }
+
+    #[test]
+    fn recent_shoots_are_listed_and_clicking_one_opens_it() {
+        let folder = Folder::new("recent", &[1, 0, 1]);
+        let dir = folder.0.clone();
+        let mut h = Harness::new(&[]);
+        h.app.open(dir.clone());
+        h.press(Modifiers::COMMAND, Key::W);
+        assert!(h.app.shoot.is_none());
+
+        // An empty-state frame lists the recent shoot by name.
+        let output = h.frame(vec![]);
+        let rendered = texts(&output);
+        let name = file_name(&dir);
+        let target = rendered.iter().find(|(t, _)| t == &name);
+        assert!(target.is_some(), "expected recent list to show {name}, got {rendered:?}");
+
+        // Clicking it opens the shoot.
+        let rect = target.unwrap().1;
+        h.click(rect.center());
+        assert!(h.app.shoot.is_some());
+        assert_eq!(h.app.shoot.as_ref().map(Shoot::dir), Some(dir.as_path()));
+    }
+
+    #[test]
+    fn ctrl_shift_e_starts_export_and_status_bar_follows_it() {
+        let folder = Folder::new("export-shift", &[1]);
+        let out_dir = folder.0.join("omalux");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let tiff_path = out_dir.join("DSC00001.tif");
+        std::fs::write(&tiff_path, b"existing tiff").unwrap();
+
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+
+        h.press(Modifiers { shift: true, ..Modifiers::COMMAND }, Key::E);
+        assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exporting 1 of 1…", false)));
+
+        let started = std::time::Instant::now();
+        while h.app.exporting.is_some() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "export timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.frame(vec![]);
+        }
+
+        assert_eq!(
+            h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)),
+            Some(("Exported 0 of 1 to omalux; 1 was there already", false))
+        );
+    }
+
+    #[test]
+    fn ctrl_e_starts_the_configured_program_with_round_trip_and_every_tiff() {
+        let folder = Folder::new("export-edit", &[1]);
+        let out_dir = folder.0.join("omalux");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let tiff_path = out_dir.join("DSC00001.tif");
+        std::fs::write(&tiff_path, b"existing tiff").unwrap();
+
+        let script = folder.0.join("editor.sh");
+        let said = folder.0.join("said");
+        std::fs::write(&script, format!("#!/bin/sh\necho \"$@\" > '{}'\n", said.display())).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+        let mut h = Harness::new(&[]);
+        h.app.config.editor = script.display().to_string();
+        h.app.open(folder.0.clone());
+
+        h.press(Modifiers::COMMAND, Key::E);
+        assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exporting 1 of 1…", false)));
+
+        let started = std::time::Instant::now();
+        while !said.exists() || h.app.exporting.is_some() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "editor wasn't started");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.frame(vec![]);
+        }
+
+        let given = std::fs::read_to_string(&said).unwrap();
+        let expected = format!("--round-trip {}", tiff_path.display());
+        assert_eq!(given.trim(), expected);
+        assert_eq!(
+            h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)),
+            Some(("Exported 0 of 1 to omalux; 1 was there already", false))
+        );
+    }
+
+    #[test]
+    fn failure_to_start_program_is_reported_in_status_bar() {
+        let folder = Folder::new("export-fail", &[1]);
+        let out_dir = folder.0.join("omalux");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let tiff_path = out_dir.join("DSC00001.tif");
+        std::fs::write(&tiff_path, b"existing tiff").unwrap();
+
+        let mut h = Harness::new(&[]);
+        h.app.config.editor = "non_existent_program_xyz_123".into();
+        h.app.open(folder.0.clone());
+
+        h.press(Modifiers::COMMAND, Key::E);
+        assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exporting 1 of 1…", false)));
+
+        let started = std::time::Instant::now();
+        while h.app.exporting.is_some() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "export timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.frame(vec![]);
+        }
+
+        assert!(h.app.message.as_ref().is_some_and(|(t, p)| *p && t.contains("Couldn't start non_existent_program_xyz_123")));
+    }
+
+    #[test]
+    fn corpus_raw_exports_through_harness() {
+        let dir = std::env::var_os("LIGHTCRAFT_CORPUS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/lightcraft/corpus"))
+            .join("raw");
+        let Ok(bytes) = std::fs::read(dir.join("arw-sony-a7m3-compressed.arw")) else {
+            eprintln!("skip: CC0 corpus raws absent");
+            return;
+        };
+
+        let folder = Folder::new("corpus-export", &[]);
+        let raw_path = folder.0.join("DSC00001.ARW");
+        std::fs::write(&raw_path, &bytes).unwrap();
+        sidecar::update(&raw_path, |xmp| sidecar::with_rating(xmp, 1)).unwrap();
+
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.press(Modifiers { shift: true, ..Modifiers::COMMAND }, Key::E);
+
+        let started = std::time::Instant::now();
+        while h.app.exporting.is_some() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(30), "export timed out");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            h.frame(vec![]);
+        }
+
+        let target = folder.0.join("omalux/DSC00001.tif");
+        assert!(target.exists(), "TIFF was not exported");
+        assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exported 1 of 1 to omalux", false)));
+    }
+
+    #[test]
+    fn keys_mark_and_reach_the_sidecars() {
+        let folder = Folder::new("keys-mark", &[0, 0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   1 / 2 frames");
+
+        // P marks pick
+        h.press(Modifiers::NONE, Key::P);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★   1 / 2 frames");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 1);
+
+        // 3 marks 3 stars
+        h.press(Modifiers::NONE, Key::Num3);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★★★   1 / 2 frames");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 3);
+
+        // X marks reject
+        h.press(Modifiers::NONE, Key::X);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ✕   1 / 2 frames");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, sidecar::REJECT);
+
+        // 0 unmarks
+        h.press(Modifiers::NONE, Key::Num0);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   1 / 2 frames");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0);
+
+        // Mark 4 stars and check it reached the sidecar
+        h.press(Modifiers::NONE, Key::Num4);
+        h.app.disk.flush();
+        let raw1 = folder.0.join("DSC00001.ARW");
+        let xmp = sidecar::read(&raw1).unwrap().unwrap();
+        assert_eq!(sidecar::rating(&xmp).unwrap(), Some(4));
+    }
+
+    #[test]
+    fn a_failed_write_is_taken_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = Folder::new("failed-write", &[2]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 2);
+
+        // Make directory read-only so sidecar::update fails to create tmp file
+        std::fs::set_permissions(&folder.0, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Marking 5 stars will fail on disk
+        h.press(Modifiers::NONE, Key::Num5);
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 5);
+        h.app.disk.flush();
+        // A new frame lets step() collect disk problems
+        h.frame(vec![]);
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 2);
+        assert!(h.app.message.as_ref().is_some_and(|(msg, prob)| *prob && msg.contains("Couldn't mark DSC00001.ARW")));
+
+        // Restore directory permissions for cleanup
+        std::fs::set_permissions(&folder.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn a_pick_unmarked_while_the_picks_are_shown_stays_until_the_cursor_leaves_it() {
+        let folder = Folder::new("unmark-shown", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert_eq!(current(&h), "DSC00001.ARW");
+        assert_eq!(h.app.shoot.as_ref().unwrap().filter(), Filter::Picks);
+        assert!(h.app.shoot.as_ref().unwrap().shown(0));
+        assert!(h.app.shoot.as_ref().unwrap().shown(1));
+
+        // Unmark DSC00001
+        h.press(Modifiers::NONE, Key::U);
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0);
+        // It stays in the filmstrip while current
+        assert_eq!(current(&h), "DSC00001.ARW");
+        assert!(h.app.shoot.as_ref().unwrap().shown(0));
+
+        // Stepping to the next frame moves the cursor
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert_eq!(current(&h), "DSC00002.ARW");
+        // Now that the cursor left it, it's no longer shown
+        assert!(!h.app.shoot.as_ref().unwrap().shown(0));
+    }
+
+    #[test]
+    fn marks_are_flushed_on_exit() {
+        let folder = Folder::new("on-exit", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.press(Modifiers::NONE, Key::P);
+        eframe::App::on_exit(&mut h.app);
+        let raw = folder.0.join("DSC00001.ARW");
+        let xmp = sidecar::read(&raw).unwrap().unwrap();
+        assert_eq!(sidecar::rating(&xmp).unwrap(), Some(1));
+    }
+
+    #[test]
+    fn clicking_a_thumbnail_goes_to_it() {
+        let folder = Folder::new("click", &[1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+        let cells = h.app.filmstrip.cells.clone();
+        assert!(!cells.is_empty(), "cells are present");
+        let (index, rect) = cells.iter().copied().find(|&(i, _)| i == 2).unwrap();
+        h.click(rect.center());
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), index);
+    }
+
+    #[test]
+    fn only_the_shown_frames_are_in_the_strip() {
+        let folder = Folder::new("strip-filter", &[1, 0, 1, 0, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+        let shown: Vec<usize> = h.app.filmstrip.cells.iter().map(|&(i, _)| i).collect();
+        assert_eq!(shown, vec![0, 2, 4], "picks only");
+        h.press(Modifiers::COMMAND, Key::L);
+        let all: Vec<usize> = h.app.filmstrip.cells.iter().map(|&(i, _)| i).collect();
+        assert_eq!(all, vec![0, 1, 2, 3, 4], "all frames");
+    }
+
+    #[test]
+    fn j_toggles_clipping_warnings() {
+        let mut h = Harness::new(&[]);
+        assert!(!h.app.clipping);
+        h.press(Modifiers::NONE, Key::J);
+        assert!(h.app.clipping);
+        h.press(Modifiers::NONE, Key::J);
+        assert!(!h.app.clipping);
+    }
+
+    #[test]
+    fn the_histogram_is_the_renders_and_its_triangle_turns_the_warnings_on() {
+        let folder = Folder::new("histogram", &[1]);
+        let raw = folder.0.join("DSC00001.ARW");
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+        assert!(h.app.loupe.histogram(&raw).is_none(), "an empty plate until the frame is rendered");
+        h.settle();
+        assert_eq!(h.app.loupe.histogram(&raw).map(|histogram| histogram.total), Some(48 * 32));
+        let clipping = |h: &Harness| h.app.loupe.shown(&raw).unwrap().render.as_ref().unwrap().key.clipping;
+        assert!(!clipping(&h));
+
+        // A click on a triangle, like J, colours the clipped pixels in the loupe.
+        let triangle: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("highlight clipping"))).unwrap();
+        h.click(triangle.center());
+        assert!(h.app.clipping);
+        h.settle();
+        assert!(clipping(&h));
+        h.press(Modifiers::NONE, Key::J);
+        h.settle();
+        assert!(!clipping(&h));
+    }
+
+    #[test]
+    fn the_app_runs_with_no_monitor_found() {
+        let mut h = Harness::new(&[]);
+        h.frame(vec![]);
+        assert!(h.app.display.is_none());
     }
 }

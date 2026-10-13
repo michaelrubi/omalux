@@ -2914,10 +2914,18 @@ dependencies = [
  "eframe",
  "egui",
  "env_logger",
+ "lightcraft-codecs",
+ "lightcraft-color",
+ "lightcraft-develop",
+ "lightcraft-gpu",
+ "lightcraft-pipeline",
+ "lightcraft-raster",
+ "lightcraft-raw",
  "log",
  "omalux-engine",
  "rfd",
  "serde",
+ "serde_json",
  "toml",
 ]
 
