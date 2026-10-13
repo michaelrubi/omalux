@@ -18,6 +18,7 @@ use omalux_engine::edit::{self, History};
 use omalux_engine::shoot::{Filter, Shoot, Step, stars};
 use omalux_engine::sidecar;
 
+use crate::checklist::{Checklist, Outcome};
 use crate::commands::Command;
 use crate::config::Config;
 use crate::develop::{self, PanelOut};
@@ -179,6 +180,8 @@ pub struct App {
     /// settings Paste from Previous takes.
     at: Option<PathBuf>,
     previous: Option<PathBuf>,
+    /// The checklist of what to copy, while it's open.
+    choosing: Option<Checklist>,
 }
 
 impl App {
@@ -275,6 +278,7 @@ impl App {
             pastes: 0,
             at: None,
             previous: None,
+            choosing: None,
         }
     }
 
@@ -335,6 +339,7 @@ impl App {
         self.edits.clear();
         self.filmstrip.reset();
         (self.at, self.previous) = (None, None);
+        self.choosing = None;
         self.leave();
     }
 
@@ -520,8 +525,14 @@ impl App {
             Command::SelectPrevious => self.extend_to(Step::Previous),
             Command::SelectNext => self.extend_to(Step::Next),
             Command::Copy => self.copy(Group::ALL),
-            // M2 skeleton: `m2-checklist` opens the checklist here.
-            Command::CopyChoose => {}
+            Command::CopyChoose => {
+                // Once the frame's raw has been decoded: there's nothing to copy before.
+                if let Some(shoot) = &self.shoot
+                    && self.edits.contains_key(&shoot.frame().path)
+                {
+                    self.choosing = Some(Checklist::new(&self.state.copy_groups));
+                }
+            }
             Command::Paste => {
                 if let Some(shoot) = &self.shoot {
                     self.paste(targets(shoot));
@@ -828,7 +839,7 @@ impl App {
         self.develop(ctx);
         self.finish_exporting();
         self.disk_problems();
-        if !ctx.egui_wants_keyboard_input() {
+        if !ctx.egui_wants_keyboard_input() && self.choosing.is_none() {
             for command in Command::pressed(ctx, &mut self.v_down) {
                 self.run(command, ctx);
             }
@@ -944,6 +955,16 @@ impl App {
         }
         if let Some(dir) = clicked {
             self.open(dir);
+        }
+        if let Some(mut dialog) = self.choosing.take() {
+            match dialog.show(ui.ctx(), &self.theme) {
+                Outcome::KeepOpen => self.choosing = Some(dialog),
+                Outcome::Copied(chosen) => {
+                    self.copy(&chosen);
+                    self.state.remember_copy(&chosen);
+                }
+                Outcome::Cancelled => {}
+            }
         }
     }
 
@@ -1234,6 +1255,13 @@ mod tests {
         /// Where a slider's value is on screen.
         fn value(&self, id: &'static str) -> egui::Rect {
             self.ctx.data(|d| d.get_temp(egui::Id::new((id, "value")))).expect("the slider value has been drawn")
+        }
+
+        /// Where `text` was last drawn: in a dialog, if one is open over
+        /// the panels.
+        fn text(&mut self, text: &str) -> egui::Rect {
+            let output = self.frame(vec![]);
+            texts(&output).into_iter().rev().find(|(t, _)| t == text).map(|(_, rect)| rect).expect("the text has been drawn")
         }
 
         fn type_text(&mut self, text: &str) -> egui::FullOutput {
@@ -2531,5 +2559,106 @@ mod tests {
             h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)),
             Some(("Exported 0 of 3 to omalux; 3 were there already", false))
         );
+    }
+
+    #[test]
+    fn copy_settings_dialog_copies_chosen_groups_and_remembers_choice() {
+        let folder = Folder::new("checklist", &[0]);
+        let mut h = Harness::new(&[]);
+
+        // Does not open with no shoot.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_none());
+
+        h.app.open(folder.0.clone());
+        // Does not open before current frame has been decoded.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_none());
+
+        h.settle();
+
+        // Ctrl+Shift+C opens it with everything checked.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_some());
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), Group::ALL);
+
+        // A key pressed while it's open doesn't reach the app (P doesn't mark).
+        h.press(Modifiers::NONE, Key::P);
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0);
+        assert!(h.app.choosing.is_some(), "dialog stays open");
+
+        // Unchecking White Balance, then Light.
+        let wb_rect = h.text("White Balance");
+        h.click(wb_rect.center());
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Light, Group::Presence]);
+
+        let light_rect = h.text("Light");
+        h.click(light_rect.center());
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Presence]);
+
+        // Return copies only the rest into clipboard.
+        h.press(Modifiers::NONE, Key::Enter);
+        assert!(h.app.choosing.is_none());
+        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), [Group::Presence]);
+
+        // The next time it opens, the last choice is checked.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_some());
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Presence]);
+
+        // Check All selects everything again.
+        let all_rect = h.text("Check All");
+        h.click(all_rect.center());
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), Group::ALL);
+
+        // Esc copies nothing and leaves the clipboard as it was.
+        h.press(Modifiers::NONE, Key::Escape);
+        assert!(h.app.choosing.is_none());
+        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), [Group::Presence]);
+
+        // Since Esc cancelled, the next time it opens, the previously remembered choice is still checked.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Presence]);
+
+        // Closing the shoot closes the dialog.
+        h.app.close();
+        assert!(h.app.choosing.is_none());
+    }
+
+    #[test]
+    fn copy_settings_dialog_click_outside_and_copy_none() {
+        let folder = Folder::new("checklist-cancel", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        // Open dialog.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_some());
+
+        // A click outside cancels the dialog, once it's been laid out
+        // (egui sizes it unseen in its first frame).
+        h.frame(vec![]);
+        h.click(egui::pos2(10.0, 10.0));
+        assert!(h.app.choosing.is_none());
+        assert!(h.app.clipboard.is_none());
+
+        // Reopen dialog and click Check None.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_some());
+        let none_rect = h.text("Check None");
+        h.click(none_rect.center());
+        assert!(h.app.choosing.as_ref().unwrap().chosen().is_empty());
+
+        // Copy with nothing checked does what Cancel does (closes without copying).
+        h.press(Modifiers::NONE, Key::Enter);
+        assert!(h.app.choosing.is_none());
+        assert!(h.app.clipboard.is_none());
+
+        // Opening another shoot closes the dialog.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_some());
+        h.app.open(folder.0.clone());
+        assert!(h.app.choosing.is_none());
     }
 }
