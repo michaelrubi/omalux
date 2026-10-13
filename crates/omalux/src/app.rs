@@ -11,6 +11,7 @@ use egui::{Align2, FontId, RichText, Ui};
 use omalux_engine::shoot::{Filter, Shoot, Step};
 
 use crate::commands::Command;
+use crate::config::Config;
 use crate::hotkeys::{self, format_shortcut};
 use crate::theme::{self, Theme};
 
@@ -19,9 +20,43 @@ const STRIP_HEIGHT: f32 = 104.0;
 /// The develop panel's width.
 const PANEL_WIDTH: f32 = 300.0;
 
+/// Frames being exported to a folder, and how it's gone so far.
+struct Exporting {
+    to: PathBuf,
+    /// The TIFF files that were asked for, including those already present.
+    tiffs: Vec<PathBuf>,
+    total: usize,
+    exported: usize,
+    /// There already, and left as they were.
+    there: usize,
+    /// Those that couldn't be exported, and why.
+    failed: Vec<String>,
+    /// Whether to open in the configured program once done.
+    edit: bool,
+    /// Whether each was exported, as it's dealt with.
+    results: Receiver<Result<bool, String>>,
+}
+
+impl Exporting {
+    /// How it went, and whether that's a problem.
+    fn said(&self) -> (String, bool) {
+        let to = file_name(&self.to);
+        if let Some(first) = self.failed.first() {
+            return (format!("Couldn't export {} of {} to {to}, e.g. {first}", self.failed.len(), self.total), true);
+        }
+        let there = match self.there {
+            0 => String::new(),
+            1 => "; 1 was there already".to_owned(),
+            n => format!("; {n} were there already"),
+        };
+        (format!("Exported {} of {} to {to}{there}", self.exported, self.total), false)
+    }
+}
+
 pub struct App {
     theme: Theme,
     theme_rx: Receiver<Theme>,
+    config: Config,
     /// Problems found at startup, shown in the status bar.
     warnings: Vec<String>,
     /// Commands to run, one a frame, from `OMALUX_SCRIPT` (comma-separated
@@ -30,6 +65,8 @@ pub struct App {
     shoot: Option<Shoot>,
     /// The folder picker, while it's open.
     picking: Option<Receiver<Option<PathBuf>>>,
+    /// Frames being exported, while the export runs.
+    exporting: Option<Exporting>,
     /// The last thing to tell the user, and whether it's a problem.
     message: Option<(String, bool)>,
     title: String,
@@ -44,7 +81,9 @@ impl App {
         let theme = Theme::load();
         ctx.set_visuals(theme.visuals());
 
-        let warnings = hotkeys::load();
+        let (config, config_warnings) = Config::load();
+        let mut warnings = hotkeys::load();
+        warnings.extend(config_warnings);
         for w in &warnings {
             log::warn!("{w}");
         }
@@ -60,21 +99,29 @@ impl App {
                 parsed
             })
             .collect();
-        let mut app = Self::build(theme, theme::watch(ctx.clone()), warnings, script);
+        let mut app = Self::build(theme, theme::watch(ctx.clone()), config, warnings, script);
         if let Some(path) = open {
             app.open(path);
         }
         app
     }
 
-    fn build(theme: Theme, theme_rx: Receiver<Theme>, warnings: Vec<String>, script: VecDeque<Command>) -> Self {
+    fn build(
+        theme: Theme,
+        theme_rx: Receiver<Theme>,
+        config: Config,
+        warnings: Vec<String>,
+        script: VecDeque<Command>,
+    ) -> Self {
         Self {
             theme,
             theme_rx,
+            config,
             warnings,
             script,
             shoot: None,
             picking: None,
+            exporting: None,
             message: None,
             title: String::new(),
         }
@@ -129,10 +176,104 @@ impl App {
         }
     }
 
+    fn export(&mut self, edit: bool, ctx: &egui::Context) {
+        let Some(shoot) = &self.shoot else { return };
+        if self.exporting.is_some() {
+            return;
+        }
+        let frames = vec![shoot.frame().path.clone()];
+        self.export_frames(frames, edit, ctx);
+    }
+
+    fn export_frames(&mut self, frames: Vec<PathBuf>, edit: bool, ctx: &egui::Context) {
+        let Some(shoot) = &self.shoot else { return };
+        if frames.is_empty() || self.exporting.is_some() {
+            return;
+        }
+        let to = shoot.dir().join(&self.config.folder);
+        let tiffs: Vec<PathBuf> = frames
+            .iter()
+            .map(|f| {
+                let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                to.join(format!("{stem}.tif"))
+            })
+            .collect();
+        let (tx, rx) = channel();
+        let (ctx, target, to_export) = (ctx.clone(), to.clone(), frames.clone());
+        let total = frames.len();
+        self.message = Some((format!("Exporting 1 of {total}…"), false));
+        self.exporting = Some(Exporting {
+            to,
+            tiffs,
+            total,
+            exported: 0,
+            there: 0,
+            failed: Vec::new(),
+            edit,
+            results: rx,
+        });
+        std::thread::spawn(move || {
+            for frame in to_export {
+                let res = omalux_engine::export::export(&frame, &target, None)
+                    .map_err(|e| format!("{}: {e}", file_name(&frame)));
+                if tx.send(res).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    fn finish_exporting(&mut self) {
+        let Some(exporting) = &mut self.exporting else { return };
+        let mut more = false;
+        loop {
+            match exporting.results.try_recv() {
+                Ok(Ok(true)) => exporting.exported += 1,
+                Ok(Ok(false)) => exporting.there += 1,
+                Ok(Err(why)) => exporting.failed.push(why),
+                Err(TryRecvError::Empty) if more => {
+                    let done = exporting.exported + exporting.there + exporting.failed.len();
+                    if done < exporting.total {
+                        let text = format!("Exporting {} of {}…", done + 1, exporting.total);
+                        return self.message = Some((text, false));
+                    }
+                    return;
+                }
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => break,
+            }
+            more = true;
+        }
+        let exporting = self.exporting.take().unwrap();
+        if exporting.edit {
+            let started = std::process::Command::new(&self.config.program)
+                .arg("--round-trip")
+                .args(&exporting.tiffs)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match started {
+                Ok(mut child) => {
+                    std::thread::spawn(move || child.wait());
+                    self.message = Some(exporting.said());
+                }
+                Err(e) => {
+                    self.message = Some((format!("Couldn't start {}: {e}", self.config.program), true));
+                }
+            }
+        } else {
+            self.message = Some(exporting.said());
+        }
+    }
+
     fn run(&mut self, command: Command, ctx: &egui::Context) {
         match command {
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Command::Open => self.pick(ctx),
+            Command::Export => self.export(false, ctx),
+            Command::ExportAndEdit => self.export(true, ctx),
             Command::Previous => self.step_to(Step::Previous),
             Command::Next => self.step_to(Step::Next),
             Command::First => self.step_to(Step::First),
@@ -167,6 +308,7 @@ impl App {
             self.theme = theme;
         }
         self.finish_picking();
+        self.finish_exporting();
         if !ctx.egui_wants_keyboard_input() {
             for command in Command::pressed(ctx) {
                 self.run(command, ctx);
@@ -284,7 +426,7 @@ mod tests {
         fn new(script: &[Command]) -> Self {
             let (_tx, rx) = channel();
             let ctx = egui::Context::default();
-            let app = App::build(Theme::default(), rx, Vec::new(), script.iter().copied().collect());
+            let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect());
             Self { ctx, app, time: 0.0 }
         }
 
@@ -408,5 +550,130 @@ mod tests {
         assert_eq!(current(&h), "DSC00001.ARW");
         h.press(Modifiers::NONE, Key::End);
         assert_eq!(current(&h), "DSC00004.ARW");
+    }
+
+    #[test]
+    fn ctrl_shift_e_starts_export_and_status_bar_follows_it() {
+        let folder = Folder::new("export-shift", &[1]);
+        let out_dir = folder.0.join("omalux");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let tiff_path = out_dir.join("DSC00001.tif");
+        std::fs::write(&tiff_path, b"existing tiff").unwrap();
+
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+
+        h.press(Modifiers { shift: true, ..Modifiers::COMMAND }, Key::E);
+        assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exporting 1 of 1…", false)));
+
+        let started = std::time::Instant::now();
+        while h.app.exporting.is_some() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "export timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.frame(vec![]);
+        }
+
+        assert_eq!(
+            h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)),
+            Some(("Exported 0 of 1 to omalux; 1 was there already", false))
+        );
+    }
+
+    #[test]
+    fn ctrl_e_starts_the_configured_program_with_round_trip_and_every_tiff() {
+        let folder = Folder::new("export-edit", &[1]);
+        let out_dir = folder.0.join("omalux");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let tiff_path = out_dir.join("DSC00001.tif");
+        std::fs::write(&tiff_path, b"existing tiff").unwrap();
+
+        let script = folder.0.join("editor.sh");
+        let said = folder.0.join("said");
+        std::fs::write(&script, format!("#!/bin/sh\necho \"$@\" > '{}'\n", said.display())).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+        let mut h = Harness::new(&[]);
+        h.app.config.program = script.display().to_string();
+        h.app.open(folder.0.clone());
+
+        h.press(Modifiers::COMMAND, Key::E);
+        assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exporting 1 of 1…", false)));
+
+        let started = std::time::Instant::now();
+        while !said.exists() || h.app.exporting.is_some() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "editor wasn't started");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.frame(vec![]);
+        }
+
+        let given = std::fs::read_to_string(&said).unwrap();
+        let expected = format!("--round-trip {}", tiff_path.display());
+        assert_eq!(given.trim(), expected);
+        assert_eq!(
+            h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)),
+            Some(("Exported 0 of 1 to omalux; 1 was there already", false))
+        );
+    }
+
+    #[test]
+    fn failure_to_start_program_is_reported_in_status_bar() {
+        let folder = Folder::new("export-fail", &[1]);
+        let out_dir = folder.0.join("omalux");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let tiff_path = out_dir.join("DSC00001.tif");
+        std::fs::write(&tiff_path, b"existing tiff").unwrap();
+
+        let mut h = Harness::new(&[]);
+        h.app.config.program = "non_existent_program_xyz_123".into();
+        h.app.open(folder.0.clone());
+
+        h.press(Modifiers::COMMAND, Key::E);
+        assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exporting 1 of 1…", false)));
+
+        let started = std::time::Instant::now();
+        while h.app.exporting.is_some() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "export timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.frame(vec![]);
+        }
+
+        assert!(h.app.message.as_ref().is_some_and(|(t, p)| *p && t.contains("Couldn't start non_existent_program_xyz_123")));
+    }
+
+    #[test]
+    fn corpus_raw_exports_through_harness() {
+        let dir = std::env::var_os("LIGHTCRAFT_CORPUS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/lightcraft/corpus"))
+            .join("raw");
+        let fallback = Path::new("/home/rubiconetic/dev/omalux/vendor/lightcraft/corpus/raw");
+        let Some(bytes) = std::fs::read(dir.join("arw-sony-a7m3-compressed.arw"))
+            .or_else(|_| std::fs::read(fallback.join("arw-sony-a7m3-compressed.arw")))
+            .ok()
+        else {
+            eprintln!("skip: CC0 corpus raws absent");
+            return;
+        };
+
+        let folder = Folder::new("corpus-export", &[]);
+        let raw_path = folder.0.join("DSC00001.ARW");
+        std::fs::write(&raw_path, &bytes).unwrap();
+        sidecar::update(&raw_path, |xmp| sidecar::with_rating(xmp, 1)).unwrap();
+
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.press(Modifiers { shift: true, ..Modifiers::COMMAND }, Key::E);
+
+        let started = std::time::Instant::now();
+        while h.app.exporting.is_some() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(30), "export timed out");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            h.frame(vec![]);
+        }
+
+        let target = folder.0.join("omalux/DSC00001.tif");
+        assert!(target.exists(), "TIFF was not exported");
+        assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exported 1 of 1 to omalux", false)));
     }
 }
