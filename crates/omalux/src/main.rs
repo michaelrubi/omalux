@@ -1,5 +1,6 @@
 mod app;
 mod commands;
+mod histogram;
 mod hotkeys;
 mod theme;
 

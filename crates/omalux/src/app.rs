@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use egui::{Align2, FontId, RichText, Ui};
+use lightcraft_raster::Histogram;
 use omalux_engine::shoot::{Filter, Shoot, Step};
 
 use crate::commands::Command;
@@ -33,6 +34,8 @@ pub struct App {
     /// The last thing to tell the user, and whether it's a problem.
     message: Option<(String, bool)>,
     title: String,
+    clipping: bool,
+    histogram: Option<Histogram>,
 }
 
 impl App {
@@ -77,7 +80,14 @@ impl App {
             picking: None,
             message: None,
             title: String::new(),
+            clipping: false,
+            histogram: None,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn set_histogram(&mut self, histogram: Option<Histogram>) {
+        self.histogram = histogram;
     }
 
     /// Open a shoot: its folder, or a raw in it.
@@ -142,6 +152,7 @@ impl App {
                     shoot.set_filter(if shoot.filter() == Filter::Picks { Filter::All } else { Filter::Picks });
                 }
             }
+            Command::Clipping => self.clipping = !self.clipping,
         }
     }
 
@@ -204,7 +215,11 @@ impl App {
 
     /// The histogram, and the panels under it: White Balance, Light,
     /// Presence.
-    fn develop_panel(&mut self, _ui: &mut Ui) {}
+    fn develop_panel(&mut self, ui: &mut Ui) {
+        if crate::histogram::show(ui, &self.theme, self.histogram.as_ref(), self.clipping) {
+            self.clipping = !self.clipping;
+        }
+    }
 
     /// The current frame.
     fn loupe(&mut self, _ui: &mut Ui) {}
@@ -408,5 +423,72 @@ mod tests {
         assert_eq!(current(&h), "DSC00001.ARW");
         h.press(Modifiers::NONE, Key::End);
         assert_eq!(current(&h), "DSC00004.ARW");
+    }
+
+    #[test]
+    fn j_toggles_clipping_warnings() {
+        let mut h = Harness::new(&[]);
+        assert!(!h.app.clipping);
+        h.press(Modifiers::NONE, Key::J);
+        assert!(h.app.clipping);
+        h.press(Modifiers::NONE, Key::J);
+        assert!(!h.app.clipping);
+    }
+
+    #[test]
+    fn develop_panel_draws_with_and_without_histogram() {
+        let folder = Folder::new("hist", &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert!(h.app.shoot.is_some());
+
+        // Without a histogram: shows the empty plate.
+        assert!(h.app.histogram.is_none());
+        let out = h.frame(vec![]);
+        assert!(!closes(&out));
+
+        // With a histogram: draws the channels and clipping triangles.
+        let img = lightcraft_raster::Rgba8::from_fn(10, 10, |x, _| {
+            if x < 5 { [0, 0, 0, 255] } else { [255, 255, 255, 255] }
+        });
+        h.app.set_histogram(Some(Histogram::of_srgb8(&img)));
+        let out2 = h.frame(vec![]);
+        assert!(!closes(&out2));
+    }
+
+    #[test]
+    fn clicking_triangle_in_develop_panel_toggles_clipping() {
+        let folder = Folder::new("tri_click", &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        let img = lightcraft_raster::Rgba8::from_fn(10, 10, |_, _| [0, 0, 0, 255]);
+        h.app.set_histogram(Some(Histogram::of_srgb8(&img)));
+        assert!(!h.app.clipping);
+
+        // Layout first frame.
+        h.frame(vec![]);
+
+        // Develop panel is on the right side: PANEL_WIDTH = 300, window width = 800.
+        // So develop panel min_x = 800 - 300 = 500.
+        // Inner margin is 6.0, so panel content left is 506.0.
+        // Left triangle is at 506.0 + 14.0 = 520.0, top is 6.0 + 12.0 = 18.0.
+        let click_pos = egui::pos2(520.0, 18.0);
+        let events = vec![
+            egui::Event::PointerMoved(click_pos),
+            egui::Event::PointerButton {
+                pos: click_pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: click_pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        h.frame(events);
+        assert!(h.app.clipping, "clicking triangle toggles clipping warnings on");
     }
 }

@@ -14,13 +14,23 @@ pub enum Command {
     Last,
     /// The picks, or everything.
     Filter,
+    /// Highlight and shadow clipping warnings.
+    Clipping,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
 
 impl Command {
-    pub const ALL: &[Command] =
-        &[Command::Quit, Command::Open, Command::Previous, Command::Next, Command::First, Command::Last, Command::Filter];
+    pub const ALL: &[Command] = &[
+        Command::Quit,
+        Command::Open,
+        Command::Previous,
+        Command::Next,
+        Command::First,
+        Command::Last,
+        Command::Filter,
+        Command::Clipping,
+    ];
 
     /// Look a command up by its name in code, e.g. "Open".
     pub fn from_name(name: &str) -> Option<Command> {
@@ -30,8 +40,16 @@ impl Command {
     /// Every command with a shortcut, most modifiers first. egui matches
     /// Ctrl+Z even when Shift is also held, so Ctrl+Shift+Z has to be
     /// checked before it.
-    pub const KEYBOARD_ORDER: &[Command] =
-        &[Command::Quit, Command::Open, Command::Filter, Command::Previous, Command::Next, Command::First, Command::Last];
+    pub const KEYBOARD_ORDER: &[Command] = &[
+        Command::Quit,
+        Command::Open,
+        Command::Filter,
+        Command::Previous,
+        Command::Next,
+        Command::First,
+        Command::Last,
+        Command::Clipping,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -42,6 +60,7 @@ impl Command {
             Command::First => "First Frame",
             Command::Last => "Last Frame",
             Command::Filter => "Show the Picks or Everything",
+            Command::Clipping => "Clipping Warnings",
         }
     }
 
@@ -56,6 +75,8 @@ impl Command {
             Command::Last => s(Modifiers::NONE, Key::End),
             // Lightroom's Enable Filters.
             Command::Filter => s(CMD, Key::L),
+            // Lightroom's Show Clipping.
+            Command::Clipping => s(Modifiers::NONE, Key::J),
         }
     }
 
@@ -120,5 +141,6 @@ mod tests {
         assert_eq!(press(&ctx, Modifiers::NONE, Key::ArrowRight), [Command::Next]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::Home), [Command::First]);
         assert_eq!(press(&ctx, CMD, Key::L), [Command::Filter]);
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::J), [Command::Clipping]);
     }
 }

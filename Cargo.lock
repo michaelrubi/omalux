@@ -2914,6 +2914,7 @@ dependencies = [
  "eframe",
  "egui",
  "env_logger",
+ "lightcraft-raster",
  "log",
  "omalux-engine",
  "rfd",
