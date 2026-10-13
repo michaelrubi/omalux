@@ -376,7 +376,7 @@ Quit = ""
             let input = egui::RawInput { events, ..Default::default() };
             let mut pressed = Vec::new();
             let mut out = ctx.run_ui(input, |ui| {
-                pressed = Command::pressed_with(ui.ctx(), &hotkeys);
+                pressed = Command::pressed_with(ui.ctx(), &mut false, &hotkeys);
             });
             out.textures_delta.clear();
             pressed

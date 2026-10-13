@@ -12,6 +12,7 @@ use egui::{Align2, FontId, RichText, Ui};
 use lightcraft_codecs::display::DisplayProfile;
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::SourceInfo;
+use omalux_engine::copy::{Copied, Group};
 use omalux_engine::disk::{Disk, Mark, Problem};
 use omalux_engine::edit::{self, History};
 use omalux_engine::shoot::{Filter, Shoot, Step, stars};
@@ -149,6 +150,11 @@ pub struct App {
     clipping: bool,
     watch: monitor::Watch,
     pub display: Option<Arc<DisplayProfile>>,
+    /// Whether V is held, between frames: how Ctrl+V is told (see
+    /// [`Command::pressed`]).
+    v_down: bool,
+    /// The settings last copied, for the session.
+    clipboard: Option<Copied>,
 }
 
 impl App {
@@ -240,6 +246,8 @@ impl App {
             clipping: false,
             watch,
             display,
+            v_down: false,
+            clipboard: None,
         }
     }
 
@@ -334,8 +342,18 @@ impl App {
         if self.exporting.is_some() {
             return;
         }
-        let frames = vec![shoot.frame().path.clone()];
+        let frames = targets(shoot);
         self.export_frames(frames, edit, ctx);
+    }
+
+    /// Copy `groups` of the current frame's settings. Nothing happens
+    /// until the frame's raw has been decoded.
+    fn copy(&mut self, groups: &[Group]) {
+        let Some(shoot) = &self.shoot else { return };
+        let Some(editing) = self.edits.get(&shoot.frame().path) else { return };
+        self.clipboard = Some(Copied::new(editing.history.settings(), groups));
+        let what = if groups == Group::ALL { "every setting".to_owned() } else { listed(groups) };
+        self.message = Some((format!("Copied {what} of {}", shoot.frame().name()), false));
     }
 
     fn export_frames(&mut self, frames: Vec<PathBuf>, edit: bool, ctx: &egui::Context) {
@@ -459,6 +477,30 @@ impl App {
                 let (pointer, time) = ctx.input(|i| (i.pointer.hover_pos(), i.time));
                 self.loupe.key_down(pointer, time);
             }
+            Command::SelectAll => {
+                if let Some(shoot) = &mut self.shoot {
+                    shoot.select_all();
+                }
+            }
+            Command::SelectNone => {
+                if let Some(shoot) = &mut self.shoot {
+                    shoot.clear_selection();
+                }
+            }
+            Command::SelectPrevious => self.extend_to(Step::Previous),
+            Command::SelectNext => self.extend_to(Step::Next),
+            Command::Copy => self.copy(Group::ALL),
+            // M2 skeleton: `m2-checklist` opens the checklist here.
+            Command::CopyChoose => {}
+            // M2 skeleton: Claude's, on `m2`.
+            Command::Paste | Command::PastePrevious | Command::PasteStack => {}
+            Command::ToggleStack => {
+                if let Some(shoot) = &mut self.shoot
+                    && shoot.toggle_stack()
+                {
+                    self.leave();
+                }
+            }
             Command::Pick
             | Command::Reject
             | Command::Unmark
@@ -501,6 +543,15 @@ impl App {
     fn step_to(&mut self, step: Step) {
         if let Some(shoot) = &mut self.shoot
             && shoot.step(step)
+        {
+            self.leave();
+        }
+    }
+
+    /// Shift+arrow: step, taking the frames passed into the selection.
+    fn extend_to(&mut self, step: Step) {
+        if let Some(shoot) = &mut self.shoot
+            && shoot.extend(step)
         {
             self.leave();
         }
@@ -632,7 +683,7 @@ impl App {
         self.finish_exporting();
         self.disk_problems();
         if !ctx.egui_wants_keyboard_input() {
-            for command in Command::pressed(ctx) {
+            for command in Command::pressed(ctx, &mut self.v_down) {
                 self.run(command, ctx);
             }
         }
@@ -847,6 +898,23 @@ fn status(shoot: &Shoot) -> String {
     let mark = stars(shoot.frame().rating);
     let mark = if mark.is_empty() { String::new() } else { format!("{mark}   ") };
     format!("{}   {mark}{place} / {of}", shoot.frame().name())
+}
+
+/// The frames a paste or an export reaches: the selection, or with none
+/// the current frame.
+fn targets(shoot: &Shoot) -> Vec<PathBuf> {
+    let selection = shoot.selection();
+    let frames = if selection.is_empty() { vec![shoot.current()] } else { selection };
+    frames.into_iter().map(|i| shoot.frames()[i].path.clone()).collect()
+}
+
+/// "White Balance, Light and Presence".
+fn listed(groups: &[Group]) -> String {
+    let labels: Vec<&str> = groups.iter().map(|group| group.label()).collect();
+    match labels.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => labels.concat(),
+    }
 }
 
 fn file_name(path: &Path) -> String {

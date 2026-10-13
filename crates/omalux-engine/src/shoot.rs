@@ -235,6 +235,24 @@ impl Shoot {
         }
     }
 
+    /// The frames picked out in the filmstrip, in order: what a paste or an
+    /// export reaches. None until a frame is picked out; the current frame
+    /// alone is no selection. (M2 skeleton: `m2-select` fills these in.)
+    pub fn selection(&self) -> Vec<usize> {
+        Vec::new()
+    }
+
+    /// Ctrl+A: select every shown frame.
+    pub fn select_all(&mut self) {}
+
+    /// Ctrl+D: select nothing.
+    pub fn clear_selection(&mut self) {}
+
+    /// Shift+arrow: step, taking the frames passed into the selection.
+    pub fn extend(&mut self, step: Step) -> bool {
+        self.step(step)
+    }
+
     /// Mark the current frame. None if it already had that mark.
     pub fn mark(&mut self, rating: Rating) -> Option<Change> {
         let frame = &mut self.frames[self.current];
@@ -247,6 +265,20 @@ impl Shoot {
         if let Some(frame) = self.frames.iter_mut().find(|f| f.path == path) {
             frame.rating = rating;
         }
+    }
+
+    /// The stack a frame is in: the frames shot with it that the filter
+    /// lets through, itself among them, in order. None for a frame that
+    /// isn't in a stack of two or more of those. (M2 skeleton: `m2-stacks`
+    /// fills these in.)
+    pub fn stack(&self, _index: usize) -> Option<Vec<usize>> {
+        None
+    }
+
+    /// Open out the current frame's stack in the filmstrip, or close it
+    /// up. False if it isn't in one.
+    pub fn toggle_stack(&mut self) -> bool {
+        false
     }
 }
 
