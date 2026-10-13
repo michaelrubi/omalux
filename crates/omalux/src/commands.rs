@@ -14,13 +14,40 @@ pub enum Command {
     Last,
     /// The picks, or everything.
     Filter,
+    Undo,
+    Redo,
+    /// The frame back to a fresh raw's settings.
+    Reset,
+    SliderPrevious,
+    SliderNext,
+    Increase,
+    Decrease,
+    IncreaseMore,
+    DecreaseMore,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
+const CMD_SHIFT: Modifiers = Modifiers { shift: true, ..Modifiers::COMMAND };
 
 impl Command {
-    pub const ALL: &[Command] =
-        &[Command::Quit, Command::Open, Command::Previous, Command::Next, Command::First, Command::Last, Command::Filter];
+    pub const ALL: &[Command] = &[
+        Command::Quit,
+        Command::Open,
+        Command::Previous,
+        Command::Next,
+        Command::First,
+        Command::Last,
+        Command::Filter,
+        Command::Undo,
+        Command::Redo,
+        Command::Reset,
+        Command::SliderPrevious,
+        Command::SliderNext,
+        Command::Increase,
+        Command::Decrease,
+        Command::IncreaseMore,
+        Command::DecreaseMore,
+    ];
 
     /// Look a command up by its name in code, e.g. "Open".
     pub fn from_name(name: &str) -> Option<Command> {
@@ -30,8 +57,24 @@ impl Command {
     /// Every command with a shortcut, most modifiers first. egui matches
     /// Ctrl+Z even when Shift is also held, so Ctrl+Shift+Z has to be
     /// checked before it.
-    pub const KEYBOARD_ORDER: &[Command] =
-        &[Command::Quit, Command::Open, Command::Filter, Command::Previous, Command::Next, Command::First, Command::Last];
+    pub const KEYBOARD_ORDER: &[Command] = &[
+        Command::Redo,
+        Command::Reset,
+        Command::Undo,
+        Command::Quit,
+        Command::Open,
+        Command::Filter,
+        Command::Previous,
+        Command::Next,
+        Command::First,
+        Command::Last,
+        Command::IncreaseMore,
+        Command::DecreaseMore,
+        Command::Increase,
+        Command::Decrease,
+        Command::SliderPrevious,
+        Command::SliderNext,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -42,6 +85,15 @@ impl Command {
             Command::First => "First Frame",
             Command::Last => "Last Frame",
             Command::Filter => "Show the Picks or Everything",
+            Command::Undo => "Undo",
+            Command::Redo => "Redo",
+            Command::Reset => "Reset the Frame",
+            Command::SliderPrevious => "Select the Previous Slider",
+            Command::SliderNext => "Select the Next Slider",
+            Command::Increase => "Increase the Selected Slider",
+            Command::Decrease => "Decrease the Selected Slider",
+            Command::IncreaseMore => "Increase the Selected Slider More",
+            Command::DecreaseMore => "Decrease the Selected Slider More",
         }
     }
 
@@ -56,6 +108,16 @@ impl Command {
             Command::Last => s(Modifiers::NONE, Key::End),
             // Lightroom's Enable Filters.
             Command::Filter => s(CMD, Key::L),
+            Command::Undo => s(CMD, Key::Z),
+            Command::Redo => s(CMD_SHIFT, Key::Z),
+            Command::Reset => s(CMD_SHIFT, Key::R),
+            Command::SliderPrevious => s(Modifiers::NONE, Key::Comma),
+            Command::SliderNext => s(Modifiers::NONE, Key::Period),
+            Command::Increase => s(Modifiers::NONE, Key::Equals),
+            Command::Decrease => s(Modifiers::NONE, Key::Minus),
+            // Shift with = is +.
+            Command::IncreaseMore => s(Modifiers::SHIFT, Key::Plus),
+            Command::DecreaseMore => s(Modifiers::SHIFT, Key::Minus),
         }
     }
 
@@ -120,5 +182,12 @@ mod tests {
         assert_eq!(press(&ctx, Modifiers::NONE, Key::ArrowRight), [Command::Next]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::Home), [Command::First]);
         assert_eq!(press(&ctx, CMD, Key::L), [Command::Filter]);
+        assert_eq!(press(&ctx, CMD, Key::Z), [Command::Undo]);
+        assert_eq!(press(&ctx, CMD_SHIFT, Key::Z), [Command::Redo], "not mistaken for undo");
+        assert_eq!(press(&ctx, CMD_SHIFT, Key::R), [Command::Reset]);
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::Period), [Command::SliderNext]);
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::Minus), [Command::Decrease]);
+        assert_eq!(press(&ctx, Modifiers::SHIFT, Key::Minus), [Command::DecreaseMore]);
+        assert_eq!(press(&ctx, Modifiers::SHIFT, Key::Plus), [Command::IncreaseMore]);
     }
 }

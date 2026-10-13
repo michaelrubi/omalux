@@ -1,6 +1,10 @@
 mod app;
 mod commands;
+mod develop;
 mod hotkeys;
+mod loupe;
+mod render;
+mod slider;
 mod theme;
 
 use std::path::PathBuf;
