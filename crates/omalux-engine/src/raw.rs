@@ -418,7 +418,7 @@ fn fit_box(max_edge: usize) -> lightcraft_codecs::DecodeOptions {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The CC0 ILCE-7M3 raws Lightcraft's `cargo xtask corpus` downloads from raw.pixls.us, where the

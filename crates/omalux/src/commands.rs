@@ -9,6 +9,8 @@ pub enum Command {
     Quit,
     Open,
     Close,
+    Export,
+    ExportAndEdit,
     Previous,
     Next,
     First,
@@ -38,6 +40,8 @@ impl Command {
         Command::Quit,
         Command::Open,
         Command::Close,
+        Command::Export,
+        Command::ExportAndEdit,
         Command::Previous,
         Command::Next,
         Command::First,
@@ -71,6 +75,8 @@ impl Command {
         Command::Quit,
         Command::Open,
         Command::Close,
+        Command::Export,
+        Command::ExportAndEdit,
         Command::Filter,
         Command::Previous,
         Command::Next,
@@ -91,6 +97,8 @@ impl Command {
             Command::Quit => "Quit",
             Command::Open => "Open Folder…",
             Command::Close => "Close Folder",
+            Command::Export => "Export",
+            Command::ExportAndEdit => "Export and Edit in Omapix",
             Command::Previous => "Previous Frame",
             Command::Next => "Next Frame",
             Command::First => "First Frame",
@@ -116,6 +124,8 @@ impl Command {
             Command::Quit => s(CMD, Key::Q),
             Command::Open => s(CMD, Key::O),
             Command::Close => s(CMD, Key::W),
+            Command::Export => s(CMD_SHIFT, Key::E),
+            Command::ExportAndEdit => s(CMD, Key::E),
             Command::Previous => s(Modifiers::NONE, Key::ArrowLeft),
             Command::Next => s(Modifiers::NONE, Key::ArrowRight),
             Command::First => s(Modifiers::NONE, Key::Home),
@@ -195,6 +205,8 @@ mod tests {
         assert_eq!(press(&ctx, CMD, Key::Q), [Command::Quit]);
         assert_eq!(press(&ctx, CMD, Key::O), [Command::Open]);
         assert_eq!(press(&ctx, CMD, Key::W), [Command::Close]);
+        assert_eq!(press(&ctx, CMD_SHIFT, Key::E), [Command::Export]);
+        assert_eq!(press(&ctx, CMD, Key::E), [Command::ExportAndEdit]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::O), []);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::ArrowRight), [Command::Next]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::Home), [Command::First]);

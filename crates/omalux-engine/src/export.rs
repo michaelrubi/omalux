@@ -8,6 +8,10 @@
 //! down to 16-bit integers, linear. 16-bit linear has four times the levels
 //! of the A7 III's 14 bits in every stop.
 
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
 use lightcraft_codecs::{EncodeImage, EncodeMeta, Samples, TiffCompression, Trc, encode, icc};
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::{DeepSamples, OutputDepth, OutputSpace, RenderRequest, SourceInfo};
@@ -57,6 +61,60 @@ pub fn tiff(image: &Linear16) -> Result<Vec<u8>, String> {
     encode::encode_tiff(&EncodeImage::new(w, h, 3, Samples::U16(&image.samples)), TiffCompression::Deflate, &meta).map_err(|e| e.to_string())
 }
 
+/// Export `raw` to `to`: `<to>/<stem>.tif`.
+///
+/// Decodes at full size, takes `settings` or the edit in its sidecar or a
+/// fresh raw's as-shot settings, renders to 16-bit Linear ProPhoto RGB, and
+/// writes the TIFF in one step via a temporary file.
+///
+/// Returns `Ok(true)` if exported, or `Ok(false)` if a TIFF of that name was
+/// already there (which is never overwritten). Returns an error if the raw
+/// cannot be read or decoded, if its sidecar has an edit with a newer process
+/// version, or if rendering/writing fails.
+pub fn export(raw: &Path, to: &Path, settings: Option<&DevelopSettings>) -> Result<bool, String> {
+    let stem = raw.file_stem().ok_or_else(|| format!("{}: not a file", raw.display()))?.to_string_lossy();
+    let target = to.join(format!("{stem}.tif"));
+    if target.try_exists().map_err(|e| format!("{}: {e}", target.display()))? {
+        return Ok(false);
+    }
+
+    let bytes = fs::read(raw).map_err(|e| format!("{}: {e}", raw.display()))?;
+    let (full, info) = crate::raw::load(&bytes, usize::MAX)?;
+
+    let dev_settings = match settings {
+        Some(s) => s.clone(),
+        None => match crate::sidecar::read(raw) {
+            Ok(Some(xmp)) => match crate::sidecar::edit(&xmp) {
+                Ok(Some(edit)) => edit.settings,
+                Ok(None) => DevelopSettings::for_raw(info.as_shot_temp, info.as_shot_tint),
+                Err(e) => return Err(format!("{}: {e}", raw.display())),
+            },
+            Ok(None) => DevelopSettings::for_raw(info.as_shot_temp, info.as_shot_tint),
+            Err(e) => return Err(format!("{}: {e}", raw.display())),
+        },
+    };
+
+    let image = render(&full, &info, &dev_settings)?;
+    let tiff_bytes = tiff(&image)?;
+
+    fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    let mut tmp_name = target.clone().into_os_string();
+    tmp_name.push(".omalux-tmp");
+    let temporary = PathBuf::from(tmp_name);
+    let written = (|| {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(&tiff_bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, &target)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written.map_err(|e| format!("{}: {e}", target.display()))?;
+
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,5 +156,80 @@ mod tests {
         assert_eq!(icc, profile());
         let tiff::decoder::DecodingResult::U16(samples) = decoder.read_image().unwrap() else { panic!("not 16-bit") };
         assert_eq!(samples, image.samples);
+    }
+
+    /// A folder of its own for a test, removed when dropped.
+    struct Folder(PathBuf);
+
+    impl Folder {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("omalux-export-{}-{name}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn export_raw_to_folder() {
+        for (name, bytes) in crate::raw::tests::a7m3_corpus() {
+            let folder = Folder::new(&name.replace('.', "-"));
+            let raw_path = folder.0.join(&name);
+            fs::write(&raw_path, &bytes).unwrap();
+
+            let out = folder.0.join("omalux");
+            let stem = raw_path.file_stem().unwrap().to_string_lossy();
+            let target = out.join(format!("{stem}.tif"));
+
+            // 1. The TIFF is where it should be, 16-bit with the profile.
+            assert!(export(&raw_path, &out, None).unwrap());
+            assert!(target.exists());
+
+            let tiff_bytes = fs::read(&target).unwrap();
+            let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(&tiff_bytes)).unwrap();
+            assert_eq!(decoder.colortype().unwrap(), tiff::ColorType::RGB(16));
+            let icc = decoder.find_tag(tiff::tags::Tag::IccProfile).unwrap().unwrap().into_u8_vec().unwrap();
+            assert_eq!(icc, profile());
+            let tiff::decoder::DecodingResult::U16(default_samples) = decoder.read_image().unwrap() else { panic!("not 16-bit") };
+            assert!(!default_samples.is_empty());
+
+            // 2. An existing one is left alone.
+            let dummy = b"existing untouched tiff data";
+            fs::write(&target, dummy).unwrap();
+            assert!(!export(&raw_path, &out, None).unwrap());
+            assert_eq!(fs::read(&target).unwrap(), dummy);
+
+            // 3. The sidecar's edit is what's rendered.
+            let mut edited_settings = DevelopSettings::for_raw(6500.0, 0.0);
+            edited_settings.light.exposure = -2.0;
+            crate::sidecar::update(&raw_path, |xmp| crate::sidecar::with_edit(xmp, &crate::sidecar::Edit::new(edited_settings.clone()))).unwrap();
+
+            let out_edit = folder.0.join("omalux-edit");
+            assert!(export(&raw_path, &out_edit, None).unwrap());
+            let target_edit = out_edit.join(format!("{stem}.tif"));
+            let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(fs::read(&target_edit).unwrap())).unwrap();
+            let tiff::decoder::DecodingResult::U16(edit_samples) = decoder.read_image().unwrap() else { panic!("not 16-bit") };
+            assert_ne!(edit_samples, default_samples);
+
+            let (full, info) = crate::raw::load(&bytes, usize::MAX).unwrap();
+            let expected_image = render(&full, &info, &edited_settings).unwrap();
+            assert_eq!(edit_samples, expected_image.samples);
+
+            // 4. A newer process version is refused.
+            crate::sidecar::update(&raw_path, |xmp| {
+                let with = crate::sidecar::with_edit(xmp, &crate::sidecar::Edit::new(edited_settings.clone()))?;
+                Ok(with.replace(">1</omalux:processVersion>", ">99</omalux:processVersion>"))
+            }).unwrap();
+
+            let out_newer = folder.0.join("omalux-newer");
+            let err = export(&raw_path, &out_newer, None).unwrap_err();
+            assert!(err.contains("newer OmaLux"), "unexpected error: {err}");
+            assert!(!out_newer.join(format!("{stem}.tif")).exists());
+        }
     }
 }
