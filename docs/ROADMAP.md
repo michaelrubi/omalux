@@ -5,7 +5,10 @@ covers the scope and architecture.
 
 Status: scoped on 2026-10-08, and re-planned the same day on
 [Lightcraft](https://github.com/storytold/lightcraft)'s engine (see
-"Built on Lightcraft" in DESIGN.md). Nothing built yet; M0 is next.
+"Built on Lightcraft" in DESIGN.md). M0 started 2026-10-12: Lightcraft
+vendored, the workspace and an empty window up, and the spikes that
+need no real raws done; the ones that do have their tools built and wait
+for the laptop and Michael's frames (see M0).
 
 Each milestone ends with something Michael can use on a real shoot. M1 is
 the point where OmaLux replaces darktable for a clean, low-ISO shoot;
@@ -26,6 +29,10 @@ real A7 III raws before building UI: Michael's (low and high ISO, all
 three primes) and raw.pixls.us's (the CC0 ILCE-7M3 files Lightcraft
 benchmarks on, which tests can download).
 
+Each item says where it stands. "On the laptop" is what needs Michael's
+frames, the RTX 4070 or Lightroom: the tools for it are built, and the
+commands are in AGENTS.md.
+
 - **Vendor Lightcraft** at a pinned commit (`701f78e` or later) into
   `vendor/lightcraft/`: `geom`, `color`, `raster`, `tiff`, `raw`,
   `codecs`, `meta`, `develop`, `pipeline`, `gpu`, `scenes`, and the new
@@ -33,49 +40,94 @@ benchmarks on, which tests can download).
   with their licences, `NOTICE` and an `UPSTREAM.md`. Their tests pass
   in OmaLux's workspace. `codecs` trimmed of the formats OmaLux never
   reads or writes (WebP, JPEG XL, AVIF) if that's a small change.
+  *Done* at `701f78e`, unchanged, plus `inpaint` (`pipeline` needs it)
+  and `heif` (`codecs` names it). 984 tests pass, 8 ignored as upstream
+  ignores them. Trimmed by features only: AVIF and JPEG XL raws off; JPEG
+  XL in `codecs` stays (without it, an unused-import warning would want a
+  local change), and WebP isn't behind a feature.
 - **The reference set** (see "Quality bar" in DESIGN.md): 20 to 30 of
   Michael's frames, with the camera's JPEG, Lightroom Classic's renders
   (Adobe Color, and Camera Standard or Vivid), Capture One's default
   render (free trials) and his darktable export of each. Every spike
-  below is judged on it.
+  below is judged on it. *Michael's to gather.*
 - **Render real ARWs** through Lightcraft's pipeline from a small example
   binary: decode time, how the camera match fits each frame (CIEDE2000
   against the camera's JPEG), and how AHD and the highlight
   reconstruction hold up at 100% against Lightroom's and Capture One's
-  renders of the same frame. If AHD loses detail, try RCD.
+  renders of the same frame. If AHD loses detail, try RCD. *On the
+  laptop:* the `spike` example does all of it but the looking (it writes
+  the export, the render beside the camera's JPEG, and a 100% crop).
+  Lightcraft's raw loading and per-file camera match are lifted into
+  `omalux-engine` for it; CIEDE2000 is checked against Sharma's test
+  data. raw.pixls.us is blocked from the cloud sessions this was built
+  in, so not one real ARW has gone through OmaLux's code yet:
+  `scripts/fetch-corpus.sh` fetches them, and a test runs on them.
 - **His camera settings:** he shoots Standard and Vivid; confirm from the
   makernotes how his shoots split between them, and which DRO settings
   (Off, Auto, Lv1 to Lv5) they use, since DRO is matched (see "The look"
   in DESIGN.md). Read the Creative Style, which Lightcraft doesn't yet.
+  *Read* (`omalux_engine::sony`: the Creative Style and the DRO level,
+  from tags `0xb020` and `0xb025`), tested on made-up maker notes only.
+  *On the laptop:* the `spike` example counts them over his shoots, which
+  is also the first check that the A7 III writes them where expected.
 - **The GPU on the laptop.** Lightcraft's GPU pipeline on the RTX 4070
   under Hyprland and Vulkan: slider update and loupe times against the
   16 ms and 60 ms budgets, full-size export time, VRAM. That its CPU and
-  GPU results agree there too.
+  GPU results agree there too. *On the laptop,* in the `spike` example.
+  Found meanwhile: the GPU writes 8-bit output only, so the 16-bit export
+  renders on the CPU (what `spike` times), and Lightcraft refuses
+  software adapters, so it can't be tried without a real GPU.
 - **Lens data.** lensfun's corrections for the FE 35, 50 and 85 f/1.8
   through Lightcraft's `lensdb`, and Sony's embedded ones (Lightcraft
   reads them only for the ILCE-7RM4A so far); compare them, and
   Lightroom's profile correction, on frames with straight lines and a
-  plain sky; pick the default.
+  plain sky; pick the default. *Partly:* `lensdb` finds all three in
+  lensfun's current `mil-sony.xml` and gives each distortion and TCA,
+  and vignetting at every aperture but one: the FE 35 at f/1.8, whose
+  steep falloff its polynomial fit can't follow closely enough, so it's
+  dropped (worth an upstream issue). *On the laptop:* the `lens` example
+  renders each frame with lensfun's correction and without, and reports
+  Sony's table; trying Sony's on the A7 III means opening Lightcraft's
+  ILCE-7RM4A-only gate (`vendor/arw_lens.rs`) on a test branch.
 - **Raw denoise.** RawNIND's Bayer model against RawForge's TreeNet (Light
   and Heavy) on ISO 3200 to 6400 frames, and both against Lightroom's
   Denoise: how they look at 100%, how long they take, how much VRAM.
   Pick one. Run it through Lightcraft's `denoise` crates (their wgpu
   executor) and through ONNX Runtime on CUDA, and keep Lightcraft's
-  unless ONNX Runtime is much faster.
+  unless ONNX Runtime is much faster. *Not started:* needs the models,
+  the laptop and Michael's high-ISO frames. `omalux-ai` opens the
+  system's ONNX Runtime, as Omacull's does.
 - **The sidecar.** Write `omalux:settings` and `xmp:Rating` with
   `xmp_merge` into sidecars Omacull wrote and darktable wrote; check
   Omacull still reads and writes the rating, and the rest of the file is
-  untouched.
+  untouched. *Done:* the edit goes in with `xmp_merge`; marks are written
+  as Omacull writes them (the value's characters replaced), because
+  `xmp_merge` would move the rating into OmaLux's own description.
+  Tested on a darktable 5.6 sidecar and ones Omacull's own code wrote,
+  and round-tripped through Omacull's `rate` example: edits and marks
+  interleave, and darktable's history stays byte for byte.
 - **The handoff.** 16-bit Linear ProPhoto TIFFs with their ICC profile
   (decided: see "Pipeline" in DESIGN.md) open right in Omapix, and
-  `omapix --round-trip a.tif b.tif` opens several as tabs.
+  `omapix --round-trip a.tif b.tif` opens several as tabs. *Done* up to
+  the window: Omapix's own loader (`load_round_trip`) opens OmaLux's
+  exports at 16 bits with the profile "ProPhoto RGB (linear)", samples
+  unchanged, and its `--round-trip` opens each path given. *On the
+  laptop:* that they look right there, as tabs.
 - **One colour engine:** whether Omacull's monitor-profile handling works
-  on `moxcms`, so lcms2 isn't needed.
+  on `moxcms`, so lcms2 isn't needed. *Done: yes.* Lightcraft's
+  `DisplayProfile` does the converting; OmaLux adds Omacull's EDID
+  reading. Against Omacull's lcms2, on three monitor EDIDs: within 1 LSB
+  on all 4096 sRGB colours tried (mean ΔE2000 0.26, worst 1.0).
 - **Scaffold.** The workspace (`omalux-engine`, `omalux-ai`, `omalux`
   beside the vendored crates), an empty themed window, with theme,
   hotkeys, `Command`, `OMALUX_SCRIPT` and the headless test harness
   carried over from Omacull. `make install`. `AGENTS.md` updated with the
-  commands.
+  commands. *Done;* the window opens a folder by name only, for now.
+  Not yet run on Hyprland: after `make install`, Michael's first look.
+
+Also found: Lightcraft has the ILCE-7M3's colour matrices measured from
+its spectral sensitivities, so Temp and Tint are Kelvin already, not the
+relative scale DESIGN.md expected (it's updated).
 
 ## M1. Develop basics
 
@@ -93,8 +145,8 @@ The controls are Lightcraft's; the work is OmaLux's shell around them.
   dragging, full quality on release, on the GPU with the CPU fallback.
 - Lightcraft's per-file camera match as the starting look, until M4's
   pooled profile.
-- **White balance:** As Shot, Temp, Tint (relative, as Lightcraft has
-  them for uncalibrated ARWs), the eyedropper (W).
+- **White balance:** As Shot, Temp, Tint (Kelvin, through Lightcraft's
+  spectral matrices for the ILCE-7M3), the eyedropper (W).
 - **Light:** Exposure, Contrast, Highlights, Shadows, Whites, Blacks.
 - **Presence:** Vibrance, Saturation.
 - The histogram at the top of the right panel, with clipping warnings
