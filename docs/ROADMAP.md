@@ -246,7 +246,13 @@ binary.
   guards, set up from the first build. *Done:* a drag is one step, saved
   when it ends, on the same disk thread as the marks; undo history is
   per frame, for the session. An edit made with a newer OmaLux is shown
-  as a fresh raw and never written over. *Left:* the reference renders.
+  as a fresh raw and never written over. The reference renders are the
+  two CC0 ILCE-7M3 raws developed five ways (fresh, and edits that
+  between them move every control M1 shows), kept as small PNGs in
+  `crates/omalux-engine/testdata/reference/`; a test renders them again
+  and fails on a change as small as 0.05 EV, saying to bump the process
+  version. `OMALUX_REFERENCE` adds a folder of Michael's own frames,
+  with their references beside them, outside the repo.
 - **Export:** 16-bit TIFF with ICC into `<shoot>/omalux/` (set in
   `config.toml`); Ctrl+E opens them in Omapix, Ctrl+Shift+E just exports.
   From M0: that they look right in Omapix, as tabs. *Done* for the

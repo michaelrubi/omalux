@@ -15,6 +15,8 @@ pub mod edit;
 pub mod export;
 pub mod lens_profiles;
 pub mod raw;
+#[cfg(test)]
+mod reference;
 pub mod shoot;
 pub mod sidecar;
 pub mod sony;
