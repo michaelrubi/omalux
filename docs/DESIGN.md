@@ -153,12 +153,13 @@ Omapix's are.
 |-----|--------|
 | ← → Home End | Step through the frames the filter shows |
 | Ctrl+L | The picks, or everything (Lightroom's Enable Filters) |
-| P X U 0–5 | Pick, reject, unmark, stars |
+| P X U 0–5 | Pick, reject, unmark, stars (0 unmarks) |
 | `\` | Before/after |
 | Z | 100% zoom (tap to toggle, hold for a look) |
 | , . | Select the previous or next slider |
 | = − (Shift for more) | Nudge the selected slider |
-| Double-click a slider's name | Reset it |
+| Double-click a slider's name or thumb | Reset it |
+| The wheel, over the selected slider | Nudge it |
 | Shift+double-click a slider | Set it automatically |
 | W | White balance eyedropper |
 | Ctrl+U | Auto tone |
@@ -172,6 +173,7 @@ Omapix's are.
 | Ctrl+E | Export and edit in Omapix |
 | Ctrl+Shift+E | Export |
 | Ctrl+O | Open a folder |
+| Ctrl+W | Close the folder |
 
 Keys inside a tool (crop's X to swap the aspect, for one) only apply
 while it's open, as in Lightroom.
@@ -561,7 +563,9 @@ crates/
   agrees with Omacull's Little CMS 2 within 1 LSB on every one of 4096
   sRGB colours, and Omapix's Little CMS 2 reads the TIFFs' profiles.
 - **Config:** `~/.config/omalux/config.toml`, written on first run with
-  every setting explained: where exports go, the program Ctrl+E opens.
+  every setting explained: where exports go (`export_folder`), the
+  program Ctrl+E opens (`editor`). What's remembered between sessions
+  (the recent shoots, where each was left) is in `state.toml` beside it.
 - **Omacull hands over** with its existing `developer = "omalux"`
   setting: Ctrl+E in Omacull starts `omalux <folder>`.
 

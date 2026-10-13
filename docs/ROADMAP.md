@@ -190,32 +190,67 @@ The minimum that replaces darktable for a clean shoot that needs no
 denoising: open it, set exposure and white balance, send it to Omapix.
 The controls are Lightcraft's; the work is OmaLux's shell around them.
 
+Each item says where it stands. Built on 2026-10-13, Claude on the render
+path and Antigravity on the parts ported from Omacull (the recent list,
+marks, the filmstrip, export, the histogram), each on a branch of its own
+merged into `m1`. Everything here has headless tests; none of it has
+been tried by hand yet, which is Michael's to do from the installed
+binary.
+
 - Open a folder from the command line (so Omacull's Ctrl+E with
   `developer = "omalux"` works), a picker, or the recent list. Shows the
-  picks; a filter shows all.
+  picks; a filter shows all. *Done:* Ctrl+O, the recent shoots listed
+  when none is open, Ctrl+W to close, Ctrl+L for the picks or everything
+  (Lightroom's Enable Filters). A shoot reopens on the frame and filter
+  it was left with (`~/.config/omalux/state.toml`); one with no picks
+  yet opens on all of it.
 - Filmstrip and loupe, stepping with the arrows: the embedded preview at
-  once, the render after it, neighbours prepared ahead.
+  once, the render after it, neighbours prepared ahead. *Done:* the next
+  two frames and the previous one are developed ahead. Thumbnails are
+  the embedded previews, cached in `~/.cache/omalux/thumbnails/`; the
+  developed frame in the filmstrip (DESIGN.md's "Pipeline") isn't there
+  yet. Nothing is converted to the monitor's profile yet: *left*, with
+  Omacull's monitor watching to port.
 - Marks: P, X, U, 0 to 5, into `xmp:Rating` as Omacull writes them.
+  *Done,* on a disk thread; a mark that can't be written is taken back.
 - The render worker pool (lifted from Lightcraft's pattern): drafts while
   dragging, full quality on release, on the GPU with the CPU fallback.
+  *Done:* two threads decode and one renders, and what's wanted replaces
+  what was waiting. `OMALUX_GPU=0` renders on the CPU.
 - Lightcraft's per-file camera match as the starting look, until M4's
-  pooled profile.
+  pooled profile. *Done.*
 - **White balance:** As Shot, Temp, Tint (Kelvin, through Lightcraft's
-  spectral matrices for the ILCE-7M3), the eyedropper (W).
+  spectral matrices for the ILCE-7M3), the eyedropper (W). *Done.* Temp's
+  track is spaced by ratio, as Lightroom's is, not by Kelvin as
+  Lightcraft's.
 - **Light:** Exposure, Contrast, Highlights, Shadows, Whites, Blacks.
-- **Presence:** Vibrance, Saturation.
+  *Done.*
+- **Presence:** Vibrance, Saturation. *Done.*
 - The histogram at the top of the right panel, with clipping warnings
-  (J).
-- Before/after (`\`), 100% zoom (Z).
+  (J). *Done:* the render's own histogram; J or a click on a triangle
+  colours blown highlights red and crushed shadows blue in the loupe.
+- Before/after (`\`), 100% zoom (Z). *Before/after done; 100% zoom left:*
+  it needs the full-size source decoded for the current frame and the
+  window on screen rendered from it.
 - Sliders by mouse (drag, wheel, double-click to reset) and by key (`,`
   `.` to select, `=` `−` to nudge), Lightroom's behaviour as Lightcraft
-  implements it, in Omarchy's theme.
+  implements it, in Omarchy's theme. *Done,* but for typing a value into
+  a slider, which Lightcraft has and this doesn't yet.
 - Edits saved in the sidecar as DESIGN.md describes, with the process
   version; undo, redo, reset. The reference renders the process version
-  guards, set up from the first build.
+  guards, set up from the first build. *Done:* a drag is one step, saved
+  when it ends, on the same disk thread as the marks; undo history is
+  per frame, for the session. An edit made with a newer OmaLux is shown
+  as a fresh raw and never written over. *Left:* the reference renders.
 - **Export:** 16-bit TIFF with ICC into `<shoot>/omalux/` (set in
   `config.toml`); Ctrl+E opens them in Omapix, Ctrl+Shift+E just exports.
-  From M0: that they look right in Omapix, as tabs.
+  From M0: that they look right in Omapix, as tabs. *Done* for the
+  current frame (the selection is M2's): `export_folder` and `editor` in
+  `config.toml`. A TIFF that's already there is never written over,
+  since Omapix saves its retouching back into it and keeps its layers
+  beside it; Ctrl+E opens the one that's there. *Open:* how a frame is
+  exported again after its edit changes, which that rule leaves no way
+  to do short of deleting the TIFF; and Michael's look at them in Omapix.
 
 ## M2. Copy, paste and stacks
 
