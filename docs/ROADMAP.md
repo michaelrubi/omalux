@@ -63,7 +63,15 @@ commands are in AGENTS.md.
   `cargo test --workspace` put raw.pixls.us's two ILCE-7M3 files through
   it, the first real ARWs to go through OmaLux's code: both decode
   (compressed in 12 ms, uncompressed in 77 ms) and open with a camera
-  look and a Kelvin white balance. Michael's own frames are next.
+  look and a Kelvin white balance. Michael's own frames (2026-10-13, the
+  Run Dinah picks, all DRO Auto): the render is darker than the camera's
+  JPEG on every frame, and the gap follows the ΔE2000: the frame DRO
+  barely touched is 0.7 L* darker at ΔE 2.0 overall (skin 1.7), the one
+  it lifted most 6.1 darker at 5.3 (skin 12.6 darker at 10.2), while the
+  sky, which DRO leaves alone, stays within 0.5. That's DESIGN.md's
+  "DRO is matched" measured on his frames: the colour fits, the shadow
+  lift is missing. A DRO Off frame beside a DRO Auto one of the same
+  scene would settle it.
 - **His camera settings:** he shoots Standard and Vivid; confirm from the
   makernotes how his shoots split between them, and which DRO settings
   (Off, Auto, Lv1 to Lv5) they use, since DRO is matched (see "The look"
@@ -81,7 +89,8 @@ commands are in AGENTS.md.
   First runs (2026-10-13, ISO 100 picks, FE 85): a drag is 1 to 4 ms
   on the GPU (9.5 on the CPU), and the two agree to 1 level in 255; the
   loupe is 17 to 163 ms on the GPU from frame to frame with no fallback
-  to the CPU (29 to 68 on the CPU), which is still to explain; the
+  to the CPU (29 to 68 on the CPU), and a second run put the slow ones on
+  other frames, so it isn't the frames' content; still to explain. The
   export is about 1.9 s. Found meanwhile: the GPU writes 8-bit output only, so the 16-bit export
   renders on the CPU (what `spike` times), and Lightcraft refuses
   software adapters, so it can't be tried without a real GPU.
@@ -111,7 +120,8 @@ commands are in AGENTS.md.
   Pick one. Run it through Lightcraft's `denoise` crates (their wgpu
   executor) and through ONNX Runtime on CUDA, and keep Lightcraft's
   unless ONNX Runtime is much faster. *Not started:* needs the models,
-  the laptop and Michael's high-ISO frames. `omalux-ai` opens the
+  the laptop and Michael's high-ISO frames, which he has yet to shoot:
+  his four shoots are at ISO 100 (1135 frames), 640 (143) and 800 (48). `omalux-ai` opens the
   system's ONNX Runtime, as Omacull's does.
 - **The sidecar.** Write `omalux:settings` and `xmp:Rating` with
   `xmp_merge` into sidecars Omacull wrote and darktable wrote; check
