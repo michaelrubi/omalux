@@ -12,15 +12,17 @@ use egui::{Align2, FontId, RichText, Ui};
 use lightcraft_codecs::display::DisplayProfile;
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::SourceInfo;
+use omalux_engine::copy::{Copied, Group};
 use omalux_engine::disk::{Disk, Mark, Problem};
 use omalux_engine::edit::{self, History};
 use omalux_engine::shoot::{Filter, Shoot, Step, stars};
 use omalux_engine::sidecar;
 
+use crate::checklist::{Checklist, Outcome};
 use crate::commands::Command;
 use crate::config::Config;
 use crate::develop::{self, PanelOut};
-use crate::filmstrip::{Filmstrip, STRIP_HEIGHT};
+use crate::filmstrip::{Click, Filmstrip, STRIP_HEIGHT};
 use crate::hotkeys::{self, format_shortcut};
 use crate::loupe::{Loupe, News};
 use crate::monitor;
@@ -35,20 +37,37 @@ const PANEL_WIDTH: f32 = 300.0;
 const AHEAD: usize = 2;
 const BEHIND: usize = 1;
 
-/// A frame whose raw has been decoded this session: its edit, and what
-/// its settings are read against.
+/// A frame whose raw has been decoded this session, or that's been pasted
+/// onto: its edit, and what its settings are read against.
 struct Editing {
     history: History,
-    info: Arc<SourceInfo>,
+    /// None for a frame pasted onto whose raw hasn't been decoded yet:
+    /// only a paste and its undo reach it until it has.
+    info: Option<Arc<SourceInfo>>,
     /// The history's settings, as the renderer is handed them.
     settings: Arc<DevelopSettings>,
 }
 
 impl Editing {
-    /// Change the edit with `change`, which says whether it did.
+    fn new(history: History, info: Option<Arc<SourceInfo>>) -> Self {
+        let settings = Arc::new(history.settings().clone());
+        Self { history, info, settings }
+    }
+
+    /// Change the edit with `change`, which says whether it did. Nothing
+    /// happens until the frame's raw has been decoded.
     fn edit(&mut self, change: impl FnOnce(&mut History, &SourceInfo) -> bool) -> bool {
-        let changed = change(&mut self.history, &self.info);
-        if *self.settings != *self.history.settings() {
+        let Some(info) = &self.info else { return false };
+        let changed = change(&mut self.history, info);
+        self.stepped();
+        changed
+    }
+
+    /// Take up the history's settings after a step. True if they're not
+    /// what they were: there's something to save.
+    fn stepped(&mut self) -> bool {
+        let changed = *self.settings != *self.history.settings();
+        if changed {
             self.settings = Arc::new(self.history.settings().clone());
         }
         changed
@@ -149,6 +168,20 @@ pub struct App {
     clipping: bool,
     watch: monitor::Watch,
     pub display: Option<Arc<DisplayProfile>>,
+    /// Whether V is held, between frames: how Ctrl+V is told (see
+    /// [`Command::pressed`]).
+    v_down: bool,
+    /// The settings last copied, for the session.
+    clipboard: Option<Copied>,
+    /// How many pastes there have been: each one's number is on its step
+    /// in every frame it reached, so it's undone on all of them at once.
+    pastes: u64,
+    /// The frame the cursor is on, and the one it came from: whose
+    /// settings Paste from Previous takes.
+    at: Option<PathBuf>,
+    previous: Option<PathBuf>,
+    /// The checklist of what to copy, while it's open.
+    choosing: Option<Checklist>,
 }
 
 impl App {
@@ -240,6 +273,12 @@ impl App {
             clipping: false,
             watch,
             display,
+            v_down: false,
+            clipboard: None,
+            pastes: 0,
+            at: None,
+            previous: None,
+            choosing: None,
         }
     }
 
@@ -277,11 +316,7 @@ impl App {
                 self.state.add_recent(shoot.dir());
                 self.message = (!unread.is_empty()).then(|| (format!("Couldn't read {}", unread.join("; ")), true));
                 self.shoot = Some(shoot);
-                self.saved.clear();
-                self.unreadable.clear();
-                self.edits.clear();
-                self.filmstrip.reset();
-                self.leave();
+                self.forget();
             }
             Err(e) => self.message = Some((format!("Couldn't open {}: {e}", dir.display()), true)),
         }
@@ -293,10 +328,18 @@ impl App {
         self.remember_place();
         self.shoot = None;
         self.message = None;
+        self.forget();
+    }
+
+    /// Forget what was held of the shoot that was open. What was copied
+    /// stays: it can be pasted in the next shoot.
+    fn forget(&mut self) {
         self.saved.clear();
         self.unreadable.clear();
         self.edits.clear();
         self.filmstrip.reset();
+        (self.at, self.previous) = (None, None);
+        self.choosing = None;
         self.leave();
     }
 
@@ -334,8 +377,18 @@ impl App {
         if self.exporting.is_some() {
             return;
         }
-        let frames = vec![shoot.frame().path.clone()];
+        let frames = targets(shoot);
         self.export_frames(frames, edit, ctx);
+    }
+
+    /// Copy `groups` of the current frame's settings. Nothing happens
+    /// until the frame's raw has been decoded.
+    fn copy(&mut self, groups: &[Group]) {
+        let Some(shoot) = &self.shoot else { return };
+        let Some(editing) = self.edits.get(&shoot.frame().path) else { return };
+        self.clipboard = Some(Copied::new(editing.history.settings(), groups));
+        let what = if groups == Group::ALL { "every setting".to_owned() } else { listed(groups) };
+        self.message = Some((format!("Copied {what} of {}", shoot.frame().name()), false));
     }
 
     fn export_frames(&mut self, frames: Vec<PathBuf>, edit: bool, ctx: &egui::Context) {
@@ -443,8 +496,8 @@ impl App {
                     shoot.set_filter(if shoot.filter() == Filter::Picks { Filter::All } else { Filter::Picks });
                 }
             }
-            Command::Undo => self.edit(|history, _| history.undo()),
-            Command::Redo => self.edit(|history, _| history.redo()),
+            Command::Undo => self.undo(false),
+            Command::Redo => self.undo(true),
             Command::Reset => self.edit(|history, _| history.reset()),
             Command::SliderPrevious => self.selected = self.selected.saturating_sub(1),
             Command::SliderNext => self.selected = (self.selected + 1).min(develop::sliders().count() - 1),
@@ -458,6 +511,47 @@ impl App {
             Command::Zoom => {
                 let (pointer, time) = ctx.input(|i| (i.pointer.hover_pos(), i.time));
                 self.loupe.key_down(pointer, time);
+            }
+            Command::SelectAll => {
+                if let Some(shoot) = &mut self.shoot {
+                    shoot.select_all();
+                }
+            }
+            Command::SelectNone => {
+                if let Some(shoot) = &mut self.shoot {
+                    shoot.clear_selection();
+                }
+            }
+            Command::SelectPrevious => self.extend_to(Step::Previous),
+            Command::SelectNext => self.extend_to(Step::Next),
+            Command::Copy => self.copy(Group::ALL),
+            Command::CopyChoose => {
+                // Once the frame's raw has been decoded: there's nothing to copy before.
+                if let Some(shoot) = &self.shoot
+                    && self.edits.contains_key(&shoot.frame().path)
+                {
+                    self.choosing = Some(Checklist::new(&self.state.copy_groups));
+                }
+            }
+            Command::Paste => {
+                if let Some(shoot) = &self.shoot {
+                    self.paste(targets(shoot));
+                }
+            }
+            Command::PastePrevious => self.paste_previous(),
+            Command::PasteStack => {
+                let Some(shoot) = &self.shoot else { return };
+                match shoot.stack(shoot.current()) {
+                    Some(stack) => self.paste(stack.into_iter().map(|i| shoot.frames()[i].path.clone()).collect()),
+                    None => self.message = Some((format!("{} isn't in a stack", shoot.frame().name()), false)),
+                }
+            }
+            Command::ToggleStack => {
+                if let Some(shoot) = &mut self.shoot
+                    && shoot.toggle_stack()
+                {
+                    self.leave();
+                }
             }
             Command::Pick
             | Command::Reject
@@ -501,6 +595,120 @@ impl App {
     fn step_to(&mut self, step: Step) {
         if let Some(shoot) = &mut self.shoot
             && shoot.step(step)
+        {
+            self.leave();
+        }
+    }
+
+    /// Ctrl+V: paste what was copied onto `frames`.
+    fn paste(&mut self, frames: Vec<PathBuf>) {
+        let Some(copied) = self.clipboard.clone() else {
+            let how = hotkeys::current().command(Command::Copy).map(|s| format!(" ({})", format_shortcut(&s))).unwrap_or_default();
+            return self.message = Some((format!("Nothing to paste: copy a frame's settings first{how}"), false));
+        };
+        let pasted = self.paste_onto(&copied, &frames);
+        self.message = Some(pasted.said("Pasted onto"));
+    }
+
+    /// Ctrl+Alt+V, Lightroom's Paste from Previous: every setting of the
+    /// frame the cursor came from, onto the current frame alone.
+    fn paste_previous(&mut self) {
+        let Some(to) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
+        let Some(from) = self.previous.clone() else {
+            return self.message = Some(("There's no previous frame to paste from yet".to_owned(), false));
+        };
+        // A frame with no edit is pasted as a fresh raw.
+        let settings = self.settings_of(&from).map_or_else(|| History::unseen(None).settings().clone(), |settings| (*settings).clone());
+        let pasted = self.paste_onto(&Copied::new(&settings, Group::ALL), &[to]);
+        self.message = Some(pasted.said(&format!("Pasted {}'s settings onto", file_name(&from))));
+    }
+
+    /// Paste `copied` onto `frames`, decoded yet or not, as one step to
+    /// undo however many it reaches, and save each one it changed.
+    fn paste_onto(&mut self, copied: &Copied, frames: &[PathBuf]) -> Pasted {
+        let mut pasted = Pasted::default();
+        let Some(current) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return pasted };
+        // What each frame becomes, before anything is changed: a paste
+        // that changes none of them is no step.
+        let mut changes = Vec::new();
+        for path in frames {
+            if !self.edits.contains_key(path) {
+                // Not decoded this session: its edit is what its sidecar holds.
+                let saved = self.settings_of(path).map(|settings| (*settings).clone());
+                if !self.unreadable.contains(path) {
+                    self.edits.insert(path.clone(), Editing::new(History::unseen(saved), None));
+                }
+            }
+            match self.edits.get(path) {
+                Some(editing) if !self.unreadable.contains(path) => {
+                    let becomes = copied.paste(editing.history.settings(), editing.history.fresh());
+                    if becomes != *editing.history.settings() {
+                        changes.push((path.clone(), becomes));
+                    }
+                }
+                _ => pasted.unreadable += 1,
+            }
+        }
+        if changes.is_empty() {
+            return pasted;
+        }
+        self.pastes += 1;
+        // The frame it's made from holds the step too, changed or not, so
+        // undo right after a paste takes it back.
+        if !changes.iter().any(|(path, _)| *path == current)
+            && let Some(editing) = self.edits.get_mut(&current)
+        {
+            let same = editing.history.settings().clone();
+            editing.history.paste(self.pastes, same);
+        }
+        for (path, becomes) in changes {
+            if let Some(editing) = self.edits.get_mut(&path) {
+                editing.history.paste(self.pastes, becomes);
+                editing.stepped();
+                self.save(&path);
+                pasted.frames.push(path);
+            }
+        }
+        pasted
+    }
+
+    /// Ctrl+Z and Ctrl+Shift+Z: take back the current frame's last step,
+    /// or make it again. A paste is one step however many frames it
+    /// reached: it's undone on every frame where it's still the last.
+    fn undo(&mut self, redo: bool) {
+        let Some(current) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
+        if self.locked(&current) {
+            return;
+        }
+        let step = |history: &mut History| if redo { history.redo() } else { history.undo() };
+        let next = |history: &History| if redo { history.redoes() } else { history.undoes() };
+        let Some(editing) = self.edits.get_mut(&current) else { return };
+        let paste = next(&editing.history);
+        step(&mut editing.history);
+        let mut changed: Vec<PathBuf> = editing.stepped().then(|| current.clone()).into_iter().collect();
+        if let Some(paste) = paste {
+            for (path, editing) in &mut self.edits {
+                if *path != current && next(&editing.history) == Some(paste) {
+                    step(&mut editing.history);
+                    if editing.stepped() {
+                        changed.push(path.clone());
+                    }
+                }
+            }
+            if !changed.is_empty() {
+                let what = if redo { "Pasted again onto" } else { "Took the paste back from" };
+                self.message = Some((format!("{what} {}", counted(&changed)), false));
+            }
+        }
+        for path in changed {
+            self.save(&path);
+        }
+    }
+
+    /// Shift+arrow: step, taking the frames passed into the selection.
+    fn extend_to(&mut self, step: Step) {
+        if let Some(shoot) = &mut self.shoot
+            && shoot.extend(step)
         {
             self.leave();
         }
@@ -631,8 +839,8 @@ impl App {
         self.develop(ctx);
         self.finish_exporting();
         self.disk_problems();
-        if !ctx.egui_wants_keyboard_input() {
-            for command in Command::pressed(ctx) {
+        if !ctx.egui_wants_keyboard_input() && self.choosing.is_none() {
+            for command in Command::pressed(ctx, &mut self.v_down) {
                 self.run(command, ctx);
             }
         }
@@ -646,6 +854,9 @@ impl App {
         if let Some(shoot) = &self.shoot {
             self.filmstrip.sync_shoot(shoot, ctx);
             self.filmstrip.collect(ctx, shoot.current());
+            if self.at.as_ref() != Some(&shoot.frame().path) {
+                self.previous = self.at.replace(shoot.frame().path.clone());
+            }
         }
         let title = match &self.shoot {
             Some(shoot) => format!("{} — OmaLux", file_name(shoot.dir())),
@@ -677,9 +888,16 @@ impl App {
                     // Its edit starts from what its sidecar held, or as a fresh raw.
                     let fresh = DevelopSettings::for_raw(info.as_shot_temp, info.as_shot_tint);
                     let saved = self.saved.remove(&path).flatten().map(|settings| (*settings).clone());
-                    let history = History::new(fresh, saved);
-                    let settings = Arc::new(history.settings().clone());
-                    self.edits.entry(path).or_insert(Editing { history, info, settings });
+                    match self.edits.get_mut(&path) {
+                        // Pasted onto before it was decoded.
+                        Some(editing) if editing.info.is_none() => {
+                            editing.history.decoded(fresh);
+                            editing.info = Some(info);
+                            editing.stepped();
+                        }
+                        Some(_) => {}
+                        None => _ = self.edits.insert(path, Editing::new(History::new(fresh, saved), Some(info))),
+                    }
                 }
                 News::Failed(path, error) => self.message = Some((format!("Couldn't develop {}: {error}", file_name(&path)), true)),
             }
@@ -738,15 +956,32 @@ impl App {
         if let Some(dir) = clicked {
             self.open(dir);
         }
+        if let Some(mut dialog) = self.choosing.take() {
+            match dialog.show(ui.ctx(), &self.theme) {
+                Outcome::KeepOpen => self.choosing = Some(dialog),
+                Outcome::Copied(chosen) => {
+                    self.copy(&chosen);
+                    self.state.remember_copy(&chosen);
+                }
+                Outcome::Cancelled => {}
+            }
+        }
     }
 
     /// The shown frames' thumbnails, under the loupe.
     fn filmstrip(&mut self, ui: &mut Ui) {
         let Some(shoot) = &mut self.shoot else { return };
-        if let Some(clicked) = self.filmstrip.show(ui, shoot, &self.theme)
-            && clicked != shoot.current()
-        {
-            shoot.go_to(clicked);
+        let Some((clicked, click)) = self.filmstrip.show(ui, shoot, &self.theme) else { return };
+        let was = shoot.current();
+        match click {
+            Click::Toggle => shoot.toggle_selected(clicked),
+            Click::Range => shoot.select_to(clicked),
+            Click::Plain => {
+                shoot.clear_selection();
+                shoot.go_to(clicked);
+            }
+        }
+        if shoot.current() != was {
             self.leave();
         }
     }
@@ -761,7 +996,9 @@ impl App {
             self.clipping = !self.clipping;
         }
         ui.add_space(6.0);
-        let Some(editing) = self.shoot.as_ref().and_then(|shoot| self.edits.get(&shoot.frame().path)) else { return };
+        // Not until the frame's raw has been decoded: the sliders are read against it.
+        let editing = self.shoot.as_ref().and_then(|shoot| self.edits.get(&shoot.frame().path));
+        let Some(editing) = editing.filter(|editing| editing.info.is_some()) else { return };
         let out = develop::show(ui, &self.theme, editing.history.settings(), editing.history.fresh(), self.selected);
         self.panel(out);
     }
@@ -840,13 +1077,71 @@ impl App {
 fn status(shoot: &Shoot) -> String {
     let shown = shoot.shown_indices();
     let place = shown.iter().position(|&i| i == shoot.current()).map_or(0, |p| p + 1);
+    // Stacks closed up show one frame each: how many are shown isn't how many there are.
+    let through = shoot.frames().iter().filter(|frame| shoot.filter().matches(frame)).count();
+    let (count, closed) = if shown.len() < through { (through, format!("{} shown of ", shown.len())) } else { (shown.len(), String::new()) };
     let of = match shoot.filter() {
-        Filter::Picks => format!("{} picks of {} frames", shown.len(), shoot.frames().len()),
-        Filter::All => format!("{} frames", shown.len()),
+        Filter::Picks => format!("{closed}{count} picks of {} frames", shoot.frames().len()),
+        Filter::All => format!("{closed}{count} frames"),
     };
     let mark = stars(shoot.frame().rating);
     let mark = if mark.is_empty() { String::new() } else { format!("{mark}   ") };
-    format!("{}   {mark}{place} / {of}", shoot.frame().name())
+    let selected = match shoot.selection().len() {
+        0 => String::new(),
+        n => format!("   {n} selected"),
+    };
+    format!("{}   {mark}{place} / {of}{selected}", shoot.frame().name())
+}
+
+/// How a paste went.
+#[derive(Default)]
+struct Pasted {
+    /// The frames it changed.
+    frames: Vec<PathBuf>,
+    /// How many it left alone because this OmaLux can't read their edits.
+    unreadable: usize,
+}
+
+impl Pasted {
+    /// What to say of it, starting "Pasted onto", and whether that's a
+    /// problem.
+    fn said(&self, pasted_onto: &str) -> (String, bool) {
+        let left = match self.unreadable {
+            0 => String::new(),
+            1 => "; 1 has an edit this OmaLux can't read, and was left as it is".to_owned(),
+            n => format!("; {n} have edits this OmaLux can't read, and were left as they are"),
+        };
+        match (self.frames.is_empty(), self.unreadable) {
+            (true, 0) => ("Nothing to paste: these settings are there already".to_owned(), false),
+            (true, _) => (format!("Pasted nothing{left}"), true),
+            (false, unreadable) => (format!("{pasted_onto} {}{left}", counted(&self.frames)), unreadable > 0),
+        }
+    }
+}
+
+/// "DSC01234.ARW" for one frame, "12 frames" for more.
+fn counted(frames: &[PathBuf]) -> String {
+    match frames {
+        [one] => file_name(one),
+        frames => format!("{} frames", frames.len()),
+    }
+}
+
+/// The frames a paste or an export reaches: the selection, or with none
+/// the current frame.
+fn targets(shoot: &Shoot) -> Vec<PathBuf> {
+    let selection = shoot.selection();
+    let frames = if selection.is_empty() { vec![shoot.current()] } else { selection };
+    frames.into_iter().map(|i| shoot.frames()[i].path.clone()).collect()
+}
+
+/// "White Balance, Light and Presence".
+fn listed(groups: &[Group]) -> String {
+    let labels: Vec<&str> = groups.iter().map(|group| group.label()).collect();
+    match labels.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => labels.concat(),
+    }
 }
 
 fn file_name(path: &Path) -> String {
@@ -895,6 +1190,7 @@ mod tests {
     use super::*;
 
     use egui::{Event, Key, Modifiers};
+    use omalux_engine::shoot::Frame;
     use omalux_engine::sidecar;
 
     /// The app driven with synthetic events, with no window or GPU.
@@ -965,6 +1261,13 @@ mod tests {
             self.ctx.data(|d| d.get_temp(egui::Id::new((id, "value")))).expect("the slider value has been drawn")
         }
 
+        /// Where `text` was last drawn: in a dialog, if one is open over
+        /// the panels.
+        fn text(&mut self, text: &str) -> egui::Rect {
+            let output = self.frame(vec![]);
+            texts(&output).into_iter().rev().find(|(t, _)| t == text).map(|(_, rect)| rect).expect("the text has been drawn")
+        }
+
         fn type_text(&mut self, text: &str) -> egui::FullOutput {
             self.frame(vec![Event::Text(text.to_owned())])
         }
@@ -990,6 +1293,23 @@ mod tests {
             sidecar::edit(&sidecar::read(path).unwrap()?).unwrap().map(|edit| edit.settings)
         }
 
+        /// A frame's settings as they stand, by its raw's name.
+        fn settings_of(&mut self, name: &str) -> DevelopSettings {
+            let path = self.app.shoot.as_ref().unwrap().dir().join(name);
+            self.app.settings_of(&path).map_or_else(|| DevelopSettings::for_raw(5200.0, 3.0), |settings| (*settings).clone())
+        }
+
+        /// The edit in a frame's sidecar, by its raw's name.
+        fn saved_of(&self, name: &str) -> Option<DevelopSettings> {
+            self.app.disk.flush();
+            let path = self.app.shoot.as_ref().unwrap().dir().join(name);
+            sidecar::edit(&sidecar::read(&path).unwrap()?).unwrap().map(|edit| edit.settings)
+        }
+
+        fn said(&self) -> &str {
+            self.app.message.as_ref().map_or("", |(text, _)| text)
+        }
+
         /// A key pressed and let go in one frame.
         fn press(&mut self, modifiers: Modifiers, key: Key) -> egui::FullOutput {
             let mut events = key_events(modifiers, key, true);
@@ -998,10 +1318,17 @@ mod tests {
         }
 
         fn click(&mut self, at: egui::Pos2) {
+            self.click_with(at, Modifiers::NONE);
+        }
+
+        fn click_with(&mut self, at: egui::Pos2, modifiers: Modifiers) {
             let button =
-                |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
-            self.frame(vec![Event::PointerMoved(at), button(true)]);
-            self.frame(vec![button(false)]);
+                |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers };
+            self.frame(vec![Event::ModifiersChanged(modifiers), Event::PointerMoved(at), button(true)]);
+            self.frame(vec![Event::ModifiersChanged(modifiers), button(false)]);
+            if modifiers != Modifiers::NONE {
+                self.frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+            }
         }
     }
 
@@ -1414,6 +1741,216 @@ mod tests {
         h.press(Modifiers::NONE, Key::Num3);
         h.app.disk.flush();
         assert_eq!(std::fs::read_to_string(sidecar::path_for(&raw)).unwrap(), newer.replace("xmp:Rating=\"1\"", "xmp:Rating=\"3\""));
+    }
+
+    /// Ctrl+C and Ctrl+V as egui-winit sends them: a Copy event, and a V
+    /// let go that was never pressed.
+    fn copy(h: &mut Harness) {
+        h.frame(vec![Event::ModifiersChanged(Modifiers::COMMAND), Event::Copy]);
+    }
+
+    fn paste(h: &mut Harness, modifiers: Modifiers) {
+        h.frame(vec![
+            Event::ModifiersChanged(modifiers),
+            Event::Key { key: Key::V, physical_key: None, pressed: false, repeat: false, modifiers },
+        ]);
+    }
+
+    /// The first frame of a shoot of `frames` picks, with Exposure at 0.10
+    /// and Tint a nudge down from as shot, copied.
+    fn copied(name: &str, frames: usize) -> (Folder, Harness) {
+        let folder = Folder::new(name, &vec![1; frames]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::Equals);
+        h.press(Modifiers::NONE, Key::Equals);
+        h.press(Modifiers::NONE, Key::Comma);
+        h.press(Modifiers::NONE, Key::Minus);
+        copy(&mut h);
+        (folder, h)
+    }
+
+    #[test]
+    fn ctrl_c_copies_every_setting_and_ctrl_v_pastes_it_onto_the_next_frame() {
+        let folder = Folder::new("copy", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        paste(&mut h, Modifiers::COMMAND);
+        assert!(h.said().contains("Nothing to paste: copy a frame's settings first (Ctrl+C)"), "{}", h.said());
+        drop(h);
+
+        let (_folder, mut h) = copied("copy", 2);
+        assert_eq!(h.said(), "Copied every setting of DSC00001.ARW");
+        let first = h.settings().clone();
+        assert_eq!((first.light.exposure > 0.09, first.wb.mode, first.wb.tint), (true, lightcraft_develop::WbMode::Custom, 1.0));
+        paste(&mut h, Modifiers::COMMAND);
+        assert_eq!(h.said(), "Nothing to paste: these settings are there already");
+
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.settle();
+        paste(&mut h, Modifiers::COMMAND);
+        assert_eq!(h.said(), "Pasted onto DSC00002.ARW");
+        assert_eq!((h.settings(), h.saved().as_ref()), (&first, Some(&first)));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &DevelopSettings::for_raw(5200.0, 3.0), "one step");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        assert_eq!(h.said(), "Took the paste back from DSC00002.ARW");
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        assert_eq!((h.settings(), h.said()), (&first, "Pasted again onto DSC00002.ARW"));
+
+        // What was copied can be pasted in the next shoot too.
+        let other = Folder::new("copy-other", &[1]);
+        h.app.open(other.0.clone());
+        h.settle();
+        paste(&mut h, Modifiers::COMMAND);
+        assert_eq!(h.settings(), &first);
+    }
+
+    #[test]
+    fn a_paste_onto_many_frames_is_one_step_to_undo_whatever_has_been_decoded() {
+        let (folder, mut h) = copied("paste-many", 6);
+        let first = h.settings().clone();
+        let fresh = DevelopSettings::for_raw(5200.0, 3.0);
+        let names: Vec<String> = (1..=6).map(|i| format!("DSC{i:05}.ARW")).collect();
+        let frames: Vec<PathBuf> = names.iter().map(|name| folder.0.join(name)).collect();
+        // The frame they were copied from among them, as in its stack; the
+        // last three haven't been decoded (two are prepared ahead).
+        assert!(h.app.edits.contains_key(&frames[2]) && !h.app.edits.contains_key(&frames[3]));
+        h.app.paste(frames.clone());
+        assert_eq!(h.said(), "Pasted onto 5 frames");
+        for name in &names[1..] {
+            let saved = h.saved_of(name).unwrap();
+            assert_eq!((saved.light.exposure, saved.wb.mode, saved.wb.tint), (first.light.exposure, first.wb.mode, 1.0), "{name}");
+        }
+        h.settle();
+        let shown = h.app.loupe.shown(&frames[1]).unwrap().render.as_ref().map(|r| r.settings.light.exposure);
+        assert_eq!(shown, Some(first.light.exposure), "the frames prepared ahead are developed again");
+
+        // Undone from the frame it was made from, which it didn't change.
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.said(), "Took the paste back from 5 frames");
+        assert_eq!(h.settings(), &first, "its own edit isn't what's undone");
+        for name in &names[1..] {
+            assert_eq!(h.saved_of(name).map(|s| (s.light.exposure, s.wb.mode)), Some((0.0, lightcraft_develop::WbMode::AsShot)), "{name}");
+        }
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        assert_eq!(h.said(), "Pasted again onto 5 frames");
+        assert_eq!(h.settings_of("DSC00006.ARW").light.exposure, first.light.exposure);
+
+        // A frame edited since keeps its edit and the paste under it; the
+        // rest are undone from any frame of the paste.
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.settle();
+        h.press(Modifiers::NONE, Key::Period);
+        h.press(Modifiers::NONE, Key::Period);
+        h.press(Modifiers::NONE, Key::Equals);
+        let second = h.settings().clone();
+        assert_eq!(second.light.contrast, 1.0);
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.settle();
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.said(), "Took the paste back from 4 frames");
+        assert_eq!(h.settings(), &fresh);
+        assert_eq!(h.settings_of("DSC00002.ARW"), second);
+        assert_eq!(h.settings_of("DSC00001.ARW"), first);
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings_of("DSC00002.ARW"), second, "and there's nothing more to undo on this one");
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        assert_eq!(h.said(), "Pasted again onto 4 frames");
+
+        // A frame pasted onto before it was decoded shows its own as-shot
+        // white balance once it is, and the sliders work on it.
+        let mut unseen = DevelopSettings::for_raw(4100.0, -7.0);
+        unseen.light.exposure = -1.0;
+        h.app.clipboard = Some(Copied::new(&unseen, &[Group::WhiteBalance, Group::Light]));
+        h.app.paste(vec![frames[5].clone()]);
+        assert_eq!(h.saved_of("DSC00006.ARW").map(|s| (s.wb.mode, s.light.exposure)), Some((lightcraft_develop::WbMode::AsShot, -1.0)));
+        h.press(Modifiers::NONE, Key::End);
+        h.settle();
+        assert_eq!((h.settings().wb.temp, h.settings().wb.tint, h.settings().light.exposure), (5200.0, 3.0, -1.0));
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(h.settings().light.contrast, 1.0);
+        h.press(Modifiers::COMMAND, Key::Z);
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().light.exposure, first.light.exposure, "back to the first paste");
+    }
+
+    #[test]
+    fn ctrl_v_pastes_onto_the_selection_and_ctrl_z_takes_it_back_from_all_of_it() {
+        let (_folder, mut h) = copied("paste-selection", 5);
+        let first = h.settings().clone();
+        let fresh = DevelopSettings::for_raw(5200.0, 3.0);
+        // The second to the fourth, the cursor on the fourth.
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        paste(&mut h, Modifiers::COMMAND);
+        assert_eq!(h.said(), "Pasted onto 3 frames");
+        for name in ["DSC00002.ARW", "DSC00003.ARW", "DSC00004.ARW"] {
+            assert_eq!((h.settings_of(name), h.saved_of(name)), (first.clone(), Some(first.clone())), "{name}");
+        }
+        assert_eq!((h.settings_of("DSC00005.ARW"), h.saved_of("DSC00005.ARW")), (fresh.clone(), None), "and no further");
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.said(), "Took the paste back from 3 frames");
+        for name in ["DSC00002.ARW", "DSC00003.ARW", "DSC00004.ARW"] {
+            assert_eq!(h.settings_of(name).light.exposure, 0.0, "{name}");
+        }
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [1, 2, 3], "the selection stays, to paste something else");
+    }
+
+    #[test]
+    fn a_paste_leaves_an_edit_it_cant_read_alone_and_says_so() {
+        let (folder, mut h) = copied("paste-newer", 4);
+        let raw = folder.0.join("DSC00004.ARW");
+        sidecar::update(&raw, |xmp| {
+            let with = sidecar::with_edit(xmp, &sidecar::Edit::new(DevelopSettings::for_raw(5200.0, 3.0)))?;
+            Ok(with.replace(">1</omalux:processVersion>", ">99</omalux:processVersion>"))
+        })
+        .unwrap();
+        let newer = std::fs::read_to_string(sidecar::path_for(&raw)).unwrap();
+        h.app.paste(vec![folder.0.join("DSC00003.ARW"), raw.clone()]);
+        assert_eq!(h.app.message.clone().unwrap(), ("Pasted onto DSC00003.ARW; 1 has an edit this OmaLux can't read, and was left as it is".to_owned(), true));
+        h.app.paste(vec![raw.clone()]);
+        assert_eq!(h.said(), "Pasted nothing; 1 has an edit this OmaLux can't read, and was left as it is");
+        h.app.disk.flush();
+        assert_eq!(std::fs::read_to_string(sidecar::path_for(&raw)).unwrap(), newer);
+    }
+
+    #[test]
+    fn ctrl_alt_v_pastes_the_settings_of_the_frame_the_cursor_came_from() {
+        let folder = Folder::new("previous", &[1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        paste(&mut h, Modifiers::COMMAND | Modifiers::ALT);
+        assert_eq!(h.said(), "There's no previous frame to paste from yet");
+        h.press(Modifiers::NONE, Key::Equals);
+        let first = h.settings().clone();
+
+        // From the frame it came from, not the one before it in the strip.
+        h.press(Modifiers::NONE, Key::End);
+        h.settle();
+        paste(&mut h, Modifiers::COMMAND | Modifiers::ALT);
+        assert_eq!(h.said(), "Pasted DSC00001.ARW's settings onto DSC00003.ARW");
+        assert_eq!((h.settings(), h.saved().as_ref()), (&first, Some(&first)));
+        assert!(h.app.clipboard.is_none(), "what was copied is left alone");
+
+        // From a frame with no edit: back to a fresh raw.
+        h.press(Modifiers::NONE, Key::ArrowLeft);
+        h.settle();
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        paste(&mut h, Modifiers::COMMAND | Modifiers::ALT);
+        assert_eq!(h.settings(), &DevelopSettings::for_raw(5200.0, 3.0));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &first);
+
+        // Another shoot has no previous frame to begin with.
+        h.app.open(folder.0.clone());
+        h.settle();
+        paste(&mut h, Modifiers::COMMAND | Modifiers::ALT);
+        assert_eq!(h.said(), "There's no previous frame to paste from yet");
     }
 
     #[test]
@@ -1871,5 +2408,330 @@ mod tests {
         let mut h = Harness::new(&[]);
         h.frame(vec![]);
         assert!(h.app.display.is_none());
+    }
+
+    #[test]
+    fn filmstrip_ctrl_click_and_shift_click_selects_frames() {
+        let folder = Folder::new("clicks", &[1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+
+        let cell = |h: &Harness, index: usize| {
+            h.app.filmstrip.cells.iter().find(|(i, _)| *i == index).map(|(_, r)| *r).expect("filmstrip cell")
+        };
+
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 0);
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+
+        // Ctrl+click on cell 1: selects 0 and 1, goes to 1.
+        h.click_with(cell(&h, 1).center(), Modifiers::COMMAND);
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 1);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1]);
+        assert!(h.app.shoot.as_ref().unwrap().is_selected(0));
+        assert!(h.app.shoot.as_ref().unwrap().is_selected(1));
+
+        // Ctrl+click on cell 0: deselects 0, goes to 0.
+        h.click_with(cell(&h, 0).center(), Modifiers::COMMAND);
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 0);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [1]);
+        assert!(!h.app.shoot.as_ref().unwrap().is_selected(0));
+        assert!(h.app.shoot.as_ref().unwrap().is_selected(1));
+
+        // Shift+click on cell 2: selects from current (0) to 2, goes to 2.
+        h.click_with(cell(&h, 2).center(), Modifiers::SHIFT);
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 2);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1, 2]);
+
+        // Plain click on cell 1: clears selection, goes to 1.
+        h.click(cell(&h, 1).center());
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 1);
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+    }
+
+    #[test]
+    fn shift_arrows_extend_the_selection() {
+        let folder = Folder::new("shift-arrows", &[1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 0);
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+
+        // Shift+Right: extends from 0 to 1.
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 1);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1]);
+
+        // Shift+Right again: extends to 2.
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 2);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1, 2]);
+
+        // Shift+Left: extends to 1 (keeps 2 in selection).
+        h.press(Modifiers::SHIFT, Key::ArrowLeft);
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 1);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn ctrl_a_selects_all_and_ctrl_d_clears_selection() {
+        let folder = Folder::new("ctrl-a-d", &[1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+
+        h.press(Modifiers::COMMAND, Key::A);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1, 2]);
+
+        h.press(Modifiers::COMMAND, Key::D);
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+    }
+
+    #[test]
+    fn a_plain_arrow_clears_the_selection() {
+        let folder = Folder::new("plain-arrow-clears", &[1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+
+        h.press(Modifiers::COMMAND, Key::A);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1, 2]);
+
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 1);
+    }
+
+    #[test]
+    fn opening_another_shoot_starts_with_no_selection() {
+        let folder1 = Folder::new("open-first", &[1, 1]);
+        let folder2 = Folder::new("open-second", &[1, 1]);
+        let mut h = Harness::new(&[]);
+
+        h.app.open(folder1.0.clone());
+        h.press(Modifiers::COMMAND, Key::A);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1]);
+
+        h.app.open(folder2.0.clone());
+        assert!(h.app.shoot.as_ref().unwrap().selection().is_empty());
+    }
+
+    #[test]
+    fn status_bar_shows_selection_count() {
+        let folder = Folder::new("status-count", &[1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★   1 / 4 picks of 4 frames");
+
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection().len(), 3);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00003.ARW   ★   3 / 4 picks of 4 frames   3 selected");
+
+        h.press(Modifiers::COMMAND, Key::D);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00003.ARW   ★   3 / 4 picks of 4 frames");
+    }
+
+    #[test]
+    fn ctrl_shift_e_exports_the_selection() {
+        let folder = Folder::new("export-selection", &[1, 1, 1, 1]);
+        let out_dir = folder.0.join("omalux");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        for name in ["DSC00001.tif", "DSC00002.tif", "DSC00003.tif"] {
+            std::fs::write(out_dir.join(name), b"existing tiff").unwrap();
+        }
+
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+
+        // Select three frames (0, 1, 2)
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        h.press(Modifiers::SHIFT, Key::ArrowRight);
+        assert_eq!(h.app.shoot.as_ref().unwrap().selection(), [0, 1, 2]);
+
+        h.press(Modifiers { shift: true, ..Modifiers::COMMAND }, Key::E);
+        assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exporting 1 of 3…", false)));
+
+        let started = std::time::Instant::now();
+        while h.app.exporting.is_some() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "export timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.frame(vec![]);
+        }
+
+        assert_eq!(
+            h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)),
+            Some(("Exported 0 of 3 to omalux; 3 were there already", false))
+        );
+    }
+
+    #[test]
+    fn copy_settings_dialog_copies_chosen_groups_and_remembers_choice() {
+        let folder = Folder::new("checklist", &[0]);
+        let mut h = Harness::new(&[]);
+
+        // Does not open with no shoot.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_none());
+
+        h.app.open(folder.0.clone());
+        // Does not open before current frame has been decoded.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_none());
+
+        h.settle();
+
+        // Ctrl+Shift+C opens it with everything checked.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_some());
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), Group::ALL);
+
+        // A key pressed while it's open doesn't reach the app (P doesn't mark).
+        h.press(Modifiers::NONE, Key::P);
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0);
+        assert!(h.app.choosing.is_some(), "dialog stays open");
+
+        // Unchecking White Balance, then Light.
+        let wb_rect = h.text("White Balance");
+        h.click(wb_rect.center());
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Light, Group::Presence]);
+
+        let light_rect = h.text("Light");
+        h.click(light_rect.center());
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Presence]);
+
+        // Return copies only the rest into clipboard.
+        h.press(Modifiers::NONE, Key::Enter);
+        assert!(h.app.choosing.is_none());
+        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), [Group::Presence]);
+
+        // The next time it opens, the last choice is checked.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_some());
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Presence]);
+
+        // Check All selects everything again.
+        let all_rect = h.text("Check All");
+        h.click(all_rect.center());
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), Group::ALL);
+
+        // Esc copies nothing and leaves the clipboard as it was.
+        h.press(Modifiers::NONE, Key::Escape);
+        assert!(h.app.choosing.is_none());
+        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), [Group::Presence]);
+
+        // Since Esc cancelled, the next time it opens, the previously remembered choice is still checked.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Presence]);
+
+        // Closing the shoot closes the dialog.
+        h.app.close();
+        assert!(h.app.choosing.is_none());
+    }
+
+    #[test]
+    fn copy_settings_dialog_click_outside_and_copy_none() {
+        let folder = Folder::new("checklist-cancel", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        // Open dialog.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_some());
+
+        // A click outside cancels the dialog, once it's been laid out
+        // (egui sizes it unseen in its first frame).
+        h.frame(vec![]);
+        h.click(egui::pos2(10.0, 10.0));
+        assert!(h.app.choosing.is_none());
+        assert!(h.app.clipboard.is_none());
+
+        // Reopen dialog and click Check None.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_some());
+        let none_rect = h.text("Check None");
+        h.click(none_rect.center());
+        assert!(h.app.choosing.as_ref().unwrap().chosen().is_empty());
+
+        // Copy with nothing checked does what Cancel does (closes without copying).
+        h.press(Modifiers::NONE, Key::Enter);
+        assert!(h.app.choosing.is_none());
+        assert!(h.app.clipboard.is_none());
+
+        // Opening another shoot closes the dialog.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        assert!(h.app.choosing.is_some());
+        h.app.open(folder.0.clone());
+        assert!(h.app.choosing.is_none());
+    }
+
+    /// Open `folder` as if its frames had been shot at these times, in
+    /// seconds: the tests' raws are empty files, which hold none.
+    fn open_shot_at(h: &mut Harness, folder: &Folder, times: &[f64]) {
+        h.app.open(folder.0.clone());
+        let shoot = h.app.shoot.as_ref().unwrap();
+        let frames = shoot.frames().iter().zip(times).map(|(frame, &at)| Frame { captured: Some(at), ..frame.clone() });
+        h.app.shoot = Some(Shoot::new(shoot.dir().to_path_buf(), frames.collect()));
+    }
+
+    #[test]
+    fn g_opens_the_current_frames_stack_out_and_closes_it_up() {
+        let folder = Folder::new("stack-toggle", &[1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        open_shot_at(&mut h, &folder, &[0.0, 0.5, 1.0, 60.0]);
+        h.settle();
+        let shown = |h: &Harness| h.app.shoot.as_ref().unwrap().shown_indices();
+        assert_eq!(shown(&h), [0, 3], "stacks start closed up");
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★   1 / 2 shown of 4 picks of 4 frames");
+        h.press(Modifiers::NONE, Key::G);
+        assert_eq!(shown(&h), [0, 1, 2, 3]);
+        assert_eq!(status(h.app.shoot.as_ref().unwrap()), "DSC00001.ARW   ★   1 / 4 picks of 4 frames");
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.press(Modifiers::NONE, Key::G);
+        assert_eq!((shown(&h), current(&h).as_str()), (vec![0, 3], "DSC00001.ARW"), "closed from any frame in it");
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.press(Modifiers::NONE, Key::G);
+        assert_eq!((shown(&h), current(&h).as_str()), (vec![0, 3], "DSC00004.ARW"), "a frame on its own has nothing to open");
+
+        // Another shoot's stacks are its own, closed up.
+        h.press(Modifiers::NONE, Key::Home);
+        h.press(Modifiers::NONE, Key::G);
+        let other = Folder::new("stack-toggle-other", &[1, 1, 1]);
+        open_shot_at(&mut h, &other, &[0.0, 0.5, 1.0]);
+        assert_eq!(shown(&h), [0]);
+    }
+
+    #[test]
+    fn ctrl_shift_v_pastes_onto_the_whole_stack_and_nothing_the_filter_hides() {
+        // Four frames shot together, the second not a pick, and one on its own.
+        let folder = Folder::new("paste-stack", &[1, 0, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        open_shot_at(&mut h, &folder, &[0.0, 0.5, 1.0, 1.5, 60.0]);
+        h.settle();
+        assert_eq!(h.app.shoot.as_ref().unwrap().shown_indices(), [0, 4]);
+        h.press(Modifiers::NONE, Key::Equals);
+        h.press(Modifiers::NONE, Key::Equals);
+        let first = h.settings().clone();
+        copy(&mut h);
+        paste(&mut h, Modifiers::COMMAND | Modifiers::SHIFT);
+        assert_eq!(h.said(), "Pasted onto 2 frames");
+        // Closed up, they haven't been decoded: as shot is each one's own all the same.
+        for name in ["DSC00003.ARW", "DSC00004.ARW"] {
+            let saved = h.saved_of(name).unwrap();
+            assert_eq!((saved.light.exposure, saved.wb.mode), (first.light.exposure, lightcraft_develop::WbMode::AsShot), "{name}");
+        }
+        assert_eq!((h.saved_of("DSC00002.ARW"), h.saved_of("DSC00005.ARW")), (None, None), "not the frame the filter hides, nor the next stack");
+
+        // Undone from the frame that stands for the stack, which it didn't change.
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.said(), "Took the paste back from 2 frames");
+        assert_eq!((h.settings_of("DSC00003.ARW").light.exposure, h.settings()), (0.0, &first));
+
+        h.press(Modifiers::NONE, Key::End);
+        h.settle();
+        paste(&mut h, Modifiers::COMMAND | Modifiers::SHIFT);
+        assert_eq!(h.said(), "DSC00005.ARW isn't in a stack");
+        assert_eq!(h.saved(), None);
     }
 }

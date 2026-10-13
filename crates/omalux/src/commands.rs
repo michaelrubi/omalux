@@ -44,10 +44,28 @@ pub enum Command {
     Clipping,
     /// 100%, or back to the whole frame: a tap toggles, a hold is a look.
     Zoom,
+    SelectAll,
+    SelectNone,
+    /// Step back, taking the frames passed into the selection.
+    SelectPrevious,
+    SelectNext,
+    /// Copy every setting of the current frame.
+    Copy,
+    /// Choose which groups of settings to copy.
+    CopyChoose,
+    /// Paste what was copied onto the selection, or the current frame.
+    Paste,
+    /// Paste the settings of the frame the cursor came from.
+    PastePrevious,
+    /// Paste what was copied onto the current frame's whole stack.
+    PasteStack,
+    /// Open out the current frame's stack in the filmstrip, or close it up.
+    ToggleStack,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
 const CMD_SHIFT: Modifiers = Modifiers { shift: true, ..Modifiers::COMMAND };
+const CMD_ALT: Modifiers = Modifiers { alt: true, ..Modifiers::COMMAND };
 
 impl Command {
     pub const ALL: &[Command] = &[
@@ -82,6 +100,16 @@ impl Command {
         Command::Star5,
         Command::Clipping,
         Command::Zoom,
+        Command::SelectAll,
+        Command::SelectNone,
+        Command::SelectPrevious,
+        Command::SelectNext,
+        Command::Copy,
+        Command::CopyChoose,
+        Command::Paste,
+        Command::PastePrevious,
+        Command::PasteStack,
+        Command::ToggleStack,
     ];
 
     /// Look a command up by its name in code, e.g. "Open".
@@ -124,6 +152,16 @@ impl Command {
         Command::Star5,
         Command::Clipping,
         Command::Zoom,
+        Command::SelectAll,
+        Command::SelectNone,
+        Command::SelectPrevious,
+        Command::SelectNext,
+        Command::Copy,
+        Command::CopyChoose,
+        Command::Paste,
+        Command::PastePrevious,
+        Command::PasteStack,
+        Command::ToggleStack,
     ];
 
     pub fn label(self) -> &'static str {
@@ -159,6 +197,16 @@ impl Command {
             Command::Star5 => "5 Stars",
             Command::Clipping => "Clipping Warnings",
             Command::Zoom => "Zoom to 100%",
+            Command::SelectAll => "Select All",
+            Command::SelectNone => "Select None",
+            Command::SelectPrevious => "Add the Previous Frame to the Selection",
+            Command::SelectNext => "Add the Next Frame to the Selection",
+            Command::Copy => "Copy Settings",
+            Command::CopyChoose => "Choose Settings to Copy…",
+            Command::Paste => "Paste Settings",
+            Command::PastePrevious => "Paste Settings from Previous",
+            Command::PasteStack => "Paste Settings onto the Stack",
+            Command::ToggleStack => "Open Out or Close Up the Stack",
         }
     }
 
@@ -199,6 +247,19 @@ impl Command {
             // Lightroom's Show Clipping.
             Command::Clipping => s(Modifiers::NONE, Key::J),
             Command::Zoom => s(Modifiers::NONE, Key::Z),
+            Command::SelectAll => s(CMD, Key::A),
+            Command::SelectNone => s(CMD, Key::D),
+            Command::SelectPrevious => s(Modifiers::SHIFT, Key::ArrowLeft),
+            Command::SelectNext => s(Modifiers::SHIFT, Key::ArrowRight),
+            Command::Copy => s(CMD, Key::C),
+            Command::CopyChoose => s(CMD_SHIFT, Key::C),
+            Command::Paste => s(CMD, Key::V),
+            Command::PastePrevious => s(CMD_ALT, Key::V),
+            // Lightroom has no stacks to paste onto; its own Ctrl+Shift+V
+            // is the paste Ctrl+V is here.
+            Command::PasteStack => s(CMD_SHIFT, Key::V),
+            // Omacull's.
+            Command::ToggleStack => s(Modifiers::NONE, Key::G),
         }
     }
 
@@ -218,12 +279,13 @@ impl Command {
     }
 
     /// Commands whose shortcut was pressed this frame, consuming the keys.
-    pub fn pressed(ctx: &egui::Context) -> Vec<Command> {
-        Self::pressed_with(ctx, crate::hotkeys::current())
+    /// `v_down` remembers between frames whether V is held.
+    pub fn pressed(ctx: &egui::Context, v_down: &mut bool) -> Vec<Command> {
+        Self::pressed_with(ctx, v_down, crate::hotkeys::current())
     }
 
     /// [`Self::pressed`] with these shortcuts.
-    pub fn pressed_with(ctx: &egui::Context, hotkeys: &crate::hotkeys::Hotkeys) -> Vec<Command> {
+    pub fn pressed_with(ctx: &egui::Context, v_down: &mut bool, hotkeys: &crate::hotkeys::Hotkeys) -> Vec<Command> {
         ctx.input_mut(|i| {
             let mut pressed: Vec<Command> = hotkeys
                 .keyboard_order()
@@ -239,6 +301,36 @@ impl Command {
             {
                 pressed.push(Command::Unmark);
             }
+            // egui-winit turns Ctrl+C into a Copy event instead of a key
+            // press. Ctrl+V becomes a Paste event only when the clipboard
+            // holds text, but its V is still released: a V released
+            // without being pressed was Ctrl+V. As Omapix reads them
+            // (`omapix/src/commands.rs`).
+            // The command among `commands` whose shortcut is `key` with
+            // this Shift and Alt.
+            let held = |commands: &[Command], key: Key, modifiers: Modifiers| {
+                commands.iter().copied().find(|&c| {
+                    hotkeys.command(c).is_some_and(|s| {
+                        s.logical_key == key && s.modifiers.alt == modifiers.alt && s.modifiers.shift == modifiers.shift
+                    })
+                })
+            };
+            for event in &i.events {
+                let command = match event {
+                    egui::Event::Copy => held(&[Command::Copy, Command::CopyChoose], Key::C, i.modifiers),
+                    egui::Event::Key { key: Key::V, pressed: down, modifiers, .. } => {
+                        let pasted = !*down && !*v_down;
+                        *v_down = *down;
+                        let pastes = [Command::Paste, Command::PastePrevious, Command::PasteStack];
+                        pasted.then(|| held(&pastes, Key::V, *modifiers)).flatten()
+                    }
+                    _ => None,
+                };
+                if let Some(command) = command.filter(|c| !pressed.contains(c)) {
+                    pressed.push(command);
+                }
+            }
+            i.events.retain(|e| !matches!(e, egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_)));
             pressed
         })
     }
@@ -266,13 +358,16 @@ mod tests {
 
     /// Commands pressed in a frame with this key and these modifiers held.
     fn press(ctx: &egui::Context, modifiers: Modifiers, key: Key) -> Vec<Command> {
-        let events = vec![
-            egui::Event::ModifiersChanged(modifiers),
-            egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers },
-        ];
+        let key = egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        events(ctx, &mut false, modifiers, vec![key])
+    }
+
+    /// Commands pressed in a frame with these events and modifiers held.
+    fn events(ctx: &egui::Context, v_down: &mut bool, modifiers: Modifiers, events: Vec<egui::Event>) -> Vec<Command> {
+        let events = std::iter::once(egui::Event::ModifiersChanged(modifiers)).chain(events).collect();
         let input = egui::RawInput { events, ..Default::default() };
         let mut pressed = Vec::new();
-        let mut output = ctx.run_ui(input, |ui| pressed = Command::pressed(ui.ctx()));
+        let mut output = ctx.run_ui(input, |ui| pressed = Command::pressed(ui.ctx(), v_down));
         // There's no renderer to upload textures to.
         output.textures_delta.clear();
         pressed
@@ -318,5 +413,39 @@ mod tests {
         assert_eq!(press(&ctx, none, Key::Home), [Command::First]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::J), [Command::Clipping]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::Z), [Command::Zoom]);
+    }
+
+    #[test]
+    fn selecting_and_stacks() {
+        let ctx = egui::Context::default();
+        assert_eq!(press(&ctx, CMD, Key::A), [Command::SelectAll]);
+        assert_eq!(press(&ctx, CMD, Key::D), [Command::SelectNone]);
+        assert_eq!(press(&ctx, Modifiers::SHIFT, Key::ArrowLeft), [Command::SelectPrevious], "not mistaken for a step");
+        assert_eq!(press(&ctx, Modifiers::SHIFT, Key::ArrowRight), [Command::SelectNext]);
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::G), [Command::ToggleStack]);
+    }
+
+    #[test]
+    fn copy_and_paste_arrive_as_egui_winit_sends_them() {
+        let ctx = egui::Context::default();
+        let mut v_down = false;
+        let none = Modifiers::NONE;
+        let v = |down: bool, modifiers: Modifiers| egui::Event::Key { key: Key::V, physical_key: None, pressed: down, repeat: false, modifiers };
+        assert_eq!(events(&ctx, &mut v_down, CMD, vec![egui::Event::Copy]), [Command::Copy]);
+        assert_eq!(events(&ctx, &mut v_down, CMD_SHIFT, vec![egui::Event::Copy]), [Command::CopyChoose]);
+
+        // Ctrl+V with no text on the clipboard: only the release arrives,
+        // even if Ctrl was let go first.
+        assert_eq!(events(&ctx, &mut v_down, CMD, vec![]), []);
+        assert_eq!(events(&ctx, &mut v_down, none, vec![v(false, none)]), [Command::Paste]);
+        // With text on it, a Paste event comes first.
+        assert_eq!(events(&ctx, &mut v_down, CMD, vec![egui::Event::Paste("text".into())]), []);
+        assert_eq!(events(&ctx, &mut v_down, CMD, vec![v(false, CMD)]), [Command::Paste]);
+        assert_eq!(events(&ctx, &mut v_down, CMD_ALT, vec![v(false, CMD_ALT)]), [Command::PastePrevious]);
+        assert_eq!(events(&ctx, &mut v_down, CMD_SHIFT, vec![v(false, CMD_SHIFT)]), [Command::PasteStack]);
+
+        // A V pressed and let go with no Ctrl pastes nothing.
+        assert_eq!(events(&ctx, &mut v_down, none, vec![v(true, none)]), []);
+        assert_eq!(events(&ctx, &mut v_down, none, vec![v(false, none)]), []);
     }
 }

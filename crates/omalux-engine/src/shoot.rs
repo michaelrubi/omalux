@@ -5,13 +5,17 @@
 //! developer needs of it: the picks are what's shown, and a filter shows
 //! everything.
 
+use std::cmp::Reverse;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
+use crate::arw;
 use crate::sidecar::{self, REJECT};
+use crate::stacks::{self, Signature};
 
 /// Sony's raws: the ILCE-7M3 is the only camera so far (other cameras are
 /// on the roadmap's "Later" list).
@@ -44,6 +48,10 @@ pub fn stars(rating: Rating) -> String {
 pub struct Frame {
     pub path: PathBuf,
     pub rating: Rating,
+    /// When it was taken, in seconds, for stacking by time.
+    pub captured: Option<f64>,
+    /// What it looks like, roughly, for stacking by look.
+    pub signature: Option<Signature>,
 }
 
 impl Frame {
@@ -94,6 +102,14 @@ pub struct Shoot {
     filter: Filter,
     /// 1 or -1: the way the cursor last moved, for preparing frames ahead.
     direction: isize,
+    /// Frames picked out in the filmstrip, for paste and export.
+    selected: BTreeSet<usize>,
+    /// The stacks among the frames, in order.
+    stacks: Vec<Vec<usize>>,
+    /// Which stack each frame is in.
+    stack_of: Vec<Option<usize>>,
+    /// Stacks opened out in the filmstrip; the rest show one frame.
+    expanded: BTreeSet<usize>,
 }
 
 fn raw(path: &Path) -> bool {
@@ -121,7 +137,13 @@ impl Shoot {
                     Ok(rating) => (rating.flatten().unwrap_or(0).clamp(REJECT, 5), None),
                     Err(e) => (0, Some(format!("{}: {e}", sidecar::path_for(&path).display()))),
                 };
-                (Frame { path, rating }, problem)
+                let raw = arw::RawFile::open(&path).ok();
+                let captured = raw.as_ref().and_then(|r| r.captured.as_deref()).and_then(stacks::seconds);
+                let signature = raw.as_ref().and_then(|r| {
+                    let jpeg = r.read(r.thumbnail().filter(|j| j.len < 1 << 20)?).ok()?;
+                    Some(Signature::of(&crate::thumbs::decode_thumb(&jpeg).ok()?))
+                });
+                (Frame { path, rating, captured, signature }, problem)
             })
             .collect();
         let (frames, problems): (Vec<Frame>, Vec<Option<String>>) = read.into_iter().unzip();
@@ -133,7 +155,23 @@ impl Shoot {
     pub fn new(dir: PathBuf, frames: Vec<Frame>) -> Self {
         let first = frames.iter().position(|f| Filter::Picks.matches(f));
         let filter = if first.is_some() { Filter::Picks } else { Filter::All };
-        Self { dir, frames, current: first.unwrap_or(0), filter, direction: 1 }
+        let mut shoot = Self {
+            dir,
+            frames,
+            current: first.unwrap_or(0),
+            filter,
+            direction: 1,
+            selected: BTreeSet::new(),
+            stacks: Vec::new(),
+            stack_of: Vec::new(),
+            expanded: BTreeSet::new(),
+        };
+        shoot.restack();
+        // On the frame that stands for its stack, if it's in one.
+        if let Some(stands) = shoot.stack_of.get(shoot.current).copied().flatten().and_then(|stack| shoot.representative(stack)) {
+            shoot.current = stands;
+        }
+        shoot
     }
 
     pub fn dir(&self) -> &Path {
@@ -164,11 +202,41 @@ impl Shoot {
         self.filter.matches(&self.frames[index])
     }
 
+    fn restack(&mut self) {
+        let items: Vec<_> = self.frames.iter().map(|f| (f.captured, f.signature.as_ref())).collect();
+        self.stacks = stacks::group(&items);
+        self.stack_of = vec![None; self.frames.len()];
+        for (s, stack) in self.stacks.iter().enumerate() {
+            for &i in stack {
+                self.stack_of[i] = Some(s);
+            }
+        }
+        self.expanded.clear();
+    }
+
+    /// The frame a collapsed stack shows: its best-rated frame the filter
+    /// lets through; of equals, the first. None if the filter lets none through.
+    pub fn representative(&self, stack: usize) -> Option<usize> {
+        let members = self.stacks.get(stack)?;
+        let key = |&i: &usize| (self.frames[i].rating, Reverse(i));
+        members.iter().copied().filter(|&i| self.matches(i)).max_by_key(key)
+    }
+
+    /// What the filter lets through, and in a collapsed stack only the
+    /// frame that stands for it.
+    fn visible(&self, index: usize) -> bool {
+        self.matches(index)
+            && match self.stack_of.get(index).copied().flatten() {
+                Some(stack) if !self.expanded.contains(&stack) => self.representative(stack) == Some(index),
+                _ => true,
+            }
+    }
+
     /// Shown in the filmstrip: what the filter lets through, and the
     /// current frame, which stays until the cursor leaves it even if a
     /// mark took it out of the filter.
     pub fn shown(&self, index: usize) -> bool {
-        index == self.current || self.matches(index)
+        index == self.current || self.visible(index)
     }
 
     pub fn shown_indices(&self) -> Vec<usize> {
@@ -179,7 +247,7 @@ impl Shoot {
     fn onward(&self, from: usize, direction: isize) -> impl Iterator<Item = usize> + '_ {
         let indices: Box<dyn Iterator<Item = usize>> =
             if direction > 0 { Box::new(from + 1..self.frames.len()) } else { Box::new((0..from).rev()) };
-        indices.filter(|&i| self.matches(i))
+        indices.filter(|&i| self.visible(i))
     }
 
     /// The next `ahead` frames stepping would visit, the way the cursor
@@ -208,13 +276,13 @@ impl Shoot {
         true
     }
 
-    /// Move the cursor among the shown frames. False if it can't go further.
-    pub fn step(&mut self, step: Step) -> bool {
+    /// Move the cursor among the shown frames, leaving the selection as it is.
+    fn move_step(&mut self, step: Step) -> bool {
         let to = match step {
             Step::Next => self.onward(self.current, 1).next(),
             Step::Previous => self.onward(self.current, -1).next(),
-            Step::First => (0..self.frames.len()).find(|&i| self.matches(i)),
-            Step::Last => (0..self.frames.len()).rev().find(|&i| self.matches(i)),
+            Step::First => (0..self.frames.len()).find(|&i| self.visible(i)),
+            Step::Last => (0..self.frames.len()).rev().find(|&i| self.visible(i)),
         };
         let moved = to.is_some_and(|to| to != self.current);
         if let Some(to) = to {
@@ -223,9 +291,18 @@ impl Shoot {
         moved
     }
 
+    /// Move the cursor among the shown frames. False if it can't go further.
+    /// Clears the selection, as in Lightroom.
+    pub fn step(&mut self, step: Step) -> bool {
+        self.clear_selection();
+        self.move_step(step)
+    }
+
     /// Show only what `filter` lets through. If that leaves out the current
     /// frame, the cursor moves to the nearest frame that's in, next first.
+    /// Clears the selection.
     pub fn set_filter(&mut self, filter: Filter) {
+        self.clear_selection();
         self.filter = filter;
         if !filter.matches(self.frame()) {
             let to = self.onward(self.current, 1).next().or_else(|| self.onward(self.current, -1).next());
@@ -233,6 +310,57 @@ impl Shoot {
                 self.current = to;
             }
         }
+    }
+
+    /// The frames picked out in the filmstrip, in order: what a paste or an
+    /// export reaches. None until a frame is picked out; the current frame
+    /// alone is no selection. Never a frame a mark has since taken out of
+    /// the filter: a paste mustn't reach what isn't shown.
+    pub fn selection(&self) -> Vec<usize> {
+        self.selected.iter().copied().filter(|&i| i == self.current || self.matches(i)).collect()
+    }
+
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.selected.contains(&index)
+    }
+
+    /// Ctrl+click: add a frame to the selection, or take it out, and go to
+    /// it. The current frame is in the selection it starts.
+    pub fn toggle_selected(&mut self, index: usize) {
+        if self.selected.is_empty() {
+            self.selected.insert(self.current);
+        }
+        if !self.selected.remove(&index) {
+            self.selected.insert(index);
+        }
+        self.go_to(index);
+    }
+
+    /// Shift+click: select the shown frames from the current one to `index`,
+    /// and go there.
+    pub fn select_to(&mut self, index: usize) {
+        let (from, to) = (self.current.min(index), self.current.max(index));
+        self.selected = (from..=to).filter(|&i| self.shown(i)).collect();
+        self.go_to(index);
+    }
+
+    /// Shift+arrow: step, taking the frames passed into the selection.
+    /// Steps without clearing the selection.
+    pub fn extend(&mut self, step: Step) -> bool {
+        self.selected.insert(self.current);
+        let moved = self.move_step(step);
+        self.selected.insert(self.current);
+        moved
+    }
+
+    /// Ctrl+A: select every shown frame.
+    pub fn select_all(&mut self) {
+        self.selected = self.shown_indices().into_iter().collect();
+    }
+
+    /// Ctrl+D: select nothing.
+    pub fn clear_selection(&mut self) {
+        self.selected.clear();
     }
 
     /// Mark the current frame. None if it already had that mark.
@@ -248,6 +376,52 @@ impl Shoot {
             frame.rating = rating;
         }
     }
+
+    /// Every stack, in order.
+    pub fn stacks(&self) -> &[Vec<usize>] {
+        &self.stacks
+    }
+
+    /// The stack a frame is in: the frames shot with it that the filter
+    /// lets through, itself among them, in order. None for a frame that
+    /// isn't in a stack of two or more of those.
+    ///
+    /// Unlike Omacull, this returns only members the filter lets through
+    /// (and None when fewer than two pass), because a paste must never
+    /// reach a frame the filter hides. With picks shown, a stack of five
+    /// of which only one is a pick looks like, and is, a plain frame.
+    pub fn stack(&self, index: usize) -> Option<Vec<usize>> {
+        let stack = self.stack_of.get(index).copied().flatten()?;
+        if !self.matches(index) {
+            return None;
+        }
+        let filtered: Vec<usize> = self.stacks[stack].iter().copied().filter(|&i| self.matches(i)).collect();
+        if filtered.len() > 1 {
+            Some(filtered)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the stack a frame is in shows all its frames.
+    pub fn expanded(&self, index: usize) -> bool {
+        self.stack_of.get(index).copied().flatten().is_some_and(|s| self.expanded.contains(&s))
+    }
+
+    /// Open out the current frame's stack in the filmstrip, or close it
+    /// up, going to the frame that stands for it. False if it isn't in one.
+    pub fn toggle_stack(&mut self) -> bool {
+        let Some(stack) = self.stack_of.get(self.current).copied().flatten() else { return false };
+        if self.stack(self.current).is_none() && !self.expanded.contains(&stack) {
+            return false;
+        }
+        if !self.expanded.remove(&stack) {
+            self.expanded.insert(stack);
+        } else if let Some(to) = self.representative(stack) {
+            self.go_to(to);
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -255,8 +429,74 @@ mod tests {
     use super::*;
 
     fn shoot(ratings: &[Rating]) -> Shoot {
-        let frames = ratings.iter().enumerate().map(|(i, &rating)| Frame { path: format!("/shoot/DSC{i:05}.ARW").into(), rating });
+        let frames = ratings.iter().enumerate().map(|(i, &rating)| Frame {
+            path: format!("/shoot/DSC{i:05}.ARW").into(),
+            rating,
+            captured: None,
+            signature: None,
+        });
         Shoot::new("/shoot".into(), frames.collect())
+    }
+
+    fn burst(ratings: &[Rating], times: &[f64]) -> Shoot {
+        let frames = ratings.iter().zip(times).enumerate().map(|(i, (&rating, &t))| Frame {
+            path: format!("/shoot/DSC{i:05}.ARW").into(),
+            rating,
+            captured: Some(t),
+            signature: None,
+        });
+        Shoot::new("/shoot".into(), frames.collect())
+    }
+
+    #[test]
+    fn collapsed_stacks_show_one_frame_the_best_rated() {
+        let mut s = burst(&[0, 0, 0, 0, 0, 0], &[0.0, 0.1, 0.2, 10.0, 20.0, 20.3]);
+        s.set_filter(Filter::All);
+        assert_eq!(s.stacks().len(), 2);
+        assert_eq!(s.shown_indices(), [0, 3, 4]);
+        assert!(s.step(Step::Next));
+        assert_eq!(s.current(), 3, "stepping goes stack to stack");
+
+        // A rating makes a frame the one that stands for its stack once cursor leaves it.
+        s.go_to(1);
+        s.mark(4);
+        s.go_to(3);
+        assert_eq!(s.shown_indices(), [1, 3, 4]);
+
+        // Toggle stack opens and closes.
+        s.go_to(1);
+        assert!(s.toggle_stack());
+        assert_eq!(s.shown_indices(), [0, 1, 2, 3, 4]);
+        assert!(s.expanded(1));
+
+        s.go_to(2);
+        assert!(s.toggle_stack());
+        assert_eq!(s.current(), 1, "closing goes to the frame that stands for it");
+        assert!(!s.expanded(1));
+
+        s.go_to(3);
+        assert!(!s.toggle_stack(), "not in a stack");
+    }
+
+    #[test]
+    fn stack_holds_only_what_the_filter_lets_through_and_is_none_for_single_pick() {
+        let mut s = burst(&[0, 1, 0, 0], &[0.0, 0.1, 0.2, 10.0]);
+        // Default filter is Picks: only frame 1 is a pick.
+        assert_eq!(s.filter(), Filter::Picks);
+        assert_eq!(s.stack(1), None, "a stack of three with only one pick is None");
+        assert!(!s.toggle_stack(), "a stack of one pick acts as a plain frame");
+        assert_eq!(s.shown_indices(), [1]);
+
+        // Rate another frame in the stack as a pick.
+        s.set_filter(Filter::All);
+        assert_eq!(s.stack(1), Some(vec![0, 1, 2]));
+        s.go_to(0);
+        s.mark(PICK);
+        s.set_filter(Filter::Picks);
+        assert_eq!(s.stack(0), Some(vec![0, 1]));
+        assert_eq!(s.stack(1), Some(vec![0, 1]));
+        assert!(s.toggle_stack());
+        assert_eq!(s.shown_indices(), [0, 1]);
     }
 
     #[test]
@@ -343,5 +583,96 @@ mod tests {
         assert_eq!(stars(PICK), "★");
         assert_eq!(stars(0), "");
         assert_eq!(stars(REJECT), "✕");
+    }
+
+    #[test]
+    fn frames_are_selected_by_ctrl_shift_and_arrows() {
+        let mut s = shoot(&[1, 0, 1, 0, 1]);
+        s.toggle_selected(2);
+        assert_eq!((s.selection(), s.current()), (vec![0, 2], 2), "starting from the current frame");
+        s.toggle_selected(0);
+        assert_eq!((s.selection(), s.current()), (vec![2], 0));
+        s.select_to(4);
+        assert_eq!(s.selection(), [0, 2, 4], "only shown frames");
+        s.clear_selection();
+        s.extend(Step::Previous);
+        assert_eq!((s.selection(), s.current()), (vec![2, 4], 2));
+        s.select_all();
+        assert_eq!(s.selection(), [0, 2, 4]);
+    }
+
+    #[test]
+    fn a_frame_marked_out_of_the_filter_leaves_the_selection_with_the_cursor() {
+        let mut s = shoot(&[1, 1, 1]);
+        s.extend(Step::Next);
+        s.mark(0);
+        assert_eq!(s.selection(), [0, 1], "the current frame stays until it's left");
+        s.extend(Step::Next);
+        assert_eq!((s.selection(), s.shown_indices()), (vec![0, 2], vec![0, 2]));
+    }
+
+    #[test]
+    fn a_plain_step_clears_the_selection() {
+        let mut s = shoot(&[1, 1, 1]);
+        s.select_all();
+        assert_eq!(s.selection(), [0, 1, 2]);
+        assert!(s.step(Step::Next));
+        assert!(s.selection().is_empty());
+        assert_eq!(s.current(), 1);
+
+        s.select_all();
+        assert_eq!(s.selection(), [0, 1, 2]);
+        s.step(Step::First);
+        assert!(s.selection().is_empty());
+        assert_eq!(s.current(), 0);
+    }
+
+    #[test]
+    fn extend_at_the_end_of_the_strip_keeps_whats_selected() {
+        let mut s = shoot(&[1, 1, 1]);
+        s.select_to(2);
+        assert_eq!(s.selection(), [0, 1, 2]);
+        assert_eq!(s.current(), 2);
+        assert!(!s.extend(Step::Next));
+        assert_eq!(s.selection(), [0, 1, 2]);
+        assert_eq!(s.current(), 2);
+
+        s.go_to(0);
+        s.clear_selection();
+        s.extend(Step::Next);
+        assert_eq!(s.selection(), [0, 1]);
+        assert_eq!(s.current(), 1);
+        s.step(Step::First);
+        s.extend(Step::Next);
+        assert_eq!(s.selection(), [0, 1]);
+        s.go_to(0);
+        assert!(!s.extend(Step::Previous));
+        assert_eq!(s.selection(), [0, 1]);
+    }
+
+    #[test]
+    fn set_filter_clears_the_selection() {
+        let mut s = shoot(&[1, 0, 1]);
+        s.select_all();
+        assert_eq!(s.selection(), [0, 2]);
+        s.set_filter(Filter::All);
+        assert!(s.selection().is_empty());
+
+        s.select_all();
+        assert_eq!(s.selection(), [0, 1, 2]);
+        s.set_filter(Filter::Picks);
+        assert!(s.selection().is_empty());
+    }
+
+    #[test]
+    fn select_all_takes_only_the_shown_frames() {
+        let mut s = shoot(&[1, 0, 1, REJECT, 1]);
+        assert_eq!(s.filter(), Filter::Picks);
+        s.select_all();
+        assert_eq!(s.selection(), [0, 2, 4]);
+
+        s.set_filter(Filter::All);
+        s.select_all();
+        assert_eq!(s.selection(), [0, 1, 2, 3, 4]);
     }
 }

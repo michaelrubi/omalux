@@ -97,21 +97,40 @@ afterwards in Omapix.
   none.
 - **Inspection:** 100% zoom (Z), on a full-resolution development of
   what's on screen.
+- **Selecting** in the filmstrip: Ctrl+click, Shift+click, Shift+arrows,
+  Ctrl+A and Ctrl+D, as Omacull has them. The selection is what a paste
+  or an export reaches, so a plain step or click clears it, as in
+  Lightroom (Omacull keeps its selection, which is for comparing): one
+  left behind off screen would take a paste meant for the frame in
+  front.
 - **Copy and paste:**
   - Ctrl+C copies every setting of the current frame.
   - Ctrl+Shift+C opens a checklist of the groups to copy (White Balance,
     Profile, Light, HDR, Presence, AI Denoise, Noise Reduction,
-    Sharpening, Lens Corrections, Crop), remembering the last choice.
+    Sharpening, Lens Corrections, Crop: each arrives with its panel),
+    remembering the last choice.
     What's chosen at copy time is what's pasted; there is no second
     checklist at paste time. This is the opposite of darktable's
     copy and paste, on purpose.
   - Ctrl+V pastes what was copied onto the selection, or the current
-    frame. Ctrl+Alt+V pastes the previous frame's settings (Lightroom's
-    Paste from Previous). A key pastes onto the current frame's whole
-    stack in one go.
+    frame. Ctrl+Alt+V pastes every setting of the frame the cursor came
+    from onto the current one (Lightroom's Paste from Previous).
+    Ctrl+Shift+V pastes onto the current frame's whole stack in one go
+    (Lightroom has no such key; its own Ctrl+Shift+V is the paste Ctrl+V
+    is here).
+  - A white balance copied as shot is pasted as shot: each frame gets
+    its own, not the Kelvin of the frame it was copied from.
+  - A paste is one step to undo however many frames it reached: Ctrl+Z
+    on the frame it was made from, or on any frame it reached, takes it
+    back from all of them, except those edited since, which keep their
+    edit and the paste under it.
 - **Stacks:** frames grouped by capture time and look, as Omacull's
   stacks are, among the picks. They're how "paste onto everything like
-  this one" works, and collapse in the filmstrip.
+  this one" works, and collapse in the filmstrip: one frame stands for
+  each (its best rated), with a count, and G opens it out. There's no
+  setting for how they're made. A stack is only the frames the filter
+  lets through, so a paste onto one never reaches a frame that isn't
+  shown, and a burst with one pick in it is a plain frame.
 - **Handoff:** Ctrl+E (Lightroom's Edit In) exports the selection as
   16-bit TIFFs and opens them in Omapix, a tab each, the way darktable's
   "edit in Omapix" target does now. Ctrl+Shift+E exports without opening
@@ -167,8 +186,12 @@ Omapix's are.
 | Ctrl+Shift+U | Auto white balance |
 | R | Crop & Straighten |
 | J | Clipping warnings |
+| Ctrl+click, Shift+click, Shift+← → | Add to the selection, select a run |
+| Ctrl+A, Ctrl+D | Select all, select none |
+| G | Open out or close up a stack (Omacull's key) |
 | Ctrl+C, Ctrl+Shift+C | Copy all settings, choose what to copy |
 | Ctrl+V, Ctrl+Alt+V | Paste, paste from previous |
+| Ctrl+Shift+V | Paste onto the whole stack |
 | Ctrl+Z, Ctrl+Shift+Z | Undo, redo |
 | Ctrl+Shift+R | Reset the frame |
 | Ctrl+E | Export and edit in Omapix |
@@ -304,7 +327,8 @@ presets, localisation, and the UI as a whole.
   A7 III files) is rendered before and after each re-sync; if they
   differ, the version is bumped and older edits keep the old behaviour
   where it can be kept, or say they'll look different.
-- **Undo** history lives in memory for the session, per frame.
+- **Undo** history lives in memory for the session, per frame; a paste
+  onto several frames is a step on each, undone together.
 
 ## The look
 

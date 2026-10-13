@@ -1,4 +1,5 @@
 mod app;
+mod checklist;
 mod commands;
 mod config;
 mod develop;
