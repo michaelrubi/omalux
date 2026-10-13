@@ -244,8 +244,9 @@ binary.
   slider nudge in 7.
 - Sliders by mouse (drag, wheel, double-click to reset) and by key (`,`
   `.` to select, `=` `−` to nudge), Lightroom's behaviour as Lightcraft
-  implements it, in Omarchy's theme. *Done,* but for typing a value into
-  a slider, which Lightcraft has and this doesn't yet.
+  implements it, in Omarchy's theme. *Done,* with typing a value: click
+  a slider's number, and Return, Tab or a click elsewhere applies what
+  was typed, Esc keeps the old one.
 - Edits saved in the sidecar as DESIGN.md describes, with the process
   version; undo, redo, reset. The reference renders the process version
   guards, set up from the first build. *Done:* a drag is one step, saved

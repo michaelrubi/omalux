@@ -160,6 +160,7 @@ Omapix's are.
 | = − (Shift for more) | Nudge the selected slider |
 | Double-click a slider's name or thumb | Reset it |
 | The wheel, over the selected slider | Nudge it |
+| Click a slider's number | Type a value (Return applies, Esc doesn't) |
 | Shift+double-click a slider | Set it automatically |
 | W | White balance eyedropper |
 | Ctrl+U | Auto tone |

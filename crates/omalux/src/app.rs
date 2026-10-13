@@ -960,6 +960,15 @@ mod tests {
             self.ctx.data(|d| d.get_temp(egui::Id::new(id))).expect("the slider has been drawn")
         }
 
+        /// Where a slider's value is on screen.
+        fn value(&self, id: &'static str) -> egui::Rect {
+            self.ctx.data(|d| d.get_temp(egui::Id::new((id, "value")))).expect("the slider value has been drawn")
+        }
+
+        fn type_text(&mut self, text: &str) -> egui::FullOutput {
+            self.frame(vec![Event::Text(text.to_owned())])
+        }
+
         fn pointer(&mut self, at: egui::Pos2, pressed: Option<bool>) {
             let mut events = vec![Event::PointerMoved(at)];
             if let Some(pressed) = pressed {
@@ -1205,6 +1214,134 @@ mod tests {
             h.pointer(track.center(), Some(false));
         }
         assert_eq!((h.settings().light.contrast, h.saved().map(|s| s.light.contrast)), (0.0, Some(0.0)));
+    }
+
+    #[test]
+    fn typing_a_value_into_a_slider_applies_and_saves_it_as_one_step() {
+        let folder = Folder::new("type-slider", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        assert_eq!(h.settings().light.exposure, 0.0);
+        assert_eq!(h.saved(), None);
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.type_text("0.5");
+        h.press(Modifiers::NONE, Key::Enter);
+
+        assert_eq!(h.settings().light.exposure, 0.5);
+        assert_eq!(h.saved().map(|s| s.light.exposure), Some(0.5));
+
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().light.exposure, 0.0, "one Ctrl+Z takes it back");
+        assert_eq!(h.saved().map(|s| s.light.exposure), Some(0.0));
+    }
+
+    #[test]
+    fn escape_keeps_the_old_slider_value() {
+        let folder = Folder::new("type-esc", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        assert_eq!(h.settings().light.exposure, 0.0);
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.type_text("1.5");
+        h.press(Modifiers::NONE, Key::Escape);
+
+        assert_eq!(h.settings().light.exposure, 0.0);
+        assert_eq!(h.saved(), None, "nothing saved on escape");
+    }
+
+    #[test]
+    fn typing_letters_does_not_fire_app_commands() {
+        let folder = Folder::new("type-cmd", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let raw = folder.0.join("DSC00001.ARW");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0);
+        assert_eq!(sidecar::read(&raw).unwrap(), None, "no sidecar initially");
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.press(Modifiers::NONE, Key::P);
+        h.type_text("p");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0, "p did not pick the frame");
+
+        h.press(Modifiers::NONE, Key::Num5);
+        h.type_text("5");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 0, "5 did not rate the frame");
+        assert_eq!(sidecar::read(&raw).unwrap(), None, "5 did not write to sidecar");
+
+        h.press(Modifiers::NONE, Key::Escape);
+        assert_eq!(h.settings().light.exposure, 0.0);
+    }
+
+    #[test]
+    fn typed_value_past_the_range_is_clamped() {
+        let folder = Folder::new("type-clamp", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.type_text("10");
+        h.press(Modifiers::NONE, Key::Enter);
+
+        assert_eq!(h.settings().light.exposure, 5.0, "clamped to max of 5.0");
+        assert_eq!(h.saved().map(|s| s.light.exposure), Some(5.0));
+    }
+
+    #[test]
+    fn non_numeric_typed_text_keeps_the_old_value() {
+        let folder = Folder::new("type-bad", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.type_text("abc");
+        h.press(Modifiers::NONE, Key::Enter);
+
+        assert_eq!(h.settings().light.exposure, 0.0);
+        assert_eq!(h.saved(), None);
+    }
+
+    #[test]
+    fn tab_applies_the_typed_value() {
+        let folder = Folder::new("type-tab", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.type_text("0.5");
+        h.press(Modifiers::NONE, Key::Tab);
+
+        assert_eq!(h.settings().light.exposure, 0.5);
+        assert_eq!(h.saved().map(|s| s.light.exposure), Some(0.5));
+    }
+
+    #[test]
+    fn clicking_away_applies_the_typed_value() {
+        let folder = Folder::new("type-away", &[0]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        let value = h.value("light.exposure");
+        h.click(value.center());
+        h.type_text("1.0");
+        h.click(egui::pos2(100.0, 100.0));
+
+        assert_eq!(h.settings().light.exposure, 1.0);
+        assert_eq!(h.saved().map(|s| s.light.exposure), Some(1.0));
     }
 
     #[test]
