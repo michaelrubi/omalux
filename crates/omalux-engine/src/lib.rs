@@ -16,3 +16,4 @@ pub mod raw;
 pub mod shoot;
 pub mod sidecar;
 pub mod sony;
+pub mod thumbs;

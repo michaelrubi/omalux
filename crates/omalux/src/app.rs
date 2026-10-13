@@ -11,6 +11,7 @@ use egui::{Align2, FontId, RichText, Ui};
 use omalux_engine::shoot::{Filter, Shoot, Step};
 
 use crate::commands::Command;
+use crate::filmstrip::Filmstrip;
 use crate::hotkeys::{self, format_shortcut};
 use crate::theme::{self, Theme};
 
@@ -33,6 +34,7 @@ pub struct App {
     /// The last thing to tell the user, and whether it's a problem.
     message: Option<(String, bool)>,
     title: String,
+    filmstrip: Filmstrip,
 }
 
 impl App {
@@ -77,6 +79,7 @@ impl App {
             picking: None,
             message: None,
             title: String::new(),
+            filmstrip: Filmstrip::new(),
         }
     }
 
@@ -173,6 +176,10 @@ impl App {
             }
         }
         self.run_script(ctx);
+        if let Some(shoot) = &self.shoot {
+            self.filmstrip.sync_shoot(shoot, ctx);
+            self.filmstrip.collect(ctx, shoot.current());
+        }
         let title = match &self.shoot {
             Some(shoot) => format!("{} — OmaLux", file_name(shoot.dir())),
             None => "OmaLux".into(),
@@ -200,7 +207,12 @@ impl App {
     }
 
     /// The shown frames' thumbnails, under the loupe.
-    fn filmstrip(&mut self, _ui: &mut Ui) {}
+    fn filmstrip(&mut self, ui: &mut Ui) {
+        let Some(shoot) = &mut self.shoot else { return };
+        if let Some(clicked) = self.filmstrip.show(ui, shoot, &self.theme) {
+            shoot.go_to(clicked);
+        }
+    }
 
     /// The histogram, and the panels under it: White Balance, Light,
     /// Presence.
@@ -311,6 +323,17 @@ mod tests {
             events.extend(key_events(modifiers, key, false));
             self.frame(events)
         }
+
+        fn click(&mut self, at: egui::Pos2) {
+            let button = |pressed| Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            self.frame(vec![Event::PointerMoved(at), button(true)]);
+            self.frame(vec![button(false)]);
+        }
     }
 
     fn key_events(modifiers: Modifiers, key: Key, pressed: bool) -> Vec<Event> {
@@ -408,5 +431,31 @@ mod tests {
         assert_eq!(current(&h), "DSC00001.ARW");
         h.press(Modifiers::NONE, Key::End);
         assert_eq!(current(&h), "DSC00004.ARW");
+    }
+
+    #[test]
+    fn clicking_a_thumbnail_goes_to_it() {
+        let folder = Folder::new("click", &[1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+        let cells = h.app.filmstrip.cells.clone();
+        assert!(!cells.is_empty(), "cells are present");
+        let (index, rect) = cells.iter().copied().find(|&(i, _)| i == 2).unwrap();
+        h.click(rect.center());
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), index);
+    }
+
+    #[test]
+    fn only_the_shown_frames_are_in_the_strip() {
+        let folder = Folder::new("strip-filter", &[1, 0, 1, 0, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+        let shown: Vec<usize> = h.app.filmstrip.cells.iter().map(|&(i, _)| i).collect();
+        assert_eq!(shown, vec![0, 2, 4], "picks only");
+        h.press(Modifiers::COMMAND, Key::L);
+        let all: Vec<usize> = h.app.filmstrip.cells.iter().map(|&(i, _)| i).collect();
+        assert_eq!(all, vec![0, 1, 2, 3, 4], "all frames");
     }
 }
