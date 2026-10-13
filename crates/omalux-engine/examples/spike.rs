@@ -65,9 +65,19 @@ fn diff(a: &Rgba8, b: &Rgba8) -> (u8, f64) {
     (max, sum as f64 / (a.data.len().max(1) * 3) as f64)
 }
 
+/// Why GPU renders fell back to the CPU, and how often: a fallback's CPU render
+/// counts in the GPU's time.
+static FALLBACKS: std::sync::Mutex<std::collections::BTreeMap<String, usize>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 fn render(src: &Arc<Rgb32f>, info: &SourceInfo, s: &DevelopSettings, req: &RenderRequest, cache: Option<&StageCache>, gpu: bool) -> Rgba8 {
-    if gpu && let Some(r) = lightcraft_gpu::render(src, info, s, req, cache) {
-        return r.image;
+    if gpu {
+        match lightcraft_gpu::try_render(src, info, s, req, cache) {
+            Ok(r) => return r.image,
+            Err(f) => {
+                let reason = f.reason().unwrap_or("not tried").to_owned();
+                *FALLBACKS.lock().unwrap_or_else(|e| e.into_inner()).entry(reason).or_default() += 1;
+            }
+        }
     }
     match cache {
         Some(cache) => lightcraft_pipeline::render_cached(src, info, s, req, cache).image,
@@ -86,6 +96,8 @@ struct Totals {
     styles: std::collections::BTreeMap<String, usize>,
     /// Mean ΔE2000 per region, per frame.
     de: Vec<[f64; 4]>,
+    /// Mean ΔE2000 in the centre, per frame.
+    centre: Vec<f64>,
     loupe: Vec<(f64, Option<f64>)>,
     drag: Vec<(f64, Option<f64>)>,
     export: Vec<f64>,
@@ -136,9 +148,17 @@ fn spike(path: &Path, out: Option<&Path>, gpu: bool, totals: &mut Totals) -> Res
     let line: Vec<String> = summaries
         .iter()
         .filter(|(_, s)| s.share > 0.0)
-        .map(|(r, s)| format!("{} {:.2} / {:.2} ({:.0} %)", r.label(), s.mean, s.p95, s.share * 100.0))
+        .map(|(r, s)| format!("{} {:.2} / {:.2} ({:.0} %, L* {:+.1})", r.label(), s.mean, s.p95, s.share * 100.0, s.lightness))
         .collect();
     println!("  ΔE2000 mean / p95 against the camera's JPEG: {}", line.join(", "));
+    // The middle half of each side: the camera's JPEG has Sony's distortion and
+    // shading corrections in it and this render has none, which costs most at the edges.
+    let (w, h) = (reference.width, reference.height);
+    let centre = |i: &Rgba8| i.crop(w / 4, h / 4, w / 2, h / 2);
+    if let Some((_, s)) = compare::compare(&centre(&matched), &centre(&reference))?.into_iter().find(|(r, _)| *r == Region::All) {
+        println!("  ΔE2000 mean / p95 in the centre (the middle half of each side): {:.2} / {:.2} (L* {:+.1})", s.mean, s.p95, s.lightness);
+        totals.centre.push(s.mean);
+    }
     totals.de.push(Region::ALL.map(|r| summaries.iter().find(|(s, _)| *s == r).map_or(f64::NAN, |(_, s)| if s.share > 0.0 { s.mean } else { f64::NAN })));
 
     // The loupe and a drag, CPU then GPU.
@@ -253,7 +273,7 @@ fn main() {
         .enumerate()
         .map(|(i, r)| format!("{} {:.2}", r.label(), median(totals.de.iter().map(|d| d[i]).filter(|v| v.is_finite()).collect())))
         .collect();
-    println!("  median of the frames' mean ΔE2000: {}", de.join(", "));
+    println!("  median of the frames' mean ΔE2000: {}; centre {:.2}", de.join(", "), median(totals.centre.clone()));
     let col = |v: &[(f64, Option<f64>)], gpu: bool| median(v.iter().filter_map(|t| if gpu { t.1 } else { Some(t.0) }).collect());
     println!("  loupe: CPU {:.1} ms, GPU {:.1} ms (budget 60)", col(&totals.loupe, false), col(&totals.loupe, true));
     println!("  drag: CPU {:.1} ms, GPU {:.1} ms (budget 16)", col(&totals.drag, false), col(&totals.drag, true));
@@ -261,5 +281,12 @@ fn main() {
     if gpu {
         let m = lightcraft_gpu::memory();
         println!("  GPU memory held: {:.0} MB allocated, {:.0} MB pooled", m.allocated as f64 / 1e6, m.pooled as f64 / 1e6);
+        let fallbacks = FALLBACKS.lock().unwrap_or_else(|e| e.into_inner());
+        if fallbacks.is_empty() {
+            println!("  GPU renders that fell back to the CPU: none");
+        }
+        for (reason, n) in fallbacks.iter() {
+            println!("  GPU renders that fell back to the CPU: {n} × {reason}");
+        }
     }
 }

@@ -504,7 +504,7 @@ lensfun's database (see "Built on Lightcraft"), so:
   reads the distortion table only, and only for the ILCE-7RM4A; OmaLux
   would enable it for the A7 III once it's checked on his frames. A
   darktable user reported Sony's data under-corrects distortion where
-  lensfun didn't; M0 compares them on real frames and picks the default.
+  lensfun didn't; M5 compares them on real frames and picks the default.
 
 Lightcraft's automatic lateral CA estimate and its defringe cover the
 rest: Remove Chromatic Aberration and the fringes at f/1.8.
@@ -525,7 +525,7 @@ already, it's used and not fetched again.
   - RawForge's TreeNet models (MIT; Light, Super Light and Heavy), which
     testers on pixls.us compared favourably with Topaz's raw denoise.
 
-  M0 runs both on real A7 III frames at ISO 3200 to 6400 and picks one,
+  M6 runs both on real A7 III frames at ISO 3200 to 6400 and picks one,
   through Lightcraft's new `denoise` crates (packing, tiling, cache and
   an executor on wgpu) if they run the chosen model as fast as ONNX
   Runtime on CUDA does; otherwise on ONNX Runtime as planned.

@@ -6,9 +6,10 @@ covers the scope and architecture.
 Status: scoped on 2026-10-08, and re-planned the same day on
 [Lightcraft](https://github.com/storytold/lightcraft)'s engine (see
 "Built on Lightcraft" in DESIGN.md). M0 started 2026-10-12: Lightcraft
-vendored, the workspace and an empty window up, and the spikes that
-need no real raws done; the ones that do have their tools built and wait
-for the laptop and Michael's frames (see M0).
+vendored, the workspace and an empty window up, and the spikes run on
+the laptop and Michael's frames. On 2026-10-13 what was left of it moved
+to the milestones that need it first; M0 closes on one question, why the
+GPU loupe's times jump between frames (see M0).
 
 Each milestone ends with something Michael can use on a real shoot. M1 is
 the point where OmaLux replaces darktable for a clean, low-ISO shoot;
@@ -33,6 +34,12 @@ Each item says where it stands. "On the laptop" is what needs Michael's
 frames, the RTX 4070 or Lightroom: the tools for it are built, and the
 commands are in AGENTS.md.
 
+M0 closes on the GPU loupe's times (below), since M1's loupe is built on
+them. The rest moved on 2026-10-13 to the milestone that needs it first,
+since M1 needs none of it: the reference set, the 100% comparison and
+the DRO test to M4, the lens comparison to M5, the denoise comparison to
+M6, and the look of the handoff in Omapix to M1's export.
+
 - **Vendor Lightcraft** at a pinned commit (`701f78e` or later) into
   `vendor/lightcraft/`: `geom`, `color`, `raster`, `tiff`, `raw`,
   `codecs`, `meta`, `develop`, `pipeline`, `gpu`, `scenes`, and the new
@@ -49,7 +56,8 @@ commands are in AGENTS.md.
   Michael's frames, with the camera's JPEG, Lightroom Classic's renders
   (Adobe Color, and Camera Standard or Vivid), Capture One's default
   render (free trials) and his darktable export of each. Every spike
-  below is judged on it. *Michael's to gather.*
+  below is judged on it. *Michael's to gather;* moved to M4, which
+  judges the look against it.
 - **Render real ARWs** through Lightcraft's pipeline from a small example
   binary: decode time, how the camera match fits each frame (CIEDE2000
   against the camera's JPEG), and how AHD and the highlight
@@ -59,9 +67,20 @@ commands are in AGENTS.md.
   the export, the render beside the camera's JPEG, and a 100% crop).
   Lightcraft's raw loading and per-file camera match are lifted into
   `omalux-engine` for it; CIEDE2000 is checked against Sharma's test
-  data. raw.pixls.us is blocked from the cloud sessions this was built
-  in, so not one real ARW has gone through OmaLux's code yet:
-  `scripts/fetch-corpus.sh` fetches them, and a test runs on them.
+  data. On the laptop (2026-10-13), `scripts/fetch-corpus.sh` and
+  `cargo test --workspace` put raw.pixls.us's two ILCE-7M3 files through
+  it, the first real ARWs to go through OmaLux's code: both decode
+  (compressed in 12 ms, uncompressed in 77 ms) and open with a camera
+  look and a Kelvin white balance. Michael's own frames (2026-10-13, the
+  Run Dinah picks, all DRO Auto): the render is darker than the camera's
+  JPEG on every frame, and the gap follows the ΔE2000: the frame DRO
+  barely touched is 0.7 L* darker at ΔE 2.0 overall (skin 1.7), the one
+  it lifted most 6.1 darker at 5.3 (skin 12.6 darker at 10.2), while the
+  sky, which DRO leaves alone, stays within 0.5. That's DESIGN.md's
+  "DRO is matched" measured on his frames: the colour fits, the shadow
+  lift is missing. *Moved to M4:* the 100% comparison with Lightroom and
+  Capture One (and AHD against RCD), which needs the reference set, and
+  a DRO Off frame beside a DRO Auto one of the same scene, to settle it.
 - **His camera settings:** he shoots Standard and Vivid; confirm from the
   makernotes how his shoots split between them, and which DRO settings
   (Off, Auto, Lv1 to Lv5) they use, since DRO is matched (see "The look"
@@ -70,13 +89,25 @@ commands are in AGENTS.md.
   from tags `0xb020` and `0xb025`), tested on made-up maker notes only.
   *On the laptop:* the `spike` example counts them over his shoots, which
   is also the first check that the A7 III writes them where expected.
+  First count (2026-10-13, the picks of three shoots, 53 frames): all
+  Standard, DRO Auto, and both read where expected.
 - **The GPU on the laptop.** Lightcraft's GPU pipeline on the RTX 4070
   under Hyprland and Vulkan: slider update and loupe times against the
   16 ms and 60 ms budgets, full-size export time, VRAM. That its CPU and
   GPU results agree there too. *On the laptop,* in the `spike` example.
-  Found meanwhile: the GPU writes 8-bit output only, so the 16-bit export
-  renders on the CPU (what `spike` times), and Lightcraft refuses
-  software adapters, so it can't be tried without a real GPU.
+  First runs (2026-10-13, ISO 100 picks, FE 85): a drag is 1 to 4 ms
+  on the GPU (9.5 on the CPU), and the two agree to 1 level in 255; the
+  loupe is 17 to 163 ms on the GPU from frame to frame with no fallback
+  to the CPU (29 to 68 on the CPU), and a second run put the slow ones on
+  other frames, so it isn't the frames' content; still to explain. The
+  export is about 1.9 s. *Open, and what M0 closes on:* the per-stage
+  GPU times of a fast frame and a slow one (`LIGHTCRAFT_PROFILE=1` on
+  the `spike` example, in `~/spike-profile.txt` on the laptop), and
+  whether the laptop was on battery; if it's the GPU's power states, the
+  loupe needs to keep it awake or prepare frames ahead. Found meanwhile:
+  the GPU writes 8-bit output only, so the 16-bit export renders on the
+  CPU (what `spike` times), and Lightcraft refuses software adapters, so
+  it can't be tried without a real GPU.
 - **Lens data.** lensfun's corrections for the FE 35, 50 and 85 f/1.8
   through Lightcraft's `lensdb`, and Sony's embedded ones (Lightcraft
   reads them only for the ILCE-7RM4A so far); compare them, and
@@ -88,15 +119,27 @@ commands are in AGENTS.md.
   dropped (worth an upstream issue). *On the laptop:* the `lens` example
   renders each frame with lensfun's correction and without, and reports
   Sony's table; trying Sony's on the A7 III means opening Lightcraft's
-  ILCE-7RM4A-only gate (`vendor/arw_lens.rs`) on a test branch.
+  ILCE-7RM4A-only gate (`vendor/arw_lens.rs`) on a test branch. First
+  run (2026-10-13, 53 frames, all FE 85 f/1.8): lensfun matches the
+  lens on every frame and gives it distortion and vignetting; Sony's
+  table is there on every frame and changes from frame to frame at the
+  same focal length and aperture, so it follows the focus distance,
+  which lensfun's model doesn't. Over all four of his shoots (1326
+  frames): 1118 on the FE 85 (169 at f/1.8), 208 on the FE 35, all at
+  f/4 to f/8 (so the FE 35's missing f/1.8 vignetting hasn't come up
+  yet), and none on the FE 50. *Moved to M5:* the FE 35's renders, Sony's
+  table tried, and the pick.
 - **Raw denoise.** RawNIND's Bayer model against RawForge's TreeNet (Light
   and Heavy) on ISO 3200 to 6400 frames, and both against Lightroom's
   Denoise: how they look at 100%, how long they take, how much VRAM.
   Pick one. Run it through Lightcraft's `denoise` crates (their wgpu
   executor) and through ONNX Runtime on CUDA, and keep Lightcraft's
   unless ONNX Runtime is much faster. *Not started:* needs the models,
-  the laptop and Michael's high-ISO frames. `omalux-ai` opens the
-  system's ONNX Runtime, as Omacull's does.
+  the laptop and Michael's high-ISO frames, which he has yet to shoot:
+  his four shoots are at ISO 100 (1135 frames), 640 (143) and 800 (48).
+  `omalux-ai` opens the system's ONNX Runtime, as Omacull's does. *Moved
+  to M6:* nothing before it depends on the pick, and his shoots so far
+  are at ISO 800 or below.
 - **The sidecar.** Write `omalux:settings` and `xmp:Rating` with
   `xmp_merge` into sidecars Omacull wrote and darktable wrote; check
   Omacull still reads and writes the rating, and the rest of the file is
@@ -111,8 +154,8 @@ commands are in AGENTS.md.
   `omapix --round-trip a.tif b.tif` opens several as tabs. *Done* up to
   the window: Omapix's own loader (`load_round_trip`) opens OmaLux's
   exports at 16 bits with the profile "ProPhoto RGB (linear)", samples
-  unchanged, and its `--round-trip` opens each path given. *On the
-  laptop:* that they look right there, as tabs.
+  unchanged, and its `--round-trip` opens each path given. *Moved to
+  M1's export:* that they look right there, as tabs.
 - **One colour engine:** whether Omacull's monitor-profile handling works
   on `moxcms`, so lcms2 isn't needed. *Done: yes.* Lightcraft's
   `DisplayProfile` does the converting; OmaLux adds Omacull's EDID
@@ -123,7 +166,8 @@ commands are in AGENTS.md.
   hotkeys, `Command`, `OMALUX_SCRIPT` and the headless test harness
   carried over from Omacull. `make install`. `AGENTS.md` updated with the
   commands. *Done;* the window opens a folder by name only, for now.
-  Not yet run on Hyprland: after `make install`, Michael's first look.
+  Installed on the laptop and seen on Hyprland (2026-10-13): the theme
+  looks right.
 
 Also found: Lightcraft has the ILCE-7M3's colour matrices measured from
 its spectral sensitivities, so Temp and Tint are Kelvin already, not the
@@ -160,6 +204,7 @@ The controls are Lightcraft's; the work is OmaLux's shell around them.
   guards, set up from the first build.
 - **Export:** 16-bit TIFF with ICC into `<shoot>/omalux/` (set in
   `config.toml`); Ctrl+E opens them in Omapix, Ctrl+Shift+E just exports.
+  From M0: that they look right in Omapix, as tabs.
 
 ## M2. Copy, paste and stacks
 
@@ -194,6 +239,11 @@ the panels, keys and checks on real frames.
 
 ## M4. The look and HDR
 
+- **From M0, first:** Michael gathers the reference set (see M0), and
+  shoots one scene twice in Standard, DRO Off and DRO Auto, to confirm
+  that the camera match's gap on his frames is DRO's lift. The 100%
+  comparison of the render with Lightroom's and Capture One's, AHD
+  against RCD if AHD loses detail.
 - **Camera match, fixed per camera:** the target is the camera's own
   JPEG. Two candidates, measured the same way on held-out frames
   (CIEDE2000 against the camera's JPEG, overall and on saturated, skin and
@@ -225,9 +275,15 @@ the panels, keys and checks on real frames.
 
 ## M5. Lens profiles
 
+- **From M0, first:** pick the default. lensfun's correction against
+  Sony's embedded table (opening Lightcraft's ILCE-7RM4A-only gate,
+  `vendor/arw_lens.rs`, on a test branch) and Lightroom's, on FE 35 and
+  FE 85 frames with straight lines and a plain sky (the `lens` example;
+  Michael's shoots have no FE 50 frames). Sony's table follows the focus
+  distance, which lensfun's model doesn't (see M0).
 - Profile corrections for ARWs: distortion and vignetting from lensfun's
-  database (Lightcraft's `lensdb`) or Sony's embedded data (whichever M0
-  picked as the default), found from the lens the raw names, fed to
+  database (Lightcraft's `lensdb`) or Sony's embedded data (whichever
+  the comparison picked as the default), found from the lens the raw names, fed to
   Lightcraft's Optics. On by default. Checked against Lightroom's
   correction of the same frames.
 - Lateral CA from the profile where it has it, Lightcraft's automatic
@@ -235,8 +291,10 @@ the panels, keys and checks on real frames.
 
 ## M6. AI Denoise
 
+- **From M0, first:** the comparison of models and runtimes (see M0's
+  "Raw denoise"), on ISO 3200 to 6400 frames Michael shoots for it.
 - A button and a strength, on the raw's Bayer data before demosaicing,
-  with the model M0 picked, on whichever runtime M0 picked (Lightcraft's
+  with the model the comparison picked, on whichever runtime it picked (Lightcraft's
   `denoise` crates on wgpu, or ONNX Runtime on CUDA). Its result cached on
   disk per frame; the model fetched by a script, as Omacull's and
   Omapix's are.

@@ -40,10 +40,11 @@ fn lens(path: &Path, out: Option<&Path>) -> Result<(), String> {
     let m = lightcraft_meta::extract(&bytes);
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     println!(
-        "{name}: {} at {:.0} mm f/{:.1}",
+        "{name}: {} at {:.0} mm f/{:.1}, ISO {}",
         m.lens_model.as_deref().unwrap_or("no lens named"),
         m.focal_length.unwrap_or(0.0),
-        m.f_number.unwrap_or(0.0)
+        m.f_number.unwrap_or(0.0),
+        m.iso.unwrap_or(0)
     );
     let found = lens_profiles::database().map(|db| {
         let camera = db.find_camera(m.make.as_deref().unwrap_or_default(), m.model.as_deref().unwrap_or_default());
