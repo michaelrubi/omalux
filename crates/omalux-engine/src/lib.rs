@@ -7,11 +7,13 @@
 #![allow(clippy::type_complexity)]
 
 pub mod arw;
+pub mod auto;
 pub mod camera_preview;
 pub mod camera_profiles;
 pub mod color;
 pub mod compare;
 pub mod copy;
+pub mod crop;
 pub mod disk;
 pub mod edit;
 pub mod export;

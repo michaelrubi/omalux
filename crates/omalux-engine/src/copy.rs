@@ -7,7 +7,8 @@
 //! partial settings and their merge are Lightcraft's
 //! (`lightcraft_develop::presets`), whose own groups are cut differently
 //! (its Light takes HDR with it, its Detail both sharpening and noise
-//! reduction).
+//! reduction). A frame's quarter turns are in no group: they're the way
+//! up it is, which another frame doesn't want, as in Lightroom.
 
 use lightcraft_develop::{DevelopSettings, WbMode, apply_partial};
 use serde::{Deserialize, Serialize};
@@ -20,26 +21,52 @@ pub enum Group {
     WhiteBalance,
     Light,
     Presence,
+    Sharpening,
+    NoiseReduction,
+    LensCorrections,
+    Crop,
 }
+
+/// Part of `DevelopSettings`' JSON: a top-level key, and the fields under
+/// it, or none for all of them.
+type Part = (&'static str, &'static [&'static str]);
 
 impl Group {
     /// Every group, in the panels' order: what Ctrl+C copies.
-    pub const ALL: &[Group] = &[Group::WhiteBalance, Group::Light, Group::Presence];
+    pub const ALL: &[Group] = &[
+        Group::WhiteBalance,
+        Group::Light,
+        Group::Presence,
+        Group::Sharpening,
+        Group::NoiseReduction,
+        Group::LensCorrections,
+        Group::Crop,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Group::WhiteBalance => "White Balance",
             Group::Light => "Light",
             Group::Presence => "Presence",
+            Group::Sharpening => "Sharpening",
+            Group::NoiseReduction => "Noise Reduction",
+            Group::LensCorrections => "Lens Corrections",
+            Group::Crop => "Crop",
         }
     }
 
-    /// The top-level keys of `DevelopSettings`' JSON that are the group's.
-    fn keys(self) -> &'static [&'static str] {
+    /// The parts of `DevelopSettings`' JSON that are the group's.
+    fn parts(self) -> &'static [Part] {
         match self {
-            Group::WhiteBalance => &["wb"],
-            Group::Light => &["light"],
-            Group::Presence => &["color"],
+            Group::WhiteBalance => &[("wb", &[])],
+            Group::Light => &[("light", &[])],
+            Group::Presence => &[("color", &[])],
+            Group::Sharpening => &[("detail", &["sharpen_amount", "sharpen_radius", "sharpen_detail", "sharpen_masking"])],
+            Group::NoiseReduction => {
+                &[("detail", &["nr_luminance", "nr_detail", "nr_contrast", "nr_color", "nr_color_detail", "nr_color_smoothness"])]
+            }
+            Group::LensCorrections => &[("optics", &[])],
+            Group::Crop => &[("crop", &[])],
         }
     }
 }
@@ -56,9 +83,18 @@ impl Copied {
     pub fn new(settings: &DevelopSettings, groups: &[Group]) -> Self {
         let full = settings.to_json();
         let mut partial = Map::new();
-        for key in groups.iter().flat_map(|group| group.keys()) {
-            if let Some(value) = full.get(*key) {
+        for (key, fields) in groups.iter().flat_map(|group| group.parts()) {
+            let Some(value) = full.get(*key) else { continue };
+            if fields.is_empty() {
                 partial.insert((*key).to_owned(), value.clone());
+                continue;
+            }
+            // Some of its fields: two groups can share a key.
+            let Value::Object(part) = partial.entry(*key).or_insert_with(|| Value::Object(Map::new())) else { continue };
+            for field in *fields {
+                if let Some(value) = value.get(*field) {
+                    part.insert((*field).to_owned(), value.clone());
+                }
             }
         }
         Self { groups: groups.to_vec(), partial: Value::Object(partial) }
@@ -113,6 +149,38 @@ mod tests {
 
         let nothing = Copied::new(&edited(), &[]);
         assert_eq!(nothing.paste(&onto, &fresh), onto);
+    }
+
+    #[test]
+    fn sharpening_and_noise_reduction_are_groups_of_their_own() {
+        let fresh = DevelopSettings::for_raw(6100.0, -2.0);
+        let mut from = edited();
+        (from.detail.sharpen_amount, from.detail.sharpen_masking, from.detail.nr_luminance, from.detail.nr_color) = (80.0, 30.0, 20.0, 40.0);
+        let pasted = Copied::new(&from, &[Group::Sharpening]).paste(&fresh, &fresh);
+        assert_eq!((pasted.detail.sharpen_amount, pasted.detail.sharpen_masking), (80.0, 30.0));
+        assert_eq!((pasted.detail.nr_luminance, pasted.detail.nr_color), (fresh.detail.nr_luminance, fresh.detail.nr_color), "not the noise reduction");
+        let pasted = Copied::new(&from, &[Group::NoiseReduction]).paste(&fresh, &fresh);
+        assert_eq!((pasted.detail.nr_luminance, pasted.detail.nr_color, pasted.detail.sharpen_amount), (20.0, 40.0, fresh.detail.sharpen_amount));
+        let pasted = Copied::new(&from, &[Group::Sharpening, Group::NoiseReduction]).paste(&fresh, &fresh);
+        assert_eq!(pasted.detail, from.detail, "both are all of Detail");
+    }
+
+    #[test]
+    fn lens_corrections_and_the_crop_are_pasted_and_a_quarter_turn_never_is() {
+        let fresh = DevelopSettings::for_raw(6100.0, -2.0);
+        let mut from = edited();
+        (from.optics.remove_ca, from.optics.defringe_purple_amount) = (true, 6.0);
+        crate::crop::set_aspect(&mut from, (6000.0, 4000.0), crate::crop::Aspect::Ratio(1, 1));
+        crate::crop::straighten(&mut from, (6000.0, 4000.0), 3.0);
+        crate::crop::turn(&mut from, true);
+        let pasted = Copied::new(&from, &[Group::LensCorrections]).paste(&fresh, &fresh);
+        assert_eq!((pasted.optics, pasted.crop), (from.optics, fresh.crop));
+        let pasted = Copied::new(&from, Group::ALL).paste(&fresh, &fresh);
+        assert_eq!((pasted.crop, pasted.orientation), (from.crop, fresh.orientation));
+
+        // No crop copied is no crop pasted: the frame's own is cleared.
+        let pasted = Copied::new(&fresh, &[Group::Crop]).paste(&from, &fresh);
+        assert_eq!(pasted.crop, fresh.crop);
     }
 
     #[test]

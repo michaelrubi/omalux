@@ -61,6 +61,19 @@ pub enum Command {
     PasteStack,
     /// Open out the current frame's stack in the filmstrip, or close it up.
     ToggleStack,
+    /// Crop & Straighten: open the tool, or put it away.
+    Crop,
+    /// A quarter turn.
+    RotateLeft,
+    RotateRight,
+    /// The whole frame again, unstraightened.
+    ResetCrop,
+    /// Whites and Blacks, so nothing clips that needn't.
+    AutoTone,
+    AutoWhiteBalance,
+    AutoExposure,
+    /// Straighten by the frame's own horizon or uprights.
+    AutoLevel,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -110,6 +123,14 @@ impl Command {
         Command::PastePrevious,
         Command::PasteStack,
         Command::ToggleStack,
+        Command::Crop,
+        Command::RotateLeft,
+        Command::RotateRight,
+        Command::ResetCrop,
+        Command::AutoTone,
+        Command::AutoWhiteBalance,
+        Command::AutoExposure,
+        Command::AutoLevel,
     ];
 
     /// Look a command up by its name in code, e.g. "Open".
@@ -162,6 +183,12 @@ impl Command {
         Command::PastePrevious,
         Command::PasteStack,
         Command::ToggleStack,
+        Command::Crop,
+        Command::RotateLeft,
+        Command::RotateRight,
+        Command::ResetCrop,
+        Command::AutoWhiteBalance,
+        Command::AutoTone,
     ];
 
     pub fn label(self) -> &'static str {
@@ -207,6 +234,14 @@ impl Command {
             Command::PastePrevious => "Paste Settings from Previous",
             Command::PasteStack => "Paste Settings onto the Stack",
             Command::ToggleStack => "Open Out or Close Up the Stack",
+            Command::Crop => "Crop & Straighten",
+            Command::RotateLeft => "Rotate Left",
+            Command::RotateRight => "Rotate Right",
+            Command::ResetCrop => "Reset the Crop",
+            Command::AutoTone => "Auto Tone",
+            Command::AutoWhiteBalance => "Auto White Balance",
+            Command::AutoExposure => "Auto Exposure",
+            Command::AutoLevel => "Auto Level",
         }
     }
 
@@ -260,6 +295,14 @@ impl Command {
             Command::PasteStack => s(CMD_SHIFT, Key::V),
             // Omacull's.
             Command::ToggleStack => s(Modifiers::NONE, Key::G),
+            Command::Crop => s(Modifiers::NONE, Key::R),
+            Command::RotateLeft => s(CMD, Key::OpenBracket),
+            Command::RotateRight => s(CMD, Key::CloseBracket),
+            Command::ResetCrop => s(CMD_ALT, Key::R),
+            Command::AutoTone => s(CMD, Key::U),
+            Command::AutoWhiteBalance => s(CMD_SHIFT, Key::U),
+            // Lightroom has one Auto, on Ctrl+U; these two are buttons.
+            Command::AutoExposure | Command::AutoLevel => None,
         }
     }
 
@@ -423,6 +466,19 @@ mod tests {
         assert_eq!(press(&ctx, Modifiers::SHIFT, Key::ArrowLeft), [Command::SelectPrevious], "not mistaken for a step");
         assert_eq!(press(&ctx, Modifiers::SHIFT, Key::ArrowRight), [Command::SelectNext]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::G), [Command::ToggleStack]);
+    }
+
+    #[test]
+    fn the_crop_tool_and_auto() {
+        let ctx = egui::Context::default();
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::R), [Command::Crop]);
+        assert_eq!(press(&ctx, CMD_SHIFT, Key::R), [Command::Reset], "not the crop's reset");
+        assert_eq!(press(&ctx, CMD_ALT, Key::R), [Command::ResetCrop]);
+        assert_eq!(press(&ctx, CMD, Key::OpenBracket), [Command::RotateLeft]);
+        assert_eq!(press(&ctx, CMD, Key::CloseBracket), [Command::RotateRight]);
+        assert_eq!(press(&ctx, CMD, Key::U), [Command::AutoTone], "not an unmark");
+        assert_eq!(press(&ctx, CMD_SHIFT, Key::U), [Command::AutoWhiteBalance], "not mistaken for auto tone");
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::U), [Command::Unmark]);
     }
 
     #[test]

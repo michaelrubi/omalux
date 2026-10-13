@@ -5,6 +5,7 @@
 use egui::{Align2, FontId, Sense, Ui, vec2};
 use lightcraft_develop::controls::{self, ControlSpec};
 use lightcraft_develop::{DevelopSettings, WbMode};
+use omalux_engine::auto::Auto;
 
 use crate::slider::{SliderOut, slider};
 use crate::theme::Theme;
@@ -30,6 +31,10 @@ pub struct PanelOut {
     pub slider: Option<(usize, SliderOut)>,
     /// As Shot was clicked.
     pub as_shot: bool,
+    /// An Auto button was clicked.
+    pub auto: Option<Auto>,
+    /// Remove Chromatic Aberration was ticked, or unticked.
+    pub remove_ca: Option<bool>,
 }
 
 fn heading(ui: &mut Ui, theme: &Theme, title: &str) -> egui::Rect {

@@ -12,7 +12,9 @@ use egui::{Align2, FontId, RichText, Ui};
 use lightcraft_codecs::display::DisplayProfile;
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::SourceInfo;
+use omalux_engine::auto::{self, Auto};
 use omalux_engine::copy::{Copied, Group};
+use omalux_engine::crop;
 use omalux_engine::disk::{Disk, Mark, Problem};
 use omalux_engine::edit::{self, History};
 use omalux_engine::shoot::{Filter, Shoot, Step, stars};
@@ -24,9 +26,11 @@ use crate::config::Config;
 use crate::develop::{self, PanelOut};
 use crate::filmstrip::{Click, Filmstrip, STRIP_HEIGHT};
 use crate::hotkeys::{self, format_shortcut};
-use crate::loupe::{Loupe, News};
+use crate::crop_panel;
+use crate::loupe::{Loupe, Mouse, News};
 use crate::monitor;
 use crate::render::{Decoder, Renderer, View, Wanted};
+use crate::slider::SliderOut;
 use crate::state::{Place, State};
 use crate::theme::{self, Theme};
 
@@ -182,6 +186,12 @@ pub struct App {
     previous: Option<PathBuf>,
     /// The checklist of what to copy, while it's open.
     choosing: Option<Checklist>,
+    /// The Crop & Straighten tool, while it's open: the loupe shows the
+    /// current frame whole, with its crop drawn over it.
+    crop: Option<crate::crop::Tool>,
+    /// The crop keeps its shape when it's dragged (Lightroom's lock, A),
+    /// from one frame and one opening of the tool to the next.
+    crop_locked: bool,
 }
 
 impl App {
@@ -279,6 +289,8 @@ impl App {
             at: None,
             previous: None,
             choosing: None,
+            crop: None,
+            crop_locked: true,
         }
     }
 
@@ -340,6 +352,7 @@ impl App {
         self.filmstrip.reset();
         (self.at, self.previous) = (None, None);
         self.choosing = None;
+        self.crop = None;
         self.leave();
     }
 
@@ -505,13 +518,29 @@ impl App {
             Command::Decrease => self.nudge(-1.0),
             Command::IncreaseMore => self.nudge(5.0),
             Command::DecreaseMore => self.nudge(-5.0),
-            Command::WhiteBalance => self.selector = !self.selector && self.shoot.is_some(),
+            Command::WhiteBalance => {
+                self.selector = !self.selector && self.shoot.is_some();
+                self.crop = None;
+            }
             Command::BeforeAfter => self.before = !self.before && self.shoot.is_some(),
             Command::Clipping => self.clipping = !self.clipping,
+            // The crop tool shows the frame whole.
+            Command::Zoom if self.crop.is_some() => {}
             Command::Zoom => {
                 let (pointer, time) = ctx.input(|i| (i.pointer.hover_pos(), i.time));
                 self.loupe.key_down(pointer, time);
             }
+            Command::Crop => {
+                self.crop = (self.crop.is_none() && self.shoot.is_some()).then(Default::default);
+                self.selector = false;
+            }
+            Command::RotateLeft => self.edit(|history, _| history.set(|settings| crop::turn(settings, false))),
+            Command::RotateRight => self.edit(|history, _| history.set(|settings| crop::turn(settings, true))),
+            Command::ResetCrop => self.edit(|history, _| history.set(crop::reset)),
+            Command::AutoTone => self.auto(Auto::Tone),
+            Command::AutoWhiteBalance => self.auto(Auto::WhiteBalance),
+            Command::AutoExposure => self.auto(Auto::Exposure),
+            Command::AutoLevel => self.auto(Auto::Level),
             Command::SelectAll => {
                 if let Some(shoot) = &mut self.shoot {
                     shoot.select_all();
@@ -641,7 +670,13 @@ impl App {
             }
             match self.edits.get(path) {
                 Some(editing) if !self.unreadable.contains(path) => {
-                    let becomes = copied.paste(editing.history.settings(), editing.history.fresh());
+                    let mut becomes = copied.paste(editing.history.settings(), editing.history.fresh());
+                    // A crop from a frame of another shape, kept inside this
+                    // one: where the frame's raw is decoded, so its shape is known.
+                    if let Some(source) = self.renderer.source(path) {
+                        let dims = crop::dims((source.width, source.height), &becomes);
+                        crop::constrain(&mut becomes, dims);
+                    }
                     if becomes != *editing.history.settings() {
                         changes.push((path.clone(), becomes));
                     }
@@ -770,37 +805,121 @@ impl App {
         });
     }
 
-    /// What was done in the develop panel: a drag's changes are drafts
-    /// in the loupe and one step once it ends, saved then.
-    fn panel(&mut self, out: PanelOut) {
+    /// Set `what` on the current frame from the frame itself, as one step.
+    fn auto(&mut self, what: Auto) {
+        let Some(source) = self.shoot.as_ref().and_then(|shoot| self.renderer.source(&shoot.frame().path)) else { return };
+        let mut found = true;
+        self.edit(|history, info| history.set(|settings| found = auto::apply(settings, info, &source, what)));
+        if !found {
+            let text = match what {
+                Auto::Level => "Couldn't find a horizon or uprights to level by",
+                _ => "There's no automatic value for that slider",
+            };
+            self.message = Some((text.to_owned(), false));
+        }
+    }
+
+    /// The current frame's size as it's shown uncropped, once its raw has
+    /// been decoded: what its crop is read against.
+    fn dims(&self) -> Option<(f64, f64)> {
+        let path = &self.shoot.as_ref()?.frame().path;
+        let source = self.renderer.source(path)?;
+        Some(crop::dims((source.width, source.height), self.edits.get(path)?.history.settings()))
+    }
+
+    /// A slider of the current frame's moved, `set` being how its value is
+    /// written: a drag's changes are drafts in the loupe and one step once
+    /// it ends, saved then.
+    fn slide(&mut self, slid: SliderOut, set: impl FnOnce(&mut DevelopSettings, &SourceInfo, f64)) {
         let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
-        if out != PanelOut::default() && self.locked(&path) {
+        if slid != SliderOut::default() && self.locked(&path) {
             return;
         }
         let Some(editing) = self.edits.get_mut(&path) else { return };
-        let mut save = false;
-        if out.as_shot {
-            save = editing.edit(|history, info| history.set(|settings| edit::as_shot(settings, info)));
+        if let Some(value) = slid.value {
+            editing.edit(|history, info| {
+                history.change(|settings| set(settings, info, value));
+                true
+            });
         }
-        if let Some((index, slid)) = out.slider {
-            if slid.touched {
-                self.selected = index;
-            }
-            if let (Some(value), Some(spec)) = (slid.value, develop::sliders().nth(index)) {
-                editing.edit(|history, info| {
-                    history.change(|settings| {
-                        edit::set_control(settings, info, spec.id, value);
-                    });
-                    true
-                });
-            }
-            self.dragging = (self.dragging || slid.drag_started) && !slid.drag_stopped;
-            if slid.drag_stopped {
-                save = editing.edit(|history, _| history.commit());
-            }
-        }
-        if save {
+        self.dragging = (self.dragging || slid.drag_started) && !slid.drag_stopped;
+        if slid.drag_stopped && editing.edit(|history, _| history.commit()) {
             self.save(&path);
+        }
+    }
+
+    /// What was done in the develop panel.
+    fn panel(&mut self, out: PanelOut) {
+        if out.as_shot {
+            self.edit(|history, info| history.set(|settings| edit::as_shot(settings, info)));
+        }
+        if let Some(what) = out.auto {
+            self.auto(what);
+        }
+        if let Some(on) = out.remove_ca {
+            self.edit(|history, _| history.set(|settings| settings.optics.remove_ca = on));
+        }
+        let Some((index, slid)) = out.slider else { return };
+        let Some(spec) = develop::sliders().nth(index) else { return };
+        if slid.touched {
+            self.selected = index;
+        }
+        if slid.auto {
+            return self.auto(Auto::Control(spec.id));
+        }
+        self.slide(slid, |settings, info, value| {
+            edit::set_control(settings, info, spec.id, value);
+        });
+    }
+
+    /// What was done in the crop tool's panel.
+    fn crop_panel(&mut self, out: crop_panel::Out) {
+        let Some(dims) = self.dims() else { return };
+        if let Some(aspect) = out.aspect {
+            self.edit(|history, _| history.set(|settings| crop::set_aspect(settings, dims, aspect)));
+        }
+        if out.swap {
+            self.edit(|history, _| history.set(|settings| crop::swap_aspect(settings, dims)));
+        }
+        if out.lock {
+            self.crop_locked = !self.crop_locked;
+        }
+        self.slide(out.angle, |settings, _, angle| crop::straighten(settings, dims, angle));
+        if out.level {
+            self.auto(Auto::Level);
+        }
+        if let Some(clockwise) = out.turn {
+            self.edit(|history, _| history.set(|settings| crop::turn(settings, clockwise)));
+        }
+        if out.reset {
+            self.edit(|history, _| history.set(crop::reset));
+        }
+        if out.done {
+            self.crop = None;
+        }
+    }
+
+    /// The keys that are the crop tool's while it's open, Lightroom's: X
+    /// swaps the aspect, A locks it or lets it go, Return puts the tool
+    /// away, and Esc puts it away with the crop as it was when the tool
+    /// came to the frame.
+    fn crop_keys(&mut self, ctx: &egui::Context) {
+        let Some(dims) = self.dims() else { return };
+        let pressed = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+        if pressed(egui::Key::X) {
+            self.edit(|history, _| history.set(|settings| crop::swap_aspect(settings, dims)));
+        }
+        if pressed(egui::Key::A) {
+            self.crop_locked = !self.crop_locked;
+        }
+        if pressed(egui::Key::Enter) {
+            self.crop = None;
+        }
+        if pressed(egui::Key::Escape) {
+            let was = self.shoot.as_ref().zip(self.crop.take()).and_then(|(shoot, tool)| tool.was(&shoot.frame().path));
+            if let Some((crop, orientation)) = was {
+                self.edit(|history, _| history.set(|settings| (settings.crop, settings.orientation) = (crop, orientation)));
+            }
         }
     }
 
@@ -840,6 +959,10 @@ impl App {
         self.finish_exporting();
         self.disk_problems();
         if !ctx.egui_wants_keyboard_input() && self.choosing.is_none() {
+            // The crop tool's own keys first: its X isn't a reject.
+            if self.crop.is_some() {
+                self.crop_keys(ctx);
+            }
             for command in Command::pressed(ctx, &mut self.v_down) {
                 self.run(command, ctx);
             }
@@ -856,6 +979,9 @@ impl App {
             self.filmstrip.collect(ctx, shoot.current());
             if self.at.as_ref() != Some(&shoot.frame().path) {
                 self.previous = self.at.replace(shoot.frame().path.clone());
+            }
+            if let (Some(tool), Some(editing)) = (&mut self.crop, self.edits.get(&shoot.frame().path)) {
+                tool.on(&shoot.frame().path, editing.history.settings());
             }
         }
         let title = match &self.shoot {
@@ -880,8 +1006,16 @@ impl App {
         if let Some(current) = wanted.first_mut().filter(|_| self.before) {
             current.settings = None;
         }
+        // The crop tool shows the current frame whole, straight and uncropped.
+        if self.crop.is_some()
+            && let Some(current) = wanted.first_mut()
+            && let Some(settings) = current.settings.as_mut().filter(|settings| !settings.crop.geometry.is_identity())
+        {
+            Arc::make_mut(settings).crop.geometry = Default::default();
+        }
+        let zoom = self.loupe.zoom().filter(|_| self.crop.is_none());
         self.loupe.retain(|path| wanted.iter().any(|w| w.path == path));
-        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom: self.loupe.zoom() });
+        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom });
         for news in self.loupe.take(ctx, self.renderer.done()) {
             match news {
                 News::Decoded(path, info) => {
@@ -942,7 +1076,14 @@ impl App {
         let mut clicked = None;
         egui::CentralPanel::no_frame().frame(pasteboard).show(ui, |ui| match &self.shoot {
             Some(shoot) => {
-                picked = self.loupe.show(ui, &shoot.frame().path, self.selector);
+                let mouse = if self.crop.is_some() {
+                    Mouse::Tool
+                } else if self.selector {
+                    Mouse::Pick
+                } else {
+                    Mouse::Zoom
+                };
+                picked = self.loupe.show(ui, &shoot.frame().path, mouse);
                 if self.before {
                     let corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);
                     ui.painter().text(corner, Align2::LEFT_TOP, "Before", FontId::proportional(13.0), self.theme.foreground);
@@ -986,8 +1127,8 @@ impl App {
         }
     }
 
-    /// The histogram, and the panels under it: White Balance, Light,
-    /// Presence.
+    /// The histogram, and under it the crop tool's panel while the tool is
+    /// open, then the develop panels, which scroll.
     fn develop_panel(&mut self, ui: &mut Ui) {
         // The histogram of the frame as the loupe shows it.
         let path = self.shoot.as_ref().map(|shoot| &shoot.frame().path);
@@ -999,7 +1140,18 @@ impl App {
         // Not until the frame's raw has been decoded: the sliders are read against it.
         let editing = self.shoot.as_ref().and_then(|shoot| self.edits.get(&shoot.frame().path));
         let Some(editing) = editing.filter(|editing| editing.info.is_some()) else { return };
-        let out = develop::show(ui, &self.theme, editing.history.settings(), editing.history.fresh(), self.selected);
+        let (settings, fresh) = (editing.history.settings(), editing.history.fresh());
+        let dims = self.dims().filter(|_| self.crop.is_some());
+        let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+        let (cropped, out) = scroll
+            .show(ui, |ui| {
+                let cropped = dims.map(|dims| crop_panel::show(ui, &self.theme, settings, dims, self.crop_locked));
+                (cropped, develop::show(ui, &self.theme, settings, fresh, self.selected))
+            })
+            .inner;
+        if let Some(cropped) = cropped {
+            self.crop_panel(cropped);
+        }
         self.panel(out);
     }
 
@@ -1198,6 +1350,9 @@ mod tests {
         ctx: egui::Context,
         app: App,
         time: f64,
+        /// The window's size: taller for a test of the panels that are
+        /// below the fold at 600.
+        screen: egui::Vec2,
     }
 
     impl Harness {
@@ -1212,13 +1367,13 @@ mod tests {
             let wake = ctx.clone();
             let disk = Disk::new(move || wake.request_repaint());
             let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect(), Workers { renderer, disk }, paths);
-            Self { ctx, app, time: 0.0 }
+            Self { ctx, app, time: 0.0, screen: egui::vec2(800.0, 600.0) }
         }
 
         fn frame(&mut self, events: Vec<Event>) -> egui::FullOutput {
             self.time += 0.05;
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.screen)),
                 time: Some(self.time),
                 events,
                 ..Default::default()
@@ -1707,6 +1862,120 @@ mod tests {
         h.press(Modifiers::NONE, Key::Backslash);
         h.press(Modifiers::NONE, Key::ArrowRight);
         assert!(!h.app.before);
+    }
+
+    #[test]
+    fn r_opens_the_crop_tool_on_the_whole_frame_and_esc_puts_the_crop_back() {
+        let folder = Folder::new("crop-tool", &[1, 1]);
+        let raw = folder.0.join("DSC00001.ARW");
+        let mut h = Harness::new(&[]);
+        h.press(Modifiers::NONE, Key::R);
+        assert!(h.app.crop.is_none(), "nothing to crop with no shoot open");
+        h.app.open(folder.0.clone());
+        h.settle();
+        let dims = h.app.dims().unwrap();
+        h.app.edit(|history, _| history.set(|settings| crop::set_aspect(settings, dims, crop::Aspect::Ratio(1, 1))));
+        h.settle();
+        let rendered = |h: &Harness| h.app.loupe.shown(&raw).unwrap().render.as_ref().unwrap().settings.crop.geometry;
+        assert_eq!(rendered(&h), h.settings().crop.geometry, "cropped, in the loupe");
+
+        // The tool shows the frame whole, with the crop still in its settings.
+        h.press(Modifiers::NONE, Key::R);
+        h.settle();
+        assert!(h.app.crop.is_some());
+        assert!(rendered(&h).is_identity() && !h.settings().crop.geometry.is_identity());
+        // Z doesn't zoom while it's open.
+        h.press(Modifiers::NONE, Key::Z);
+        assert!(h.app.loupe.zoom().is_none());
+
+        // X turns the crop on its side, and isn't a reject; A is the lock.
+        let square = h.settings().crop;
+        h.app.edit(|history, _| history.set(|settings| crop::set_aspect(settings, dims, crop::Aspect::Ratio(4, 5))));
+        let landscape = h.settings().crop.geometry.rect_px(dims.0, dims.1);
+        h.press(Modifiers::NONE, Key::X);
+        let portrait = h.settings().crop.geometry.rect_px(dims.0, dims.1);
+        assert!(landscape.width() > landscape.height() && portrait.width() < portrait.height(), "{landscape:?} {portrait:?}");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 1, "not rejected");
+        assert!(h.app.crop_locked);
+        h.press(Modifiers::NONE, Key::A);
+        assert!(!h.app.crop_locked);
+
+        // Esc puts the tool away with the crop as it was when it was opened.
+        h.press(Modifiers::NONE, Key::Escape);
+        assert!(h.app.crop.is_none());
+        assert_eq!(h.settings().crop, square);
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.settle();
+        assert_eq!(rendered(&h), square.geometry, "cropped again");
+
+        // Return keeps what was done, and the tool stays open from frame to frame.
+        h.press(Modifiers::NONE, Key::R);
+        h.press(Modifiers::NONE, Key::X);
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert!(h.app.crop.is_some());
+        h.press(Modifiers::NONE, Key::ArrowLeft);
+        h.press(Modifiers::NONE, Key::Enter);
+        assert!(h.app.crop.is_none());
+        // (A square on its side is the same square.)
+        assert_eq!(h.settings().crop.geometry, square.geometry);
+        // X is a reject again.
+        h.press(Modifiers::NONE, Key::X);
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, sidecar::REJECT);
+    }
+
+    #[test]
+    fn quarter_turns_and_the_crops_reset_are_steps_with_or_without_the_tool() {
+        let folder = Folder::new("turns", &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let (w, h0) = h.app.dims().unwrap();
+        h.press(Modifiers::COMMAND, Key::CloseBracket);
+        assert_eq!(h.app.dims(), Some((h0, w)), "on its side");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.press(Modifiers::COMMAND, Key::OpenBracket);
+        assert_eq!(h.app.dims(), Some((w, h0)));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.app.dims(), Some((h0, w)), "each turn is a step");
+
+        let dims = h.app.dims().unwrap();
+        h.app.edit(|history, _| history.set(|settings| crop::straighten(settings, dims, 5.0)));
+        assert_eq!(h.settings().crop.geometry.angle, 5.0);
+        h.press(Modifiers::COMMAND | Modifiers::ALT, Key::R);
+        assert!(h.settings().crop.geometry.is_identity());
+        assert_eq!(h.app.dims(), Some((h0, w)), "still on its side");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+    }
+
+    #[test]
+    fn ctrl_u_is_auto_tone_and_ctrl_shift_u_auto_white_balance_each_one_step() {
+        use lightcraft_develop::WbMode;
+        let folder = Folder::new("auto", &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().clone();
+
+        // The test's frame is one flat grey: nothing in it clips, so
+        // Whites and Blacks go as far as they go.
+        h.press(Modifiers::COMMAND, Key::U);
+        assert_eq!((h.settings().light.whites, h.settings().light.blacks), (100.0, -100.0));
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 1, "not unmarked");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh, "one step");
+
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::U);
+        assert_eq!(h.settings().wb.mode, WbMode::Auto);
+        assert_eq!(h.settings().light, fresh.light, "and only the white balance");
+
+        // Exposure and level have no key: a script, or their buttons.
+        h.app.run(Command::AutoExposure, &h.ctx.clone());
+        assert_ne!(h.settings().light.exposure, 0.0);
+        let before = h.settings().clone();
+        h.app.run(Command::AutoLevel, &h.ctx.clone());
+        assert_eq!(h.settings(), &before);
+        assert_eq!(h.said(), "Couldn't find a horizon or uprights to level by");
     }
 
     #[test]
@@ -2594,21 +2863,21 @@ mod tests {
         // Unchecking White Balance, then Light.
         let wb_rect = h.text("White Balance");
         h.click(wb_rect.center());
-        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Light, Group::Presence]);
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), &Group::ALL[1..]);
 
         let light_rect = h.text("Light");
         h.click(light_rect.center());
-        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Presence]);
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), &Group::ALL[2..]);
 
         // Return copies only the rest into clipboard.
         h.press(Modifiers::NONE, Key::Enter);
         assert!(h.app.choosing.is_none());
-        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), [Group::Presence]);
+        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), &Group::ALL[2..]);
 
         // The next time it opens, the last choice is checked.
         h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
         assert!(h.app.choosing.is_some());
-        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Presence]);
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), &Group::ALL[2..]);
 
         // Check All selects everything again.
         let all_rect = h.text("Check All");
@@ -2618,11 +2887,11 @@ mod tests {
         // Esc copies nothing and leaves the clipboard as it was.
         h.press(Modifiers::NONE, Key::Escape);
         assert!(h.app.choosing.is_none());
-        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), [Group::Presence]);
+        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), &Group::ALL[2..]);
 
         // Since Esc cancelled, the next time it opens, the previously remembered choice is still checked.
         h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
-        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Presence]);
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), &Group::ALL[2..]);
 
         // Closing the shoot closes the dialog.
         h.app.close();

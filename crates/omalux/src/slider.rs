@@ -34,6 +34,8 @@ pub struct SliderOut {
     pub drag_stopped: bool,
     /// It was clicked or dragged: it's the selected slider now.
     pub touched: bool,
+    /// Shift+double-click: set it automatically.
+    pub auto: bool,
 }
 
 fn hex(s: &str) -> Color32 {
@@ -204,7 +206,7 @@ pub fn slider(ui: &mut Ui, theme: &Theme, spec: &ControlSpec, value: f64, reset_
             ui.data_mut(|m| m.insert_temp(typing_id, text));
         }
     } else if response.double_clicked() || label_response.double_clicked() {
-        out = SliderOut { value: Some(reset_to), drag_started: true, drag_stopped: true, touched: true };
+        out = SliderOut { value: Some(reset_to), drag_started: true, drag_stopped: true, touched: true, auto: false };
     } else if (response.dragged() || response.drag_started())
         && let Some(pointer) = response.interact_pointer_pos()
     {
@@ -220,7 +222,7 @@ pub fn slider(ui: &mut Ui, theme: &Theme, spec: &ControlSpec, value: f64, reset_
     } else if response.clicked()
         && let Some(pointer) = response.interact_pointer_pos()
     {
-        out = SliderOut { value: Some(at_pointer(pointer.x)), drag_started: true, drag_stopped: true, touched: true };
+        out = SliderOut { value: Some(at_pointer(pointer.x)), drag_started: true, drag_stopped: true, touched: true, auto: false };
     } else if selected && !was_typing && ui.rect_contains_pointer(row) {
         // The wheel nudges the selected slider only, so over any other it
         // still scrolls the panel.
@@ -231,7 +233,7 @@ pub fn slider(ui: &mut Ui, theme: &Theme, spec: &ControlSpec, value: f64, reset_
             let steps = wheel_nudges(&mut remainder, delta);
             ui.data_mut(|d| d.insert_temp(wheel, remainder));
             if steps != 0.0 {
-                out = SliderOut { value: Some(nudged(spec, value, steps)), drag_started: true, drag_stopped: true, touched: false };
+                out = SliderOut { value: Some(nudged(spec, value, steps)), drag_started: true, drag_stopped: true, touched: false, auto: false };
             }
         }
     }
