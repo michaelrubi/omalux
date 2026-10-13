@@ -2,7 +2,7 @@
 
 OmaLux is a fast, keyboard-first raw developer for Omarchy: the picks of a culled folder of raws in, 16-bit TIFFs ready to retouch out. It is the second stage of Michael's workflow and replaces darktable in it: cull in Omacull (`~/dev/omacull`), develop in OmaLux, retouch in Omapix (`~/dev/omapix`), export.
 
-**Status:** scoped on 2026-10-08 and re-planned on [Lightcraft](https://github.com/storytold/lightcraft)'s engine. M0 under way: Lightcraft vendored at `701f78e`, the workspace and an empty themed window, the sidecar, the 16-bit export and the colour engine settled; the spikes that need real ARWs, the RTX 4070 or Lightroom have their tools built (`spike`, `lens`) and wait for Michael's laptop. No real ARW has gone through OmaLux's code yet (raw.pixls.us is blocked in the cloud sessions it was built in). Read [docs/DESIGN.md](docs/DESIGN.md) for scope and architecture and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones and the "Later" list.
+**Status:** scoped on 2026-10-08 and re-planned on [Lightcraft](https://github.com/storytold/lightcraft)'s engine. M0 under way: Lightcraft vendored at `701f78e`, the workspace and an empty themed window, the sidecar, the 16-bit export and the colour engine settled; the spikes that need real ARWs, the RTX 4070 or Lightroom have their tools built (`spike`, `lens`) and wait for Michael's laptop. raw.pixls.us's two ILCE-7M3 files pass the corpus tests on the laptop; none of Michael's own frames has gone through yet (raw.pixls.us is blocked in the cloud sessions, so fetch the corpus on the laptop). Read [docs/DESIGN.md](docs/DESIGN.md) for scope and architecture and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones and the "Later" list.
 
 ## Principles
 

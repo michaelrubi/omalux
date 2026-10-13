@@ -59,9 +59,11 @@ commands are in AGENTS.md.
   the export, the render beside the camera's JPEG, and a 100% crop).
   Lightcraft's raw loading and per-file camera match are lifted into
   `omalux-engine` for it; CIEDE2000 is checked against Sharma's test
-  data. raw.pixls.us is blocked from the cloud sessions this was built
-  in, so not one real ARW has gone through OmaLux's code yet:
-  `scripts/fetch-corpus.sh` fetches them, and a test runs on them.
+  data. On the laptop (2026-10-13), `scripts/fetch-corpus.sh` and
+  `cargo test --workspace` put raw.pixls.us's two ILCE-7M3 files through
+  it, the first real ARWs to go through OmaLux's code: both decode
+  (compressed in 12 ms, uncompressed in 77 ms) and open with a camera
+  look and a Kelvin white balance. Michael's own frames are next.
 - **His camera settings:** he shoots Standard and Vivid; confirm from the
   makernotes how his shoots split between them, and which DRO settings
   (Off, Auto, Lv1 to Lv5) they use, since DRO is matched (see "The look"
