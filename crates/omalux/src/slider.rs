@@ -4,18 +4,25 @@
 //! the selected slider the wheel nudges it.
 //!
 //! Lifted from Lightcraft's `slider` (`ui-egui/src/widgets.rs` at
-//! `701f78e`, MIT OR Apache-2.0) and restyled to Omarchy's theme, without
-//! its typed values and automation ids. One difference from it, for
-//! Lightroom's sake: Temp's track is spaced by ratio, not by Kelvin, so
-//! daylight isn't squeezed into the track's first tenth.
+//! `701f78e`, MIT OR Apache-2.0) and restyled to Omarchy's theme, with
+//! its typed values (click the number to type one) and without its
+//! automation ids. One difference from it, for Lightroom's sake: Temp's
+//! track is spaced by ratio, not by Kelvin, so daylight isn't squeezed
+//! into the track's first tenth.
 
-use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{
+    Align2, Color32, CursorIcon, FontId, Key, Layout, Rect, Sense, Stroke, Ui, UiBuilder, pos2,
+    text::{CCursor, CCursorRange},
+    text_edit::TextEditState,
+    vec2,
+};
 use lightcraft_develop::{ControlSpec, Track};
 
 use crate::theme::Theme;
 
 pub const ROW_HEIGHT: f32 = 40.0;
 const RING: f32 = 6.0;
+const VALUE_WIDTH: f32 = 64.0;
 
 /// What happened to a slider this frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -101,6 +108,26 @@ pub fn shown_value(spec: &ControlSpec, value: f64) -> String {
     if shown.trim_start_matches(['+', '-']).chars().all(|c| c == '0' || c == '.') { "0".to_owned() } else { shown }
 }
 
+/// What a value typed into a slider asks for: a number such as `0.5`,
+/// `+12`, `-1,5` (comma or point) or `5600 K`, on the control's steps and
+/// clamped to its range. `None` when it isn't a finite number, so the
+/// slider keeps its value. Lightcraft's.
+pub fn typed_value(spec: &ControlSpec, text: &str) -> Option<f64> {
+    let t = text.trim().replace(',', ".");
+    let t = t.trim_end_matches(|c: char| c == '%' || c == 'K' || c == 'k' || c.is_whitespace());
+    let v: f64 = t.parse().ok().filter(|v: &f64| v.is_finite())?;
+    Some(stepped(spec, v))
+}
+
+/// Select all the text in the field, so typing replaces it. Lifted from
+/// Lightcraft's `text_field::select_all` (`ui-egui/src/text_field.rs` at `701f78e`).
+fn select_all(ctx: &egui::Context, id: egui::Id, text: &str) {
+    let mut state = TextEditState::load(ctx, id).unwrap_or_default();
+    let end = CCursor::new(text.chars().count());
+    state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(0), end)));
+    state.store(ctx, id);
+}
+
 /// A slider row. `reset_to` is what a double-click sets (the control's
 /// default, or the as-shot value for white balance); `selected` marks the
 /// slider the keys act on.
@@ -111,15 +138,72 @@ pub fn slider(ui: &mut Ui, theme: &Theme, spec: &ControlSpec, value: f64, reset_
     let track = Rect::from_min_max(pos2(row.left() + 4.0 + RING, row.top() + 20.0), pos2(row.right() - 4.0 - RING, row.top() + 36.0));
     let id = ui.id().with(spec.id);
     let response = ui.interact(track.expand2(vec2(RING, 2.0)), id, Sense::click_and_drag());
-    // Where each slider is, for the tests to drag it.
+    let value_rect = Rect::from_min_max(pos2(label.right() - VALUE_WIDTH, label.top()), label.max);
+    let name_rect = Rect::from_min_max(label.min, pos2(label.right() - VALUE_WIDTH, label.max.y));
+    // Where each slider and its value are, for the tests.
     #[cfg(test)]
-    ui.data_mut(|d| d.insert_temp(egui::Id::new(spec.id), track));
-    let label_response = ui.interact(label, id.with("label"), Sense::click());
+    ui.data_mut(|d| {
+        d.insert_temp(egui::Id::new(spec.id), track);
+        d.insert_temp(egui::Id::new((spec.id, "value")), value_rect);
+    });
+    let label_response = ui.interact(name_rect, id.with("label"), Sense::click());
+    let typing_id = id.with("typing");
+    let field_id = id.with("field");
+    let mut typing: Option<String> = ui.data(|m| m.get_temp(typing_id));
+    let is_typing = typing.is_some();
+    let value_response = ui.interact(value_rect, id.with("value"), if is_typing { Sense::hover() } else { Sense::click() });
+    let opened = typing.is_none() && value_response.clicked();
+    if opened {
+        let text = shown_value(spec, value).trim_start_matches('+').to_string();
+        ui.memory_mut(|m| m.request_focus(field_id));
+        typing = Some(text);
+    }
+    let was_typing = is_typing || opened;
 
-    let mut out = SliderOut { touched: response.clicked() || response.drag_started() || label_response.clicked(), ..SliderOut::default() };
+    let mut out = SliderOut {
+        touched: response.clicked() || response.drag_started() || label_response.clicked() || value_response.clicked(),
+        ..SliderOut::default()
+    };
     let at_pointer = |x: f32| value_at(spec, f64::from((x - track.left()) / track.width()));
     let mut shown = value;
-    if response.double_clicked() || label_response.double_clicked() {
+    let font = FontId::proportional(12.5);
+    let text_color = if selected { theme.accent } else { theme.foreground };
+
+    if let Some(mut text) = typing.take() {
+        let mut child = ui.new_child(UiBuilder::new().max_rect(value_rect).layout(Layout::right_to_left(egui::Align::Center)));
+        let edit = egui::TextEdit::singleline(&mut text)
+            .id(field_id)
+            .font(font.clone())
+            .text_color(text_color)
+            .horizontal_align(egui::Align::RIGHT)
+            .desired_width(value_rect.width())
+            .margin(egui::Margin::ZERO)
+            .frame(egui::Frame::NONE);
+        let edit_response = child.add(edit);
+        if opened {
+            edit_response.request_focus();
+            select_all(ui.ctx(), field_id, &text);
+        }
+        let escape = ui.input(|i| i.key_pressed(Key::Escape));
+        let enter = ui.input(|i| i.key_pressed(Key::Enter));
+        if !opened && (edit_response.lost_focus() || escape || enter) {
+            if escape {
+                ui.memory_mut(|m| m.surrender_focus(field_id));
+            } else if let Some(nv) = typed_value(spec, &text)
+                && (nv - value).abs() > 1e-12
+            {
+                out.value = Some(nv);
+                out.drag_started = true;
+                out.drag_stopped = true;
+                out.touched = true;
+                shown = nv;
+            }
+            ui.memory_mut(|m| m.surrender_focus(field_id));
+            ui.data_mut(|m| m.remove::<String>(typing_id));
+        } else {
+            ui.data_mut(|m| m.insert_temp(typing_id, text));
+        }
+    } else if response.double_clicked() || label_response.double_clicked() {
         out = SliderOut { value: Some(reset_to), drag_started: true, drag_stopped: true, touched: true };
     } else if (response.dragged() || response.drag_started())
         && let Some(pointer) = response.interact_pointer_pos()
@@ -137,7 +221,7 @@ pub fn slider(ui: &mut Ui, theme: &Theme, spec: &ControlSpec, value: f64, reset_
         && let Some(pointer) = response.interact_pointer_pos()
     {
         out = SliderOut { value: Some(at_pointer(pointer.x)), drag_started: true, drag_stopped: true, touched: true };
-    } else if selected && ui.rect_contains_pointer(row) {
+    } else if selected && !was_typing && ui.rect_contains_pointer(row) {
         // The wheel nudges the selected slider only, so over any other it
         // still scrolls the panel.
         let delta = ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y));
@@ -160,10 +244,13 @@ pub fn slider(ui: &mut Ui, theme: &Theme, spec: &ControlSpec, value: f64, reset_
     }
 
     let painter = ui.painter();
-    let font = FontId::proportional(12.5);
-    let text = if selected { theme.accent } else { theme.foreground };
-    painter.text(label.left_center(), Align2::LEFT_CENTER, spec.label, font.clone(), text);
-    painter.text(label.right_center(), Align2::RIGHT_CENTER, shown_value(spec, shown), font, text);
+    painter.text(label.left_center(), Align2::LEFT_CENTER, spec.label, font.clone(), text_color);
+    if !was_typing {
+        painter.text(label.right_center(), Align2::RIGHT_CENTER, shown_value(spec, shown), font, text_color);
+        if value_response.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::Text);
+        }
+    }
     let y = track.center().y;
     match track_stops(&spec.track) {
         Some(stops) => {
@@ -184,7 +271,7 @@ pub fn slider(ui: &mut Ui, theme: &Theme, spec: &ControlSpec, value: f64, reset_
     painter.circle_filled(thumb, RING, theme.dark_background);
     painter.circle_stroke(thumb, RING, Stroke::new(2.0, if hovered || selected { theme.accent } else { theme.foreground }));
     if hovered {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
     }
     out
 }
@@ -232,5 +319,21 @@ mod tests {
         assert_eq!(wheel_nudges(&mut remainder, 30.0), 1.0);
         assert_eq!(remainder, 20.0);
         assert_eq!(wheel_nudges(&mut remainder, -100.0), -2.0);
+    }
+
+    #[test]
+    fn typed_values_are_stepped_and_clamped() {
+        let exposure = find("light.exposure").unwrap();
+        let contrast = find("light.contrast").unwrap();
+        let temp = find("wb.temp").unwrap();
+        assert_eq!(typed_value(exposure, "1.5"), Some(1.5));
+        assert_eq!(typed_value(exposure, " +0,25 "), Some(0.25));
+        assert_eq!(typed_value(exposure, "-12"), Some(exposure.min), "clamped");
+        assert_eq!(typed_value(contrast, "33.4"), Some(33.0), "on the control's steps");
+        assert_eq!(typed_value(contrast, "-20 %"), Some(-20.0));
+        assert_eq!(typed_value(temp, "5600 K"), Some(5600.0));
+        for bad in ["", "abc", "1.2.3", "NaN", "inf", "--1"] {
+            assert_eq!(typed_value(contrast, bad), None, "{bad:?}");
+        }
     }
 }
