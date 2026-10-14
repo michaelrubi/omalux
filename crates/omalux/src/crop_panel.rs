@@ -2,12 +2,20 @@
 //! histogram while the tool is open, as Lightroom's tool drawer is: the
 //! aspect and its lock, the angle, Auto, the quarter turns, Reset and
 //! Close.
+//!
+//! Lifted from Lightcraft's crop drawer (`crates/ui-egui/src/panels/right.rs`
+//! at `701f78e`) and restyled to Omarchy's theme, with Lightroom's controls
+//! and shortcuts.
 
-use egui::Ui;
+use egui::{Button, ComboBox, FontId, TextStyle, Ui};
 use lightcraft_develop::DevelopSettings;
-use omalux_engine::crop::Aspect;
+use lightcraft_develop::controls;
+use omalux_engine::crop::{self, Aspect};
 
-use crate::slider::SliderOut;
+use crate::commands::Command;
+use crate::develop;
+use crate::hotkeys::{self, format_shortcut};
+use crate::slider::{SliderOut, slider};
 use crate::theme::Theme;
 
 /// What was done in the crop panel this frame.
@@ -33,7 +41,105 @@ pub struct Out {
 
 /// The crop panel showing `settings`' crop of a frame `dims` in size as
 /// it's shown. `locked` is whether the crop keeps its shape when dragged.
-pub fn show(_ui: &mut Ui, _theme: &Theme, _settings: &DevelopSettings, _dims: (f64, f64), _locked: bool) -> Out {
-    // M3's crop panel branch draws it.
-    Out::default()
+pub fn show(ui: &mut Ui, theme: &Theme, settings: &DevelopSettings, dims: (f64, f64), locked: bool) -> Out {
+    let mut out = Out::default();
+    develop::heading(ui, theme, "Crop & Straighten");
+    ui.add_space(4.0);
+
+    ui.scope(|ui| {
+        ui.style_mut().text_styles.insert(TextStyle::Button, FontId::proportional(12.5));
+        ui.style_mut().text_styles.insert(TextStyle::Body, FontId::proportional(12.5));
+
+        let current_aspect = crop::aspect(settings, dims);
+        let current_label = match current_aspect {
+            Some(Aspect::Original) => "Original",
+            Some(Aspect::Ratio(w, h)) => {
+                crop::RATIOS
+                    .iter()
+                    .find(|(_, (rw, rh))| (*rw == w && *rh == h) || (*rw == h && *rh == w))
+                    .map_or("Custom", |(label, _)| *label)
+            }
+            None => "Custom",
+        };
+
+        ui.horizontal(|ui| {
+            ui.label("Aspect");
+            ComboBox::from_id_salt("crop.aspect")
+                .selected_text(current_label)
+                .show_ui(ui, |ui| {
+                    let is_orig = current_aspect == Some(Aspect::Original);
+                    if ui.selectable_label(is_orig, "Original").clicked() {
+                        out.aspect = Some(Aspect::Original);
+                    }
+                    for (label, (rw, rh)) in crop::RATIOS {
+                        let is_selected = match current_aspect {
+                            Some(Aspect::Ratio(w, h)) => (*rw == w && *rh == h) || (*rw == h && *rh == w),
+                            _ => false,
+                        };
+                        if ui.selectable_label(is_selected, *label).clicked() {
+                            out.aspect = Some(Aspect::Ratio(*rw, *rh));
+                        }
+                    }
+                });
+            let lock_text = if locked { "Locked" } else { "Unlocked" };
+            if ui
+                .add(Button::new(lock_text).selected(locked))
+                .on_hover_text("Locks the crop's shape when dragged (A)")
+                .clicked()
+            {
+                out.lock = true;
+            }
+        });
+        ui.add_space(4.0);
+
+        if let Some(mut spec) = controls::find("crop.angle").copied() {
+            spec.label = "Angle";
+            out.angle = slider(ui, theme, &spec, settings.crop.geometry.angle, 0.0, false);
+        }
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            if ui.button("Auto").on_hover_text("Levels the frame by its horizon or uprights").clicked() {
+                out.level = true;
+            }
+        });
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            let rot_left_tip = match hotkeys::current().command(Command::RotateLeft) {
+                Some(s) => format!("Rotate Left ({})", format_shortcut(&s)),
+                None => "Rotate Left".to_owned(),
+            };
+            if ui.button("Rotate Left").on_hover_text(rot_left_tip).clicked() {
+                out.turn = Some(false);
+            }
+            let rot_right_tip = match hotkeys::current().command(Command::RotateRight) {
+                Some(s) => format!("Rotate Right ({})", format_shortcut(&s)),
+                None => "Rotate Right".to_owned(),
+            };
+            if ui.button("Rotate Right").on_hover_text(rot_right_tip).clicked() {
+                out.turn = Some(true);
+            }
+        });
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            if ui.button("Swap").on_hover_text("Turns the crop on its side (X)").clicked() {
+                out.swap = true;
+            }
+            let reset_tip = match hotkeys::current().command(Command::ResetCrop) {
+                Some(s) => format!("Reset ({})", format_shortcut(&s)),
+                None => "Reset".to_owned(),
+            };
+            if ui.button("Reset").on_hover_text(reset_tip).clicked() {
+                out.reset = true;
+            }
+            if ui.button("Close").on_hover_text("Return, or R").clicked() {
+                out.done = true;
+            }
+        });
+        ui.add_space(8.0);
+    });
+
+    out
 }
