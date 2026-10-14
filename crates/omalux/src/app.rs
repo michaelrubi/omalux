@@ -3869,5 +3869,48 @@ mod tests {
         assert_eq!(h.settings().crop.geometry.angle, 0.0);
         assert_eq!(h.said(), "Couldn't find a horizon or uprights to level by");
     }
+
+    #[test]
+    fn right_click_filmstrip_cell_and_click_pick() {
+        let folder = Folder::new("filmstrip-menu-pick", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+
+        let cell = |h: &Harness, index: usize| {
+            h.app.filmstrip.cells.iter().find(|(i, _)| *i == index).map(|(_, r)| r.center()).expect("filmstrip cell")
+        };
+
+        h.right_click(cell(&h, 0));
+        let output = h.frame(vec![]);
+        let pick = texts(&output).into_iter().find(|(text, _)| text == "Pick").map(|(_, rect)| rect).expect("Pick item in menu");
+        h.click(pick.center());
+
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, omalux_engine::shoot::PICK);
+    }
+
+    #[test]
+    fn right_click_loupe_and_click_before_after() {
+        let folder = Folder::new("loupe-menu-before-after", &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        assert!(!h.app.before);
+
+        let loupe_center = h.app.loupe.area().center();
+        h.right_click(loupe_center);
+
+        let output = h.frame(vec![]);
+        let before_after = texts(&output)
+            .into_iter()
+            .find(|(text, _)| text == "Before/After")
+            .map(|(_, rect)| rect)
+            .expect("Before/After item in menu");
+        h.click(before_after.center());
+
+        assert!(h.app.before);
+    }
 }
+
 
