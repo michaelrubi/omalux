@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use crate::camera_preview::CameraLook;
 use crate::look::{Camera, Profile};
 use lightcraft_color::cct::xy_to_temp_tint;
 use lightcraft_geom::Orientation;
@@ -271,7 +272,16 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
     // the camera's measured matrices
     let scale = WbScaleOf::new(raw.format, &raw.color, raw.wb_multipliers, &raw.metadata);
     let t = web_time::Instant::now();
-    let (xy, transform, camera_look) = crate::camera_preview::starting_colour(&mut raw, bytes);
+    // The look: the camera's fixed profile for its Creative Style, or where there's none (and for an edit made
+    // before there were any) the one fitted to this frame's own JPEG.
+    let shot = crate::sony::settings(bytes);
+    let fixed = if profile.fitted() { None } else { fixed_look(&raw, shot.creative_style.as_deref().unwrap_or_default()) };
+    let camera = Camera { style: shot.creative_style, dro: shot.dro, lift: 0.0, fixed: fixed.is_some() };
+    let (xy, transform, camera_look) = fixed.unwrap_or_else(|| crate::camera_preview::starting_colour(&mut raw, bytes));
+    // What DRO did to the camera's JPEG that the raw doesn't have, for Camera match to put back.
+    let lifted = !profile.fitted() && camera.dro.is_some_and(|dro| dro != crate::sony::Dro::Off);
+    let lift = camera_look.as_ref().filter(|_| lifted).and_then(|look| crate::dro::measure(&raw, bytes, &transform, look));
+    let camera = Camera { lift: lift.unwrap_or(0.0), ..camera };
     timings.look = ms(t);
     // Previews bin the mosaic straight to (about) the size they need; only larger levels (exports, 1:1)
     // demosaic the whole sensor.
@@ -333,12 +343,23 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
         mattes: None,
         local_tone: None,
     };
-    // What the camera did to its JPEG that the raw doesn't have. (The fixed profile and DRO's lift are M4's, on
-    // their way: until they're in, Camera match develops as `Profile::Fitted` does.)
-    let _ = profile;
-    let shot = crate::sony::settings(bytes);
-    let camera = Camera { style: shot.creative_style, dro: shot.dro, lift: 0.0, fixed: false };
     Ok(Loaded { image: img, info, camera, timings })
+}
+
+/// The look of `raw`'s camera in Creative Style `style`, from its profile ([`crate::camera_profiles`]): the as-shot
+/// white, the camera transform at it and the profile's colour and tone, as
+/// [`crate::camera_preview::starting_colour`] gives a fitted one. `None` without a profile for them, or for a raw
+/// with colour matrices of its own.
+fn fixed_look(raw: &lightcraft_raw::RawImage, style: &str) -> Option<(lightcraft_color::Xy, lightcraft_raw::color::CameraTransform, Option<CameraLook>)> {
+    let profile = crate::camera_profiles::get(raw.metadata.model.as_deref()?, style)?;
+    let xy = lightcraft_raw::color::as_shot_white_xy(raw);
+    let transform = lightcraft_raw::color::camera_transform(raw, xy);
+    if !transform.matrix_is_fallback {
+        return None;
+    }
+    // (the look's matrix goes on top of the transform's, which the profile's own replaces)
+    let look = CameraLook { matrix: profile.matrix().mul(&transform.matrix.inverse()?), tone: profile.tone?, hue_sat: profile.hue_sat.clone() };
+    Some((xy, transform, Some(look)))
 }
 
 /// Which white-balance scale a raw is edited on, decided from the file alone.

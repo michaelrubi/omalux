@@ -16,6 +16,7 @@ pub mod copy;
 pub mod crop;
 pub mod dcp;
 pub mod disk;
+mod dro;
 pub mod edit;
 pub mod export;
 pub mod fusion;

@@ -5,9 +5,12 @@
 //! lime shirt olive that the camera kept lime): a hue/saturation table fitted to the residuals
 //! (applied like a DNG `ProfileHueSatMap`) corrects that when it also improves the held-out pixels.
 //!
-//! OmaLux's camera match, until M4's fixed profile. Lifted from Lightcraft (MIT OR Apache-2.0) at
-//! `701f78e`, `crates/engine/src/camera_preview.rs`, unchanged but for paths; its tests that read
-//! Lightcraft's corpus or its engine's loading are left out (`raw.rs` has OmaLux's).
+//! OmaLux's camera match before M4, and still the look of an edit made then
+//! (`look::Profile::Fitted`) and of a camera or Creative Style without a profile. Lifted from Lightcraft (MIT OR
+//! Apache-2.0) at `701f78e`, `crates/engine/src/camera_preview.rs`, unchanged but for paths, for what
+//! `camera_profiles` and `dro` now use of it being `pub(crate)`, and for one thing: the per-photo fit never takes a
+//! camera profile's colour here (see [`fit_preview`]). Its tests that read Lightcraft's corpus or its engine's
+//! loading are left out (`raw.rs` has OmaLux's).
 use lightcraft_color::{D50, D65, Mat3, PROPHOTO, REC2020, Xy, bradford, luminance_2020};
 use lightcraft_pipeline::tone::{CameraTone, ToneMap};
 use lightcraft_raster::{
@@ -120,7 +123,9 @@ pub(crate) fn fit_preview(raw: &RawImage, bytes: &[u8], transform: &CameraTransf
     let black_and_white = monochrome(&reference);
     // A camera profile pooled from many photos knows colours this photo shows too little of;
     // try its colour first and fit tone/chroma per photo (picture styles vary).
-    let profile = raw.metadata.model.as_deref().and_then(crate::camera_profiles::get);
+    // (OmaLux: never. A profile gives a frame its whole look instead, `raw::load`, and the per-photo fit is what
+    // process version 1 rendered, before there were any: an edit from then has to render as it did.)
+    let profile: Option<std::sync::Arc<crate::camera_profiles::CameraProfile>> = None;
     let colour = profile.as_ref().and_then(|p| Some((p.matrix().mul(&transform.matrix.inverse()?), p.hue_sat.clone())));
     let look = match fit_look(&sensor, &reference, &clipped, colour.clone()) {
         Some(look) => look,
@@ -226,7 +231,7 @@ fn clip_mask(camera: &Rgb32f) -> Rgb32f {
 const SONY_DRO_OFF_TONE: &str = include_str!("../assets/sony-dro-off.json");
 
 /// [`SONY_DRO_OFF_TONE`]'s curve (`None` only if the built-in file were invalid; a test checks it).
-fn sony_dro_off_tone() -> Option<CameraTone> {
+pub(crate) fn sony_dro_off_tone() -> Option<CameraTone> {
     #[derive(serde::Deserialize)]
     struct File {
         knots: [[f32; 2]; 32],
@@ -272,7 +277,7 @@ fn at_most(a: &CameraTone, b: &CameraTone) -> bool {
 /// Same-size proxies of the sensor (white-balanced, baseline exposure, through `transform`'s
 /// matrix: the generic camera ≈ sRGB model) and of the file's embedded camera JPEG (linear Rec.2020),
 /// and per proxy pixel whether any sensor sample it covers is clipped.
-fn proxies(raw: &RawImage, bytes: &[u8], transform: &CameraTransform, size: usize) -> Option<(Rgb32f, Rgb32f, Vec<bool>)> {
+pub(crate) fn proxies(raw: &RawImage, bytes: &[u8], transform: &CameraTransform, size: usize) -> Option<(Rgb32f, Rgb32f, Vec<bool>)> {
     let edge = (2 * size).max(384) as u32;
     let decoded = crate::raw::decode_raw_preview(bytes, lightcraft_codecs::DecodeOptions { max_size: Some((edge, edge)), max_pixels: 64_000_000 })?;
     let mut reference = decoded.to_working();
@@ -509,7 +514,7 @@ const MIN_IMPROVEMENT: f64 = 0.7;
 /// cannot follow): visibly better renders that 0.055 rejected.
 const MAX_HOLDOUT_RMS: f64 = 0.10;
 
-fn luma(p: [f64; 3]) -> f64 {
+pub(crate) fn luma(p: [f64; 3]) -> f64 {
     p[0] * 0.2627 + p[1] * 0.6780 + p[2] * 0.0593
 }
 
@@ -1162,7 +1167,7 @@ const CHROMA_SHRINK: f64 = 2.0;
 /// The look's tone curve with a chroma-by-display-luminance curve fitted to `pairs` (two thirds
 /// train, one third held out), when that lowers the held-out error. Colourfulness is compared as
 /// the distance from neutral of luminance-normalised RGB.
-fn fit_chroma(pairs: &[([f64; 3], [f64; 3])], look: &CameraLook) -> Option<CameraTone> {
+pub(crate) fn fit_chroma(pairs: &[([f64; 3], [f64; 3])], look: &CameraLook) -> Option<CameraTone> {
     let correction = look.hue_sat.as_ref().and_then(HueSat::new);
     let scene = |x: &[f64; 3]| {
         let p = look.matrix.apply(*x);
@@ -1247,7 +1252,7 @@ impl ToneFit {
 /// The conditional medians then zig-zag, pooling turns them into flat steps (13 of 31 segments
 /// on a Z 6II forest, issue #475) that render as posterised patches, and regression toward the
 /// mean flattens both ends of the curve (lifted blacks, dull highlights).
-fn fit_tone(pairs: Vec<(f64, f64)>) -> Option<CameraTone> {
+pub(crate) fn fit_tone(pairs: Vec<(f64, f64)>) -> Option<CameraTone> {
     if pairs.len() < 128 || !pairs.iter().all(|(x, y)| x.is_finite() && *x > 0.0 && y.is_finite()) {
         return None;
     }
