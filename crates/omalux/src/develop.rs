@@ -3,7 +3,7 @@
 //! controls there are, their ranges and what they do are Lightcraft's
 //! (`lightcraft_develop::controls`).
 
-use egui::{Align2, FontId, Sense, Ui, pos2, vec2};
+use egui::{Align2, FontId, Sense, Ui, vec2};
 use lightcraft_develop::controls::{self, ControlSpec};
 use lightcraft_develop::{DevelopSettings, WbMode};
 use omalux_engine::auto::Auto;
@@ -13,33 +13,83 @@ use crate::hotkeys::{self, format_shortcut};
 use crate::slider::{SliderOut, slider};
 use crate::theme::Theme;
 
-/// The panels and their controls, top to bottom: the order `,` and `.`
-/// step through.
-const PANELS: &[(&str, &[&str])] = &[
-    ("White Balance", &["wb.temp", "wb.tint"]),
-    ("Light", &["light.exposure", "light.contrast", "light.highlights", "light.shadows", "light.whites", "light.blacks"]),
-    ("Presence", &["color.vibrance", "color.saturation"]),
-    ("Detail", &[
-        "detail.sharpenAmount",
-        "detail.sharpenRadius",
-        "detail.sharpenDetail",
-        "detail.sharpenMasking",
-        "detail.nrLuminance",
-        "detail.nrColor",
-    ]),
-    ("Lens Corrections", &[
-        "optics.defringePurple",
-        "optics.defringePurpleHueLo",
-        "optics.defringePurpleHueHi",
-        "optics.defringeGreen",
-        "optics.defringeGreenHueLo",
-        "optics.defringeGreenHueHi",
-    ]),
+/// A row of a panel.
+enum Row {
+    /// A slider, by its control's id, under Lightcraft's label.
+    Slider(&'static str),
+    /// A slider under Lightroom's name, where Lightcraft's label is
+    /// another (its Amount is "Sharpening", and two of its Detail
+    /// controls are both "Detail").
+    Named(&'static str, &'static str),
+    /// A heading inside a panel, as Lightroom's Detail has.
+    Sub(&'static str),
+    /// The Remove Chromatic Aberration checkbox.
+    RemoveCa,
+}
+
+use Row::{Named, RemoveCa, Slider, Sub};
+
+/// The panels and their rows, top to bottom: the order `,` and `.` step
+/// through the sliders in. Lightcraft's other noise-reduction controls
+/// aren't shown. Lightroom draws each of Defringe's hue ranges as one
+/// two-thumbed slider, which neither Lightcraft nor OmaLux has: they're
+/// two sliders each here, under Lightcraft's labels.
+const PANELS: &[(&str, &[Row])] = &[
+    ("White Balance", &[Slider("wb.temp"), Slider("wb.tint")]),
+    (
+        "Light",
+        &[
+            Slider("light.exposure"),
+            Slider("light.contrast"),
+            Slider("light.highlights"),
+            Slider("light.shadows"),
+            Slider("light.whites"),
+            Slider("light.blacks"),
+        ],
+    ),
+    ("Presence", &[Slider("color.vibrance"), Slider("color.saturation")]),
+    (
+        "Detail",
+        &[
+            Sub("Sharpening"),
+            Named("detail.sharpenAmount", "Amount"),
+            Slider("detail.sharpenRadius"),
+            Slider("detail.sharpenDetail"),
+            Slider("detail.sharpenMasking"),
+            Sub("Noise Reduction"),
+            Named("detail.nrLuminance", "Luminance"),
+            Named("detail.nrColor", "Color"),
+        ],
+    ),
+    (
+        "Lens Corrections",
+        &[
+            RemoveCa,
+            Sub("Defringe"),
+            Slider("optics.defringePurple"),
+            Slider("optics.defringePurpleHueLo"),
+            Slider("optics.defringePurpleHueHi"),
+            Slider("optics.defringeGreen"),
+            Slider("optics.defringeGreenHueLo"),
+            Slider("optics.defringeGreenHueHi"),
+        ],
+    ),
 ];
 
-/// Every slider's control, in order.
-pub fn sliders() -> impl Iterator<Item = &'static ControlSpec> {
-    PANELS.iter().flat_map(|(_, ids)| ids.iter()).filter_map(|id| controls::find(id))
+impl Row {
+    /// The row's control as it's shown, if it's a slider.
+    fn spec(&self) -> Option<ControlSpec> {
+        match self {
+            Slider(id) => controls::find(id).copied(),
+            Named(id, label) => controls::find(id).map(|spec| ControlSpec { label, ..*spec }),
+            Sub(_) | RemoveCa => None,
+        }
+    }
+}
+
+/// Every slider's control, in order, as it's shown.
+pub fn sliders() -> impl Iterator<Item = ControlSpec> {
+    PANELS.iter().flat_map(|(_, rows)| rows.iter()).filter_map(Row::spec)
 }
 
 /// What was done in the panel this frame.
@@ -63,33 +113,28 @@ pub fn heading(ui: &mut Ui, theme: &Theme, title: &str) -> egui::Rect {
     row
 }
 
+/// A heading inside a panel: smaller and dimmer than the panel's own.
 fn sub_heading(ui: &mut Ui, theme: &Theme, title: &str) {
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
     ui.painter().text(row.left_center() + vec2(4.0, 1.0), Align2::LEFT_CENTER, title, FontId::proportional(11.5), theme.muted);
 }
 
-fn action_tip(command: Command) -> String {
-    let how = hotkeys::current().command(command).map(|s| format!(" ({})", format_shortcut(&s))).unwrap_or_default();
-    format!("{}{how}", command.label())
+/// What a command's button says when it's hovered: its name and its key.
+fn tip(command: Command) -> String {
+    let key = hotkeys::current().command(command).map(|s| format!(" ({})", format_shortcut(&s))).unwrap_or_default();
+    format!("{}{key}", command.label())
 }
 
-fn header_button(ui: &mut Ui, right: &mut f32, y: f32, theme: &Theme, id_str: &str, text: &str, tip: &str) -> bool {
-    let colour = theme.foreground;
+/// A word to click at the right of a heading's row, ending at `right`,
+/// which it moves left of itself for the next. `clickable` or not, it
+/// takes its room.
+fn word(ui: &mut Ui, right: &mut egui::Pos2, text: &str, colour: egui::Color32, clickable: Option<&str>) -> bool {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(12.5), colour);
-    let rect = Align2::RIGHT_CENTER.anchor_size(pos2(*right, y), galley.size());
-    *right = rect.min.x - 8.0;
-    let response = ui.interact(rect.expand(3.0), ui.id().with(id_str), Sense::click());
+    let rect = Align2::RIGHT_CENTER.anchor_size(*right, galley.size());
+    right.x = rect.left() - 10.0;
     ui.painter().galley(rect.min, galley, colour);
-    response.on_hover_text(tip).clicked()
-}
-
-fn label_override(id: &str) -> Option<&'static str> {
-    match id {
-        "detail.sharpenAmount" => Some("Amount"),
-        "detail.nrLuminance" => Some("Luminance"),
-        "detail.nrColor" => Some("Color"),
-        _ => None,
-    }
+    let Some(hover) = clickable else { return false };
+    ui.interact(rect.expand(3.0), ui.id().with(text), Sense::click()).on_hover_text(hover).clicked()
 }
 
 /// The sliders showing `settings`. `fresh` is what a double-click resets
@@ -97,68 +142,52 @@ fn label_override(id: &str) -> Option<&'static str> {
 pub fn show(ui: &mut Ui, theme: &Theme, settings: &DevelopSettings, fresh: &DevelopSettings, selected: usize) -> PanelOut {
     let mut out = PanelOut::default();
     let mut index = 0;
-    for (title, ids) in PANELS {
+    for (title, rows) in PANELS {
         let row = heading(ui, theme, title);
-        let mut right = row.right() - 4.0;
-        let y = row.center().y + 2.0;
-        if *title == "White Balance" {
-            // Lightroom's "WB: As Shot": what the white balance is, and a
-            // click to put it back.
-            let as_shot = settings.wb.mode == WbMode::AsShot;
-            let (text, colour) = match settings.wb.mode {
-                WbMode::AsShot => ("As Shot", theme.dark_foreground),
-                WbMode::Auto => ("Auto", theme.foreground),
-                _ => ("Custom", theme.foreground),
-            };
-            let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(12.5), colour);
-            let rect = Align2::RIGHT_CENTER.anchor_size(pos2(right, y), galley.size());
-            right = rect.min.x - 8.0;
-            let response = ui.interact(rect.expand(3.0), ui.id().with("as shot"), if as_shot { Sense::hover() } else { Sense::click() });
-            ui.painter().galley(rect.min, galley, colour);
-            if !as_shot && response.on_hover_text("Back to As Shot").clicked() {
-                out.as_shot = true;
+        let mut right = row.right_center() + vec2(-4.0, 2.0);
+        match *title {
+            "White Balance" => {
+                // Lightroom's "WB: As Shot": what the white balance is, and
+                // a click to put it back; and Auto beside it.
+                out.as_shot = match settings.wb.mode {
+                    WbMode::AsShot => word(ui, &mut right, "As Shot", theme.dark_foreground, None),
+                    WbMode::Auto => word(ui, &mut right, "Auto", theme.foreground, Some("Back to As Shot")),
+                    _ => word(ui, &mut right, "Custom", theme.foreground, Some("Back to As Shot")),
+                };
+                if settings.wb.mode != WbMode::Auto && word(ui, &mut right, "Auto", theme.foreground, Some(&tip(Command::AutoWhiteBalance))) {
+                    out.auto = Some(Auto::WhiteBalance);
+                }
             }
-            if !matches!(settings.wb.mode, WbMode::Auto)
-                && header_button(ui, &mut right, y, theme, "wb auto", "Auto", &action_tip(Command::AutoWhiteBalance))
-            {
-                out.auto = Some(Auto::WhiteBalance);
+            "Light" => {
+                if word(ui, &mut right, "Auto Tone", theme.foreground, Some(&tip(Command::AutoTone))) {
+                    out.auto = Some(Auto::Tone);
+                }
+                if word(ui, &mut right, "Auto Exposure", theme.foreground, Some(&tip(Command::AutoExposure))) {
+                    out.auto = Some(Auto::Exposure);
+                }
             }
-        } else if *title == "Light" {
-            if header_button(ui, &mut right, y, theme, "auto tone", "Auto Tone", &action_tip(Command::AutoTone)) {
-                out.auto = Some(Auto::Tone);
-            }
-            if header_button(ui, &mut right, y, theme, "auto exposure", "Auto Exposure", &action_tip(Command::AutoExposure)) {
-                out.auto = Some(Auto::Exposure);
-            }
-        } else if *title == "Lens Corrections" {
-            let mut remove_ca = settings.optics.remove_ca;
-            let response = ui.checkbox(&mut remove_ca, "Remove Chromatic Aberration");
-            if response.changed() || response.clicked() {
-                out.remove_ca = Some(remove_ca);
-            }
+            _ => {}
         }
-        for id in *ids {
-            if *id == "detail.sharpenAmount" {
-                sub_heading(ui, theme, "Sharpening");
-            } else if *id == "detail.nrLuminance" {
-                sub_heading(ui, theme, "Noise Reduction");
-            } else if *id == "optics.defringePurple" {
-                // Lightroom draws each hue range as one two-thumbed slider, which
-                // neither Lightcraft nor OmaLux has.
-                sub_heading(ui, theme, "Defringe");
+        for row in *rows {
+            match row {
+                Sub(title) => sub_heading(ui, theme, title),
+                RemoveCa => {
+                    let mut on = settings.optics.remove_ca;
+                    if ui.checkbox(&mut on, "Remove Chromatic Aberration").changed() {
+                        out.remove_ca = Some(on);
+                    }
+                }
+                Slider(id) | Named(id, _) => {
+                    let Some(spec) = row.spec() else { continue };
+                    let value = controls::get(settings, id).unwrap_or(spec.default);
+                    let reset_to = controls::get(fresh, id).unwrap_or(spec.default);
+                    let slid = slider(ui, theme, &spec, value, reset_to, index == selected);
+                    if slid != SliderOut::default() {
+                        out.slider = Some((index, slid));
+                    }
+                    index += 1;
+                }
             }
-            let Some(spec) = controls::find(id) else { continue };
-            let mut spec = *spec;
-            if let Some(label) = label_override(spec.id) {
-                spec.label = label;
-            }
-            let value = controls::get(settings, id).unwrap_or(spec.default);
-            let reset_to = controls::get(fresh, id).unwrap_or(spec.default);
-            let slid = slider(ui, theme, &spec, value, reset_to, index == selected);
-            if slid != SliderOut::default() {
-                out.slider = Some((index, slid));
-            }
-            index += 1;
         }
         ui.add_space(6.0);
     }
@@ -173,8 +202,10 @@ mod tests {
     fn the_sliders_are_lightrooms_in_lightrooms_order() {
         let labels: Vec<&str> = sliders().map(|spec| spec.label).collect();
         assert_eq!(labels, [
-            "Temp", "Tint", "Exposure", "Contrast", "Highlights", "Shadows", "Whites", "Blacks", "Vibrance", "Saturation",
-            "Sharpening", "Radius", "Detail", "Masking", "Noise Reduction", "Color Noise Reduction",
+            "Temp", "Tint",
+            "Exposure", "Contrast", "Highlights", "Shadows", "Whites", "Blacks",
+            "Vibrance", "Saturation",
+            "Amount", "Radius", "Detail", "Masking", "Luminance", "Color",
             "Purple Amount", "Purple Hue Low", "Purple Hue High", "Green Amount", "Green Hue Low", "Green Hue High",
         ]);
     }

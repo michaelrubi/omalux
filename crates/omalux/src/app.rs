@@ -800,7 +800,7 @@ impl App {
         self.edit(|history, info| {
             let value = lightcraft_develop::controls::get(history.settings(), spec.id).unwrap_or(spec.default);
             history.set(|settings| {
-                edit::set_control(settings, info, spec.id, crate::slider::nudged(spec, value, steps));
+                edit::set_control(settings, info, spec.id, crate::slider::nudged(&spec, value, steps));
             })
         });
     }
@@ -1511,6 +1511,9 @@ mod tests {
         fn press(&mut self, modifiers: Modifiers, key: Key) -> egui::FullOutput {
             let mut events = key_events(modifiers, key, true);
             events.extend(key_events(modifiers, key, false));
+            // The modifiers are let go with the key: egui goes on taking
+            // them for held until it's told otherwise.
+            events.push(Event::ModifiersChanged(Modifiers::NONE));
             self.frame(events)
         }
 
@@ -3014,17 +3017,19 @@ mod tests {
         h.settle();
         let fresh = h.settings().clone();
 
-        // "Auto Tone" sets Whites and Blacks and nothing else; is one step to undo.
+        // "Auto Tone" sets Whites and Blacks and nothing else, in one step.
+        // Nothing clips in the tests' flat grey frame, so they're set to 0.
+        h.app.edit(|history, _| history.set(|settings| (settings.light.whites, settings.light.blacks, settings.light.contrast) = (30.0, -20.0, 10.0)));
+        let moved = h.settings().clone();
         let tone_btn = h.text("Auto Tone");
         h.click(tone_btn.center());
-        assert_eq!((h.settings().light.whites, h.settings().light.blacks), (100.0, -100.0));
-        assert_eq!(h.settings().light.exposure, fresh.light.exposure);
-        assert_eq!(h.settings().light.contrast, fresh.light.contrast);
-        assert_eq!(h.settings().light.highlights, fresh.light.highlights);
-        assert_eq!(h.settings().light.shadows, fresh.light.shadows);
+        assert_eq!((h.settings().light.whites, h.settings().light.blacks), (0.0, 0.0));
+        assert_eq!(h.settings().light.contrast, 10.0);
         assert_eq!(h.saved().as_ref(), Some(h.settings()));
         h.press(Modifiers::COMMAND, Key::Z);
-        assert_eq!(h.settings(), &fresh, "one step to undo Auto Tone");
+        assert_eq!(h.settings(), &moved, "one step to undo Auto Tone");
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh);
 
         // "Auto Exposure" sets Exposure and nothing else; is one step to undo.
         let exp_btn = h.text("Auto Exposure");
@@ -3078,14 +3083,16 @@ mod tests {
             h.frame(vec![]);
         }
 
-        // Shift+double-click on Whites' name sets Whites alone.
+        // Shift+double-click on Whites' name sets Whites alone: to 0, on
+        // a frame where nothing clips.
+        h.app.edit(|history, _| history.set(|settings| (settings.light.whites, settings.light.blacks) = (30.0, -20.0)));
         let whites_name = h.text("Whites");
         for _ in 0..2 {
             h.click_with(whites_name.center(), Modifiers::SHIFT);
         }
-        assert_eq!(h.settings().light.whites, 100.0);
-        assert_eq!(h.settings().light.blacks, fresh.light.blacks);
+        assert_eq!((h.settings().light.whites, h.settings().light.blacks), (0.0, -20.0));
         assert_eq!(h.settings().light.exposure, fresh.light.exposure);
+        h.press(Modifiers::COMMAND, Key::Z);
         h.press(Modifiers::COMMAND, Key::Z);
         assert_eq!(h.settings(), &fresh);
         for _ in 0..10 {
@@ -3681,7 +3688,9 @@ mod tests {
         h.press(Modifiers::NONE, Key::R);
 
         assert_eq!(h.settings().crop.geometry.angle, 0.0);
-        let auto = h.text("Auto");
+        // The crop panel's Auto, above White Balance's.
+        let output = h.frame(vec![]);
+        let auto = texts(&output).into_iter().filter(|(text, _)| text == "Auto").map(|(_, rect)| rect).min_by(|a, b| a.top().total_cmp(&b.top())).unwrap();
         h.click(auto.center());
 
         assert_eq!(h.settings().crop.geometry.angle, 0.0);
