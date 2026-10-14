@@ -2834,6 +2834,274 @@ mod tests {
     }
 
     #[test]
+    fn detail_and_lens_corrections_sliders_are_drawn_and_drag_changes_setting() {
+        let folder = Folder::new("detail-lens", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        // The panels and subheadings are drawn.
+        let _ = h.text("Sharpening");
+        let _ = h.text("Noise Reduction");
+        let _ = h.text("Defringe");
+
+        // Detail sliders labelled as Lightroom's.
+        let _ = h.text("Amount");
+        let _ = h.text("Radius");
+        let _ = h.text("Detail");
+        let _ = h.text("Masking");
+        let _ = h.text("Luminance");
+        let _ = h.text("Color");
+
+        // Lens Corrections sliders labelled under Lightcraft's own names.
+        let _ = h.text("Purple Amount");
+        let _ = h.text("Purple Hue Low");
+        let _ = h.text("Purple Hue High");
+        let _ = h.text("Green Amount");
+        let _ = h.text("Green Hue Low");
+        let _ = h.text("Green Hue High");
+
+        // A drag on Amount changes that setting, is one step to undo, and is saved.
+        assert_eq!(h.settings().detail.sharpen_amount, 40.0);
+        let track = h.track("detail.sharpenAmount");
+        h.pointer(track.center(), None);
+        h.pointer(track.center(), Some(true));
+        h.pointer(track.center() + egui::vec2(track.width() / 4.0, 0.0), None);
+        h.pointer(track.center() + egui::vec2(track.width() / 4.0, 0.0), Some(false));
+        let amount = h.settings().detail.sharpen_amount;
+        assert!(amount > 40.0);
+        assert_eq!(h.saved().map(|s| s.detail.sharpen_amount), Some(amount));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().detail.sharpen_amount, 40.0, "one step to undo");
+        assert_eq!(h.saved().map(|s| s.detail.sharpen_amount), Some(40.0));
+
+        // A drag on Luminance changes that setting, is one step to undo, and is saved.
+        assert_eq!(h.settings().detail.nr_luminance, 0.0);
+        let track = h.track("detail.nrLuminance");
+        h.pointer(track.center(), None);
+        h.pointer(track.center(), Some(true));
+        h.pointer(track.center() + egui::vec2(track.width() / 4.0, 0.0), None);
+        h.pointer(track.center() + egui::vec2(track.width() / 4.0, 0.0), Some(false));
+        let luma = h.settings().detail.nr_luminance;
+        assert!(luma > 0.0);
+        assert_eq!(h.saved().map(|s| s.detail.nr_luminance), Some(luma));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().detail.nr_luminance, 0.0, "one step to undo");
+        assert_eq!(h.saved().map(|s| s.detail.nr_luminance), Some(0.0));
+    }
+
+    #[test]
+    fn double_click_on_amount_resets_to_fresh_raw_value_of_40() {
+        let folder = Folder::new("reset-amount", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        assert_eq!(h.settings().detail.sharpen_amount, 40.0);
+        // Change Amount away from 40.
+        let track = h.track("detail.sharpenAmount");
+        h.pointer(track.center() + egui::vec2(20.0, 0.0), Some(true));
+        h.pointer(track.center() + egui::vec2(20.0, 0.0), Some(false));
+        assert_ne!(h.settings().detail.sharpen_amount, 40.0);
+
+        for _ in 0..10 {
+            h.frame(vec![]);
+        }
+
+        // A plain double-click goes back to the fresh raw's 40, not to 0.
+        for _ in 0..2 {
+            h.pointer(track.center(), Some(true));
+            h.pointer(track.center(), Some(false));
+        }
+        assert_eq!(h.settings().detail.sharpen_amount, 40.0);
+    }
+
+    #[test]
+    fn comma_and_period_step_through_sliders_and_equals_nudges() {
+        let folder = Folder::new("step-sliders", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        // Selected begins on Exposure (index 2).
+        assert_eq!(h.app.selected, 2);
+
+        // Step back to index 0 (Temp).
+        h.press(Modifiers::NONE, Key::Comma);
+        h.press(Modifiers::NONE, Key::Comma);
+        assert_eq!(h.app.selected, 0);
+
+        // Step forward through Light (2..7), Presence (8..9), to Amount in Detail (10).
+        for _ in 0..10 {
+            h.press(Modifiers::NONE, Key::Period);
+        }
+        assert_eq!(h.app.selected, 10);
+        assert_eq!(h.settings().detail.sharpen_amount, 40.0);
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(h.settings().detail.sharpen_amount, 41.0, "nudged Amount");
+
+        // Step forward to Luminance (index 14).
+        for _ in 0..4 {
+            h.press(Modifiers::NONE, Key::Period);
+        }
+        assert_eq!(h.app.selected, 14);
+        assert_eq!(h.settings().detail.nr_luminance, 0.0);
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(h.settings().detail.nr_luminance, 1.0, "nudged Luminance");
+
+        // Step forward to Purple Amount in Lens Corrections (index 16).
+        h.press(Modifiers::NONE, Key::Period);
+        h.press(Modifiers::NONE, Key::Period);
+        assert_eq!(h.app.selected, 16);
+        assert_eq!(h.settings().optics.defringe_purple_amount, 0.0);
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(h.settings().optics.defringe_purple_amount, 1.0, "nudged Purple Amount");
+
+        // Step back with comma.
+        h.press(Modifiers::NONE, Key::Comma);
+        assert_eq!(h.app.selected, 15);
+    }
+
+    #[test]
+    fn clicking_remove_chromatic_aberration_turns_on_saves_and_ctrl_z_turns_off() {
+        let folder = Folder::new("remove-ca", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        assert!(!h.settings().optics.remove_ca);
+        let ca_rect = h.text("Remove Chromatic Aberration");
+        h.click(ca_rect.center());
+        assert!(h.settings().optics.remove_ca);
+        assert_eq!(h.saved().map(|s| s.optics.remove_ca), Some(true));
+
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert!(!h.settings().optics.remove_ca, "Ctrl+Z turns it off");
+        assert_eq!(h.saved().map(|s| s.optics.remove_ca), Some(false));
+    }
+
+    #[test]
+    fn auto_in_white_balance_sets_auto_mode_and_clicking_returns_to_as_shot() {
+        use lightcraft_develop::WbMode;
+        let folder = Folder::new("wb-auto", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        assert_eq!(h.settings().wb.mode, WbMode::AsShot);
+        // Initially state word is "As Shot", and to its left is "Auto".
+        let auto_btn = h.text("Auto");
+        h.click(auto_btn.center());
+        assert_eq!(h.settings().wb.mode, WbMode::Auto);
+
+        // State word is now "Auto", clicking it goes back to As Shot.
+        let auto_state = h.text("Auto");
+        h.click(auto_state.center());
+        assert_eq!(h.settings().wb.mode, WbMode::AsShot);
+    }
+
+    #[test]
+    fn auto_tone_and_auto_exposure_buttons_set_only_their_settings() {
+        let folder = Folder::new("auto-buttons", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().clone();
+
+        // "Auto Tone" sets Whites and Blacks and nothing else; is one step to undo.
+        let tone_btn = h.text("Auto Tone");
+        h.click(tone_btn.center());
+        assert_eq!((h.settings().light.whites, h.settings().light.blacks), (100.0, -100.0));
+        assert_eq!(h.settings().light.exposure, fresh.light.exposure);
+        assert_eq!(h.settings().light.contrast, fresh.light.contrast);
+        assert_eq!(h.settings().light.highlights, fresh.light.highlights);
+        assert_eq!(h.settings().light.shadows, fresh.light.shadows);
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh, "one step to undo Auto Tone");
+
+        // "Auto Exposure" sets Exposure and nothing else; is one step to undo.
+        let exp_btn = h.text("Auto Exposure");
+        h.click(exp_btn.center());
+        assert_ne!(h.settings().light.exposure, 0.0);
+        assert_eq!(h.settings().light.whites, fresh.light.whites);
+        assert_eq!(h.settings().light.blacks, fresh.light.blacks);
+        assert_eq!(h.settings().light.contrast, fresh.light.contrast);
+        assert_eq!(h.settings().light.highlights, fresh.light.highlights);
+        assert_eq!(h.settings().light.shadows, fresh.light.shadows);
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh, "one step to undo Auto Exposure");
+    }
+
+    #[test]
+    fn shift_double_click_sets_control_alone_or_shows_no_automatic_value() {
+        let folder = Folder::new("shift-dc", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().clone();
+
+        // Shift+double-click on Exposure's name sets Exposure alone.
+        let exp_name = h.text("Exposure");
+        for _ in 0..2 {
+            h.click_with(exp_name.center(), Modifiers::SHIFT);
+        }
+        assert_ne!(h.settings().light.exposure, fresh.light.exposure);
+        assert_eq!(h.settings().light.contrast, fresh.light.contrast);
+        assert_eq!(h.settings().light.highlights, fresh.light.highlights);
+        assert_eq!(h.settings().light.shadows, fresh.light.shadows);
+        assert_eq!(h.settings().light.whites, fresh.light.whites);
+        assert_eq!(h.settings().light.blacks, fresh.light.blacks);
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh);
+        for _ in 0..10 {
+            h.frame(vec![]);
+        }
+
+        // Shift+double-click on Exposure's thumb also sets Exposure alone.
+        let track = h.track("light.exposure");
+        for _ in 0..2 {
+            h.click_with(track.center(), Modifiers::SHIFT);
+        }
+        assert_ne!(h.settings().light.exposure, fresh.light.exposure);
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh);
+        for _ in 0..10 {
+            h.frame(vec![]);
+        }
+
+        // Shift+double-click on Whites' name sets Whites alone.
+        let whites_name = h.text("Whites");
+        for _ in 0..2 {
+            h.click_with(whites_name.center(), Modifiers::SHIFT);
+        }
+        assert_eq!(h.settings().light.whites, 100.0);
+        assert_eq!(h.settings().light.blacks, fresh.light.blacks);
+        assert_eq!(h.settings().light.exposure, fresh.light.exposure);
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh);
+        for _ in 0..10 {
+            h.frame(vec![]);
+        }
+
+        // Shift+double-click on Amount changes nothing and status bar says no automatic value.
+        let amount_name = h.text("Amount");
+        for _ in 0..2 {
+            h.click_with(amount_name.center(), Modifiers::SHIFT);
+        }
+        assert_eq!(h.settings(), &fresh);
+        assert_eq!(h.said(), "There's no automatic value for that slider");
+    }
+
+    #[test]
     fn the_app_runs_with_no_monitor_found() {
         let mut h = Harness::new(&[]);
         h.frame(vec![]);

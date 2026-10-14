@@ -171,6 +171,16 @@ pub fn slider(ui: &mut Ui, theme: &Theme, spec: &ControlSpec, value: f64, reset_
     let font = FontId::proportional(12.5);
     let text_color = if selected { theme.accent } else { theme.foreground };
 
+    let shift_held = ui.input(|i| {
+        i.events
+            .iter()
+            .find_map(|e| match e {
+                egui::Event::PointerButton { modifiers, .. } => Some(modifiers.shift),
+                _ => None,
+            })
+            .unwrap_or(i.modifiers.shift)
+    });
+
     if let Some(mut text) = typing.take() {
         let mut child = ui.new_child(UiBuilder::new().max_rect(value_rect).layout(Layout::right_to_left(egui::Align::Center)));
         let edit = egui::TextEdit::singleline(&mut text)
@@ -206,13 +216,17 @@ pub fn slider(ui: &mut Ui, theme: &Theme, spec: &ControlSpec, value: f64, reset_
             ui.data_mut(|m| m.insert_temp(typing_id, text));
         }
     } else if response.double_clicked() || label_response.double_clicked() {
-        out = SliderOut { value: Some(reset_to), drag_started: true, drag_stopped: true, touched: true, auto: false };
+        if shift_held {
+            out = SliderOut { touched: true, auto: true, ..SliderOut::default() };
+        } else {
+            out = SliderOut { value: Some(reset_to), drag_started: true, drag_stopped: true, touched: true, auto: false };
+        }
     } else if (response.dragged() || response.drag_started())
         && let Some(pointer) = response.interact_pointer_pos()
     {
         out.drag_started = response.drag_started();
         // Shift: a tenth of the pointer's movement.
-        let to = if ui.input(|i| i.modifiers.shift) {
+        let to = if shift_held {
             let moved = f64::from(ui.input(|i| i.pointer.delta().x) / track.width()) * 0.1;
             value_at(spec, position(spec, value) + moved)
         } else {
@@ -237,7 +251,9 @@ pub fn slider(ui: &mut Ui, theme: &Theme, spec: &ControlSpec, value: f64, reset_
             }
         }
     }
-    out.drag_stopped |= response.drag_stopped();
+    if !out.auto {
+        out.drag_stopped |= response.drag_stopped();
+    }
     if out.value.is_some_and(|to| (to - value).abs() < 1e-12) {
         out.value = None;
     }
