@@ -596,9 +596,11 @@ its own. None of it tried by hand yet.
 - More control of HDR: Highlights and Shadows under its Amount. *Done:*
   shown always, not behind a toggle.
 - Right-click menus on the frame and the filmstrip, each item with its
-  key. *Antigravity's branch.*
+  key. *Done:* a right-click in the filmstrip goes to the frame first,
+  keeping the selection if the frame is in it, as Lightroom does.
 - The keys' legend on Ctrl+/ (Lightroom's Develop Shortcuts), showing
-  the keys in use, rebindings and all. *Antigravity's branch.*
+  the keys in use, rebindings and all. *Done*, with the clicks and the
+  crop tool's keys that aren't commands.
 
 ## M6. AI Denoise
 
