@@ -27,9 +27,12 @@ enum Row {
     Sub(&'static str),
     /// The Remove Chromatic Aberration checkbox.
     RemoveCa,
+    /// The Enable Profile Corrections checkbox, and the lens the profile
+    /// is for.
+    ProfileCorrections,
 }
 
-use Row::{Named, RemoveCa, Slider, Sub};
+use Row::{Named, ProfileCorrections, RemoveCa, Slider, Sub};
 
 /// The panels and their rows, top to bottom: the order `,` and `.` step
 /// through the sliders in. Lightcraft's other noise-reduction controls
@@ -70,6 +73,10 @@ const PANELS: &[(&str, &[Row])] = &[
         "Lens Corrections",
         &[
             RemoveCa,
+            ProfileCorrections,
+            Sub("Amount"),
+            Named("optics.profileDistortion", "Distortion"),
+            Named("optics.profileVignetting", "Vignetting"),
             Sub("Defringe"),
             Slider("optics.defringePurple"),
             Slider("optics.defringePurpleHueLo"),
@@ -87,7 +94,7 @@ impl Row {
         match self {
             Slider(id) => controls::find(id).copied(),
             Named(id, label) => controls::find(id).map(|spec| ControlSpec { label, ..*spec }),
-            Sub(_) | RemoveCa => None,
+            Sub(_) | RemoveCa | ProfileCorrections => None,
         }
     }
 }
@@ -111,6 +118,8 @@ pub struct PanelOut {
     pub auto: Option<Auto>,
     /// Remove Chromatic Aberration was ticked, or unticked.
     pub remove_ca: Option<bool>,
+    /// Enable Profile Corrections was ticked, or unticked.
+    pub lens_profile: Option<bool>,
 }
 
 /// A panel's title, and the row it's in, for what goes at its right.
@@ -193,6 +202,17 @@ pub fn show(ui: &mut Ui, theme: &Theme, settings: &DevelopSettings, fresh: &Deve
                         out.remove_ca = Some(on);
                     }
                 }
+                ProfileCorrections => {
+                    let mut on = settings.optics.lens_profile;
+                    if ui.checkbox(&mut on, "Enable Profile Corrections").changed() {
+                        out.lens_profile = Some(on);
+                    }
+                    // Lightroom's Lens Profile: which lens it found, or that
+                    // it found none (and the checkbox does nothing).
+                    let lens = camera.lens.as_deref().unwrap_or("No profile for this lens");
+                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+                    ui.painter().text(row.left_center() + vec2(4.0, 1.0), Align2::LEFT_CENTER, lens, FontId::proportional(11.5), theme.muted);
+                }
                 Slider(id) | Named(id, _) => {
                     let Some(spec) = row.spec() else { continue };
                     let value = controls::get(settings, id).unwrap_or(spec.default);
@@ -223,6 +243,7 @@ mod tests {
             "Amount",
             "Vibrance", "Saturation",
             "Amount", "Radius", "Detail", "Masking", "Luminance", "Color",
+            "Distortion", "Vignetting",
             "Purple Amount", "Purple Hue Low", "Purple Hue High", "Green Amount", "Green Hue Low", "Green Hue High",
         ]);
     }

@@ -114,26 +114,43 @@ pub struct Camera {
 }
 
 /// A fresh raw's settings, white balance as shot: Lightcraft's raw
-/// defaults under Camera match.
+/// defaults under Camera match, with the lens profile's corrections on.
 pub fn fresh(as_shot_temp: f64, as_shot_tint: f64) -> DevelopSettings {
     let mut settings = DevelopSettings::for_raw(as_shot_temp, as_shot_tint);
     Profile::Camera.set(&mut settings);
+    settings.optics.lens_profile = true;
     settings
 }
 
+/// Whether the lens profile `info` has corrects lateral chromatic
+/// aberration (its colour planes are warped apart), under `settings`.
+fn profile_corrects_ca(settings: &DevelopSettings, info: &SourceInfo) -> bool {
+    fn apart<T: PartialEq>(planes: &[T; 3]) -> bool {
+        planes[0] != planes[1] || planes[1] != planes[2]
+    }
+    settings.optics.lens_profile
+        && settings.optics.profile_distortion > 0.0
+        && info.lens.is_some_and(|lens| lens.warp.is_some_and(|warp| apart(&warp.planes)) || lens.stages.iter().flatten().any(|stage| apart(&stage.planes)))
+}
+
 /// What the pipeline is handed to render `settings`: the profile's part
-/// and HDR folded in under the sliders, which show what they did.
+/// and HDR folded in under the sliders, which show what they did; and
+/// Remove Chromatic Aberration's estimate left out where the lens profile
+/// corrects the lateral CA itself, as M5 has it (the estimate is made on
+/// the uncorrected picture, so the two would add up).
 pub fn effective<'a>(settings: &'a DevelopSettings, info: &'a SourceInfo, camera: &Camera) -> (Cow<'a, DevelopSettings>, Cow<'a, SourceInfo>) {
     let profile = Profile::of(settings);
     let lift = if profile == Profile::Camera { camera.lift } else { 0.0 };
     let hdr = settings.light.hdr.clamp(0.0, 100.0);
-    let settings = if lift == 0.0 && hdr == 0.0 {
+    let ca = settings.optics.remove_ca && profile_corrects_ca(settings, info);
+    let settings = if lift == 0.0 && hdr == 0.0 && !ca {
         Cow::Borrowed(settings)
     } else {
         let mut folded = settings.clone();
         folded.light.shadows += lift + hdr * HDR_SHADOWS;
         folded.light.highlights -= hdr * HDR_HIGHLIGHTS;
         folded.light.hdr = 0.0;
+        folded.optics.remove_ca &= !ca;
         Cow::Owned(folded)
     };
     // Flat keeps the pipeline's own curve for raws, whose shoulder never
@@ -207,6 +224,24 @@ mod tests {
         assert_eq!((folded.light.highlights, folded.light.shadows, folded.light.hdr), (-130.0, 110.0, 0.0));
         settings.light.hdr = 0.0;
         assert!(matches!(effective(&settings, &info, &Camera::default()).0, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn a_lens_profile_with_lateral_ca_takes_over_from_the_estimate() {
+        use lightcraft_develop::{EmbeddedLens, EmbeddedWarp};
+        let plane = [1.0, -0.01, 0.0, 0.0, 0.0, 0.0];
+        let warp = |red: f64| EmbeddedWarp { planes: [[red, -0.01, 0.0, 0.0, 0.0, 0.0], plane, plane], center: lightcraft_geom::Point::new(0.5, 0.5), radius: 0.6 };
+        let lens = |red| SourceInfo { lens: Some(EmbeddedLens { warp: Some(warp(red)), ..EmbeddedLens::default() }), ..SourceInfo::default() };
+        let mut settings = fresh(5200.0, 3.0);
+        assert!(settings.optics.lens_profile, "a fresh raw has its profile's corrections on");
+        settings.optics.remove_ca = true;
+        let removed = |settings: &DevelopSettings, info: &SourceInfo| effective(settings, info, &Camera::default()).0.optics.remove_ca;
+        assert!(!removed(&settings, &lens(1.001)), "the profile's lateral CA, not the estimate's");
+        assert!(settings.optics.remove_ca, "the checkbox shows what was asked");
+        assert!(removed(&settings, &lens(1.0)), "a profile without lateral CA leaves the estimate");
+        assert!(removed(&settings, &SourceInfo::default()), "no profile, the estimate");
+        settings.optics.lens_profile = false;
+        assert!(removed(&settings, &lens(1.001)), "the profile off, the estimate");
     }
 
     #[test]

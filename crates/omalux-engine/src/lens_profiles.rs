@@ -56,8 +56,36 @@ pub fn lookup(db: &LensDb, m: &lightcraft_meta::Metadata, w: f64, h: f64, orient
     let crop =
         camera.map(|c| c.crop_factor).or_else(|| m.focal_length_35mm.map(|f35| f35 / focal).filter(|c| c.is_finite() && (0.1..=20.0).contains(c)));
     let shot = Shot { focal, aperture: m.f_number, distance: None, crop_factor: crop, width: w, height: h };
-    let corr = lens.correction(&shot)?;
+    let mut corr = lens.correction(&shot)?;
+    fill(&mut corr, w, h);
     Some(lightcraft_pipeline::optics::reorient_lens(&corr, orientation, w, h))
+}
+
+/// Enlarge the picture under `lens`'s warp, for its `w × h` image, until it fills the frame, as Lightroom's profile
+/// correction does: correcting pincushion distortion pulls the edges in, and would leave the corners empty. (Sony's
+/// tables come with that zoom already: [`crate::sony_lens`].) The warp is radial about its centre, so scaling it is
+/// scaling where every output pixel samples from, about that centre.
+fn fill(lens: &mut EmbeddedLens, w: f64, h: f64) {
+    const STEPS: usize = 64;
+    let Some(warp) = lens.warp.as_mut() else { return };
+    let (cx, cy) = (warp.center.x * w, warp.center.y * h);
+    // how far along the ray from the centre a sample at offset d may go and stay on the picture
+    let room = |d: f64, centre: f64, size: f64| if d > 1e-9 { (size - 0.5 - centre) / d } else if d < -1e-9 { (0.5 - centre) / d } else { f64::INFINITY };
+    let mut zoom: f64 = 1.0;
+    for i in 0..=STEPS {
+        let t = i as f64 / STEPS as f64;
+        for (x, y) in [(t * w, 0.0), (t * w, h), (0.0, t * h), (w, t * h)] {
+            for ch in 0..3 {
+                let s = lightcraft_pipeline::optics::embedded_warp(warp, lightcraft_geom::Point::new(x, y), ch, w, h);
+                zoom = zoom.min(room(s.x - cx, cx, w)).min(room(s.y - cy, cy, h));
+            }
+        }
+    }
+    if zoom.is_finite() && zoom > 0.0 {
+        for plane in &mut warp.planes {
+            plane[..4].iter_mut().for_each(|k| *k *= zoom);
+        }
+    }
 }
 
 /// Where a frame's profile correction comes from.
@@ -142,6 +170,25 @@ mod tests {
         assert!(lookup(&db, &lightcraft_meta::Metadata { focal_length: None, ..meta() }, 6000.0, 4000.0, Orientation::Normal).is_none());
         let other = lightcraft_meta::Metadata { lens_model: Some("70-200mm F4".into()), ..meta() };
         assert!(lookup(&db, &other, 6000.0, 4000.0, Orientation::Normal).is_none());
+    }
+
+    /// Correcting pincushion distortion pulls the edges in: the picture is enlarged until every output pixel
+    /// samples the picture, and no more than that. Barrel distortion's correction needs nothing.
+    #[test]
+    fn a_pincushion_correction_fills_the_frame() {
+        let pincushion = DB.replace("k1=\"-0.03\"", "k1=\"0.03\"");
+        let (w, h) = (6000.0, 4000.0);
+        let corner = |db: &str| {
+            let lens = lookup(&LensDb::parse(db).unwrap(), &meta(), w, h, Orientation::Normal).unwrap();
+            (0..3).map(|ch| lightcraft_pipeline::optics::embedded_warp(&lens.warp.unwrap(), lightcraft_geom::Point::new(0.0, 0.0), ch, w, h)).collect::<Vec<_>>()
+        };
+        for s in corner(&pincushion) {
+            assert!(s.x >= 0.5 && s.y >= 0.5 && (s.x < 3.0 || s.y < 3.0), "the corner samples the picture's corner: {s:?}");
+        }
+        let unscaled = LensDb::parse(DB).unwrap().lenses[0].correction(&Shot { focal: 18.0, aperture: Some(3.5), distance: None, crop_factor: Some(1.5), width: w, height: h }).unwrap();
+        let scaled = lookup(&LensDb::parse(DB).unwrap(), &meta(), w, h, Orientation::Normal).unwrap().warp.unwrap().planes[1][0];
+        let zoom = scaled / unscaled.warp.unwrap().planes[1][0];
+        assert!((0.999..=1.0).contains(&zoom), "barrel: as it was, but for the half pixel kept in: {zoom}");
     }
 
     /// A synthetic grid recorded through the profile's barrel distortion comes out of the pipeline's geometry
