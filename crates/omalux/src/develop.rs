@@ -1,12 +1,14 @@
 //! The develop panel's sliders, in Lightroom's order under Lightroom's
-//! names: White Balance, Light, Presence, Detail, Lens Corrections. Which
-//! controls there are, their ranges and what they do are Lightcraft's
-//! (`lightcraft_develop::controls`).
+//! names: the Profile, White Balance, Light, HDR, Presence, Detail, Lens
+//! Corrections. Which controls there are, their ranges and what they do
+//! are Lightcraft's (`lightcraft_develop::controls`), all but HDR, which
+//! is OmaLux's (`omalux_engine::look`).
 
 use egui::{Align2, FontId, Sense, Ui, vec2};
 use lightcraft_develop::controls::{self, ControlSpec};
 use lightcraft_develop::{DevelopSettings, WbMode};
 use omalux_engine::auto::Auto;
+use omalux_engine::look::{Camera, Profile};
 
 use crate::commands::Command;
 use crate::hotkeys::{self, format_shortcut};
@@ -35,6 +37,8 @@ use Row::{Named, RemoveCa, Slider, Sub};
 /// two-thumbed slider, which neither Lightcraft nor OmaLux has: they're
 /// two sliders each here, under Lightcraft's labels.
 const PANELS: &[(&str, &[Row])] = &[
+    // Where Lightroom's Basic panel has it: above the white balance.
+    ("Profile", &[]),
     ("White Balance", &[Slider("wb.temp"), Slider("wb.tint")]),
     (
         "Light",
@@ -47,6 +51,7 @@ const PANELS: &[(&str, &[Row])] = &[
             Slider("light.blacks"),
         ],
     ),
+    ("HDR", &[Named("light.hdr", "Amount")]),
     ("Presence", &[Slider("color.vibrance"), Slider("color.saturation")]),
     (
         "Detail",
@@ -98,6 +103,8 @@ pub struct PanelOut {
     /// The slider touched, by its place in [`sliders`], and what happened
     /// to it.
     pub slider: Option<(usize, SliderOut)>,
+    /// The profile was clicked: the one to go to.
+    pub profile: Option<Profile>,
     /// As Shot was clicked.
     pub as_shot: bool,
     /// An Auto button was clicked.
@@ -138,14 +145,23 @@ fn word(ui: &mut Ui, right: &mut egui::Pos2, text: &str, colour: egui::Color32, 
 }
 
 /// The sliders showing `settings`. `fresh` is what a double-click resets
-/// each to; `selected` is the slider the keys act on.
-pub fn show(ui: &mut Ui, theme: &Theme, settings: &DevelopSettings, fresh: &DevelopSettings, selected: usize) -> PanelOut {
+/// each to; `selected` is the slider the keys act on; `camera` is what
+/// the frame's camera did, which names its profile.
+pub fn show(ui: &mut Ui, theme: &Theme, settings: &DevelopSettings, fresh: &DevelopSettings, selected: usize, camera: &Camera) -> PanelOut {
     let mut out = PanelOut::default();
     let mut index = 0;
     for (title, rows) in PANELS {
         let row = heading(ui, theme, title);
         let mut right = row.right_center() + vec2(-4.0, 2.0);
         match *title {
+            "Profile" => {
+                // Lightroom's "Profile: Camera Standard", with a click
+                // where it has a menu: there are two to choose from.
+                let profile = Profile::of(settings);
+                if word(ui, &mut right, &profile.label(camera), theme.foreground, Some(&tip(Command::Flat))) {
+                    out.profile = Some(profile.toggled());
+                }
+            }
             "White Balance" => {
                 // Lightroom's "WB: As Shot": what the white balance is, and
                 // a click to put it back; and Auto beside it.
@@ -204,6 +220,7 @@ mod tests {
         assert_eq!(labels, [
             "Temp", "Tint",
             "Exposure", "Contrast", "Highlights", "Shadows", "Whites", "Blacks",
+            "Amount",
             "Vibrance", "Saturation",
             "Amount", "Radius", "Detail", "Masking", "Luminance", "Color",
             "Purple Amount", "Purple Hue Low", "Purple Hue High", "Green Amount", "Green Hue Low", "Green Hue High",

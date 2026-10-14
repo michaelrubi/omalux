@@ -39,7 +39,12 @@ pub const REJECT: i32 = -1;
 /// whenever the same settings would render differently (a re-sync of
 /// Lightcraft that changes a reference render, a changed stage), so an
 /// edit made before renders as it did, or says it can't.
-pub const PROCESS_VERSION: u32 = 1;
+///
+/// 1: M1 to M3. A frame's look is fitted to its own JPEG.
+/// 2: M4. The profile is a setting (Camera match with DRO's lift, or
+/// Flat), and there's HDR. An edit from 1 has neither, and keeps its
+/// fitted look ([`crate::look::Profile::Fitted`]): it renders as it did.
+pub const PROCESS_VERSION: u32 = 2;
 
 /// The `omalux:` namespace.
 pub const NAMESPACE: &str = "https://github.com/michaelrubi/omalux/xmp/1.0/";
@@ -363,8 +368,12 @@ mod tests {
         assert_eq!(edit(DARKTABLE).unwrap(), None);
         assert_eq!(edit(&empty()).unwrap(), None);
         let after = with_edit(DARKTABLE, &edited()).unwrap();
-        let newer = after.replace(">1</omalux:processVersion>", ">2</omalux:processVersion>");
+        let version = format!(">{PROCESS_VERSION}</omalux:processVersion>");
+        let newer = after.replace(&version, ">99</omalux:processVersion>");
         assert!(edit(&newer).unwrap_err().to_string().contains("newer OmaLux"));
+        // One made before is read, and is what it was.
+        let older = edit(&after.replace(&version, ">1</omalux:processVersion>")).unwrap().unwrap();
+        assert_eq!((older.process, older.settings), (1, edited().settings));
         let broken = after.replace("<omalux:settings>{", "<omalux:settings>[");
         assert!(edit(&broken).is_err());
         assert!(with_edit("not xml at all", &edited()).is_err());

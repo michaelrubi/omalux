@@ -69,6 +69,12 @@ impl Profile {
         };
     }
 
+    /// What the Flat key goes to from here: Flat, and from Flat back to
+    /// Camera match.
+    pub fn toggled(self) -> Profile {
+        if self == Profile::Flat { Profile::Camera } else { Profile::Flat }
+    }
+
     /// Whether the raw is developed with the look fitted to its own JPEG.
     /// Camera match and Flat share a development: they differ in what
     /// [`effective`] does, so going from one to the other decodes nothing.
@@ -206,5 +212,6 @@ mod tests {
         assert_eq!(Profile::Camera.label(&camera), "Camera Standard");
         assert_eq!(Profile::Camera.label(&Camera::default()), "Camera match");
         assert_eq!(Profile::Flat.label(&camera), "Flat");
+        assert_eq!([Profile::Camera, Profile::Flat, Profile::Fitted].map(Profile::toggled), [Profile::Flat, Profile::Camera, Profile::Flat]);
     }
 }

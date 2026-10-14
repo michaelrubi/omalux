@@ -415,6 +415,13 @@ impl State {
         if self.view.size.0 == 0 || self.view.size.1 == 0 {
             return None;
         }
+        // The current frame's render comes first: a neighbour that was
+        // decoded sooner waits for it.
+        let current = self.wanted.first()?;
+        let decoded = self.sources.get(&current.path).is_some_and(|source| source.suits(current));
+        if !decoded && !self.failed.contains(&current.path) {
+            return None;
+        }
         self.wanted.iter().enumerate().find_map(|(index, frame)| {
             let source = self.sources.get(&frame.path).filter(|source| source.suits(frame))?;
             let settings = frame.settings.clone().unwrap_or_else(|| source.fresh());

@@ -17,7 +17,7 @@ use omalux_engine::copy::{Copied, Group};
 use omalux_engine::crop;
 use omalux_engine::disk::{Disk, Mark, Problem};
 use omalux_engine::edit::{self, History};
-use omalux_engine::look::{self, Camera};
+use omalux_engine::look::{self, Camera, Profile};
 use omalux_engine::shoot::{Filter, Shoot, Step, stars};
 use omalux_engine::sidecar;
 
@@ -545,6 +545,7 @@ impl App {
             Command::AutoWhiteBalance => self.auto(Auto::WhiteBalance),
             Command::AutoExposure => self.auto(Auto::Exposure),
             Command::AutoLevel => self.auto(Auto::Level),
+            Command::Flat => self.edit(|history, _| history.set(|settings| Profile::of(settings).toggled().set(settings))),
             Command::SelectAll => {
                 if let Some(shoot) = &mut self.shoot {
                     shoot.select_all();
@@ -886,6 +887,9 @@ impl App {
 
     /// What was done in the develop panel.
     fn panel(&mut self, out: PanelOut) {
+        if let Some(profile) = out.profile {
+            self.edit(|history, _| history.set(|settings| profile.set(settings)));
+        }
         if out.as_shot {
             self.edit(|history, info| history.set(|settings| edit::as_shot(settings, info)));
         }
@@ -1195,7 +1199,7 @@ impl App {
         let (cropped, out) = scroll
             .show(ui, |ui| {
                 let cropped = dims.map(|dims| crop_panel::show(ui, &self.theme, settings, dims, self.crop_locked));
-                (cropped, develop::show(ui, &self.theme, settings, fresh, self.selected))
+                (cropped, develop::show(ui, &self.theme, settings, fresh, self.selected, &editing.camera))
             })
             .inner;
         if let Some(cropped) = cropped {
@@ -2157,7 +2161,7 @@ mod tests {
         edited.light.exposure = 0.7;
         sidecar::update(&raw, |xmp| {
             let with = sidecar::with_edit(xmp, &sidecar::Edit::new(edited.clone()))?;
-            Ok(with.replace(">1</omalux:processVersion>", ">99</omalux:processVersion>"))
+            Ok(with.replace(&format!(">{}</omalux:processVersion>", sidecar::PROCESS_VERSION), ">99</omalux:processVersion>"))
         })
         .unwrap();
         let newer = std::fs::read_to_string(sidecar::path_for(&raw)).unwrap();
@@ -2346,7 +2350,7 @@ mod tests {
         let raw = folder.0.join("DSC00004.ARW");
         sidecar::update(&raw, |xmp| {
             let with = sidecar::with_edit(xmp, &sidecar::Edit::new(look::fresh(5200.0, 3.0)))?;
-            Ok(with.replace(">1</omalux:processVersion>", ">99</omalux:processVersion>"))
+            Ok(with.replace(&format!(">{}</omalux:processVersion>", sidecar::PROCESS_VERSION), ">99</omalux:processVersion>"))
         })
         .unwrap();
         let newer = std::fs::read_to_string(sidecar::path_for(&raw)).unwrap();
@@ -2944,35 +2948,35 @@ mod tests {
         h.press(Modifiers::NONE, Key::Comma);
         assert_eq!(h.app.selected, 0);
 
-        // Step forward through Light (2..7), Presence (8..9), to Amount in Detail (10).
-        for _ in 0..10 {
+        // Step forward through Light (2..7), HDR (8), Presence (9..10), to Amount in Detail (11).
+        for _ in 0..11 {
             h.press(Modifiers::NONE, Key::Period);
         }
-        assert_eq!(h.app.selected, 10);
+        assert_eq!(h.app.selected, 11);
         assert_eq!(h.settings().detail.sharpen_amount, 40.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().detail.sharpen_amount, 41.0, "nudged Amount");
 
-        // Step forward to Luminance (index 14).
+        // Step forward to Luminance (index 15).
         for _ in 0..4 {
             h.press(Modifiers::NONE, Key::Period);
         }
-        assert_eq!(h.app.selected, 14);
+        assert_eq!(h.app.selected, 15);
         assert_eq!(h.settings().detail.nr_luminance, 0.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().detail.nr_luminance, 1.0, "nudged Luminance");
 
-        // Step forward to Purple Amount in Lens Corrections (index 16).
+        // Step forward to Purple Amount in Lens Corrections (index 17).
         h.press(Modifiers::NONE, Key::Period);
         h.press(Modifiers::NONE, Key::Period);
-        assert_eq!(h.app.selected, 16);
+        assert_eq!(h.app.selected, 17);
         assert_eq!(h.settings().optics.defringe_purple_amount, 0.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().optics.defringe_purple_amount, 1.0, "nudged Purple Amount");
 
         // Step back with comma.
         h.press(Modifiers::NONE, Key::Comma);
-        assert_eq!(h.app.selected, 15);
+        assert_eq!(h.app.selected, 16);
     }
 
     #[test]
@@ -2992,6 +2996,81 @@ mod tests {
         h.press(Modifiers::COMMAND, Key::Z);
         assert!(!h.settings().optics.remove_ca, "Ctrl+Z turns it off");
         assert_eq!(h.saved().map(|s| s.optics.remove_ca), Some(false));
+    }
+
+    #[test]
+    fn f_goes_to_flat_and_back_to_camera_match_and_so_does_a_click_on_the_profile() {
+        let folder = Folder::new("flat", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        assert_eq!(Profile::of(h.settings()), Profile::Camera, "a fresh raw opens under Camera match");
+        assert_eq!(h.saved(), None);
+        h.press(Modifiers::NONE, Key::F);
+        assert_eq!(Profile::of(h.settings()), Profile::Flat);
+        assert_eq!(h.saved().as_ref().map(Profile::of), Some(Profile::Flat), "it's part of the edit");
+        h.press(Modifiers::NONE, Key::F);
+        assert_eq!(Profile::of(h.settings()), Profile::Camera);
+
+        // The panel names the profile after the camera's Creative Style, and a click swaps it.
+        let named = h.text("Camera Standard");
+        h.click(named.center());
+        assert_eq!(Profile::of(h.settings()), Profile::Flat);
+        let flat = h.text("Flat");
+        h.click(flat.center());
+        assert_eq!(Profile::of(h.settings()), Profile::Camera);
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(Profile::of(h.settings()), Profile::Flat, "each is a step");
+    }
+
+    #[test]
+    fn an_edit_from_before_keeps_its_fitted_look_until_its_profile_is_changed() {
+        let folder = Folder::new("fitted", &[1]);
+        let raw = folder.0.join("DSC00001.ARW");
+        // As M1 to M3 saved an edit: Lightcraft's own profile id, process version 1.
+        let mut before = DevelopSettings::for_raw(5200.0, 3.0);
+        before.light.exposure = 0.5;
+        sidecar::update(&raw, |xmp| {
+            let with = sidecar::with_edit(xmp, &sidecar::Edit::new(before.clone()))?;
+            Ok(with.replace(&format!(">{}</omalux:processVersion>", sidecar::PROCESS_VERSION), ">1</omalux:processVersion>"))
+        })
+        .unwrap();
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        assert_eq!(h.settings(), &before);
+        assert_eq!(Profile::of(h.settings()), Profile::Fitted);
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(Profile::of(h.settings()), Profile::Fitted, "an edit to it leaves its look alone");
+        // Reset is a fresh raw: Camera match.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::R);
+        h.settle();
+        assert_eq!(Profile::of(h.settings()), Profile::Camera);
+        assert_eq!(h.settings(), &look::fresh(5200.0, 3.0));
+    }
+
+    #[test]
+    fn hdr_is_a_slider_between_light_and_presence() {
+        let folder = Folder::new("hdr", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        let specs: Vec<_> = develop::sliders().collect();
+        let at = specs.iter().position(|spec| spec.id == "light.hdr").unwrap();
+        assert_eq!((specs[at - 1].id, specs[at + 1].id), ("light.blacks", "color.vibrance"));
+        h.app.selected = at;
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(h.settings().light.hdr, 1.0);
+        assert_eq!(h.saved().map(|s| s.light.hdr), Some(1.0));
+        h.press(Modifiers::NONE, Key::Minus);
+        h.press(Modifiers::NONE, Key::Minus);
+        assert_eq!(h.settings().light.hdr, 0.0, "it stops at 0");
     }
 
     #[test]
@@ -3310,17 +3389,18 @@ mod tests {
 
         let light_rect = h.text("Light");
         h.click(light_rect.center());
-        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), &Group::ALL[2..]);
+        let rest: Vec<Group> = Group::ALL.iter().copied().filter(|group| !matches!(group, Group::WhiteBalance | Group::Light)).collect();
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), rest);
 
         // Return copies only the rest into clipboard.
         h.press(Modifiers::NONE, Key::Enter);
         assert!(h.app.choosing.is_none());
-        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), &Group::ALL[2..]);
+        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), rest);
 
         // The next time it opens, the last choice is checked.
         h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
         assert!(h.app.choosing.is_some());
-        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), &Group::ALL[2..]);
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), rest);
 
         // Check All selects everything again.
         let all_rect = h.text("Check All");
@@ -3330,11 +3410,11 @@ mod tests {
         // Esc copies nothing and leaves the clipboard as it was.
         h.press(Modifiers::NONE, Key::Escape);
         assert!(h.app.choosing.is_none());
-        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), &Group::ALL[2..]);
+        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), rest);
 
         // Since Esc cancelled, the next time it opens, the previously remembered choice is still checked.
         h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
-        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), &Group::ALL[2..]);
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), rest);
 
         // Closing the shoot closes the dialog.
         h.app.close();

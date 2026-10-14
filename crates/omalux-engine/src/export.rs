@@ -236,7 +236,7 @@ mod tests {
             // 4. A newer process version is refused.
             crate::sidecar::update(&raw_path, |xmp| {
                 let with = crate::sidecar::with_edit(xmp, &crate::sidecar::Edit::new(edited_settings.clone()))?;
-                Ok(with.replace(">1</omalux:processVersion>", ">99</omalux:processVersion>"))
+                Ok(with.replace(&format!(">{}</omalux:processVersion>", crate::sidecar::PROCESS_VERSION), ">99</omalux:processVersion>"))
             }).unwrap();
 
             let out_newer = folder.0.join("omalux-newer");
