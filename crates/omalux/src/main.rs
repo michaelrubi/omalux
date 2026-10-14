@@ -2,6 +2,8 @@ mod app;
 mod checklist;
 mod commands;
 mod config;
+mod crop;
+mod crop_panel;
 mod develop;
 mod filmstrip;
 mod histogram;

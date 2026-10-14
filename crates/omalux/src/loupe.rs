@@ -16,6 +16,7 @@ use egui::{Pos2, Rect, Response, TextureHandle, TextureOptions, Ui, Vec2, vec2};
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::SourceInfo;
 use lightcraft_raster::Histogram;
+use omalux_engine::crop::Orientation;
 
 use crate::render::{Done, Key, ZoomKey};
 
@@ -47,12 +48,23 @@ pub struct Zoomed {
 pub struct Render {
     pub texture: TextureHandle,
     pub histogram: Histogram,
-    /// Which render it is, and the settings it was rendered with: only
-    /// the tests ask, so far.
+    /// Which render it is: only the tests ask, so far.
     #[cfg_attr(not(test), allow(dead_code))]
     pub key: Key,
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The settings it was rendered with.
     pub settings: Arc<DevelopSettings>,
+}
+
+/// What the mouse does on the loupe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mouse {
+    /// A click zooms to 100% and back, a drag pans.
+    Zoom,
+    /// The White Balance Selector: a click picks.
+    Pick,
+    /// A tool has it, and draws the frame itself (Crop & Straighten, on
+    /// [`Loupe::whole`]).
+    Tool,
 }
 
 /// What the renderer finished that isn't a picture.
@@ -251,16 +263,33 @@ impl Loupe {
         news
     }
 
+    /// The room the frame has, as last drawn.
+    pub fn area(&self) -> Rect {
+        self.area
+    }
+
+    /// A frame's render, if it's of the whole frame, uncropped and turned
+    /// as `orientation`: what the crop tool draws the crop over.
+    pub fn whole(&self, path: &Path, orientation: Orientation) -> Option<&TextureHandle> {
+        let render = self.shown.get(path)?.render.as_ref()?;
+        (render.settings.crop == Default::default() && render.settings.orientation == orientation).then_some(&render.texture)
+    }
+
     /// Draw `path`'s frame: its render, or the camera's JPEG until that's
-    /// in; whole, or at 100%. With `picking` (the White Balance Selector)
-    /// the pointer is a crosshair over the frame, and a click on it is
-    /// returned, as a share of the frame's width and height; without, the
-    /// mouse zooms and pans.
-    pub fn show(&mut self, ui: &mut Ui, path: &Path, picking: bool) -> Option<[f64; 2]> {
+    /// in; whole, or at 100%. With [`Mouse::Pick`] (the White Balance
+    /// Selector) the pointer is a crosshair over the frame, and a click on
+    /// it is returned, as a share of the frame's width and height; with
+    /// [`Mouse::Zoom`], the mouse zooms and pans. With [`Mouse::Tool`]
+    /// only the room is taken, and nothing drawn.
+    pub fn show(&mut self, ui: &mut Ui, path: &Path, mouse: Mouse) -> Option<[f64; 2]> {
         let pixels_per_point = ui.ctx().pixels_per_point();
         self.area = ui.max_rect().shrink(MARGIN);
         let pixels = self.area.size() * pixels_per_point;
         self.size = (pixels.x.max(0.0) as usize, pixels.y.max(0.0) as usize);
+        if mouse == Mouse::Tool {
+            (self.zoomed, self.hold) = (false, None);
+            return None;
+        }
         let Some(shown) = self.shown.get(path) else {
             (self.fit, self.full) = (Rect::NOTHING, Vec2::ZERO);
             return None;
@@ -288,12 +317,12 @@ impl Loupe {
         #[cfg(test)]
         ui.data_mut(|d| d.insert_temp(egui::Id::new("loupe frame"), frame));
         let on_frame = frame.intersect(self.area);
-        if picking {
+        if mouse == Mouse::Pick {
             let response = ui.interact(on_frame, ui.id().with("white balance selector"), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::Crosshair);
             let at = response.clicked().then(|| response.interact_pointer_pos()).flatten()?;
             return Some([f64::from((at.x - frame.left()) / frame.width()), f64::from((at.y - frame.top()) / frame.height())]);
         }
-        if self.full.x > 0.0 {
+        if mouse == Mouse::Zoom && self.full.x > 0.0 {
             let response = ui.interact(self.area, ui.id().with("loupe"), egui::Sense::click_and_drag());
             self.pointer(ui, &response);
         }

@@ -12,7 +12,9 @@ use egui::{Align2, FontId, RichText, Ui};
 use lightcraft_codecs::display::DisplayProfile;
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::SourceInfo;
+use omalux_engine::auto::{self, Auto};
 use omalux_engine::copy::{Copied, Group};
+use omalux_engine::crop;
 use omalux_engine::disk::{Disk, Mark, Problem};
 use omalux_engine::edit::{self, History};
 use omalux_engine::shoot::{Filter, Shoot, Step, stars};
@@ -24,9 +26,11 @@ use crate::config::Config;
 use crate::develop::{self, PanelOut};
 use crate::filmstrip::{Click, Filmstrip, STRIP_HEIGHT};
 use crate::hotkeys::{self, format_shortcut};
-use crate::loupe::{Loupe, News};
+use crate::crop_panel;
+use crate::loupe::{Loupe, Mouse, News};
 use crate::monitor;
 use crate::render::{Decoder, Renderer, View, Wanted};
+use crate::slider::SliderOut;
 use crate::state::{Place, State};
 use crate::theme::{self, Theme};
 
@@ -182,6 +186,12 @@ pub struct App {
     previous: Option<PathBuf>,
     /// The checklist of what to copy, while it's open.
     choosing: Option<Checklist>,
+    /// The Crop & Straighten tool, while it's open: the loupe shows the
+    /// current frame whole, with its crop drawn over it.
+    crop: Option<crate::crop::Tool>,
+    /// The crop keeps its shape when it's dragged (Lightroom's lock, A),
+    /// from one frame and one opening of the tool to the next.
+    crop_locked: bool,
 }
 
 impl App {
@@ -279,6 +289,8 @@ impl App {
             at: None,
             previous: None,
             choosing: None,
+            crop: None,
+            crop_locked: true,
         }
     }
 
@@ -340,6 +352,7 @@ impl App {
         self.filmstrip.reset();
         (self.at, self.previous) = (None, None);
         self.choosing = None;
+        self.crop = None;
         self.leave();
     }
 
@@ -505,13 +518,29 @@ impl App {
             Command::Decrease => self.nudge(-1.0),
             Command::IncreaseMore => self.nudge(5.0),
             Command::DecreaseMore => self.nudge(-5.0),
-            Command::WhiteBalance => self.selector = !self.selector && self.shoot.is_some(),
+            Command::WhiteBalance => {
+                self.selector = !self.selector && self.shoot.is_some();
+                self.crop = None;
+            }
             Command::BeforeAfter => self.before = !self.before && self.shoot.is_some(),
             Command::Clipping => self.clipping = !self.clipping,
+            // The crop tool shows the frame whole.
+            Command::Zoom if self.crop.is_some() => {}
             Command::Zoom => {
                 let (pointer, time) = ctx.input(|i| (i.pointer.hover_pos(), i.time));
                 self.loupe.key_down(pointer, time);
             }
+            Command::Crop => {
+                self.crop = (self.crop.is_none() && self.shoot.is_some()).then(Default::default);
+                self.selector = false;
+            }
+            Command::RotateLeft => self.edit(|history, _| history.set(|settings| crop::turn(settings, false))),
+            Command::RotateRight => self.edit(|history, _| history.set(|settings| crop::turn(settings, true))),
+            Command::ResetCrop => self.edit(|history, _| history.set(crop::reset)),
+            Command::AutoTone => self.auto(Auto::Tone),
+            Command::AutoWhiteBalance => self.auto(Auto::WhiteBalance),
+            Command::AutoExposure => self.auto(Auto::Exposure),
+            Command::AutoLevel => self.auto(Auto::Level),
             Command::SelectAll => {
                 if let Some(shoot) = &mut self.shoot {
                     shoot.select_all();
@@ -641,7 +670,13 @@ impl App {
             }
             match self.edits.get(path) {
                 Some(editing) if !self.unreadable.contains(path) => {
-                    let becomes = copied.paste(editing.history.settings(), editing.history.fresh());
+                    let mut becomes = copied.paste(editing.history.settings(), editing.history.fresh());
+                    // A crop from a frame of another shape, kept inside this
+                    // one: where the frame's raw is decoded, so its shape is known.
+                    if let Some(source) = self.renderer.source(path) {
+                        let dims = crop::dims((source.width, source.height), &becomes);
+                        crop::constrain(&mut becomes, dims);
+                    }
                     if becomes != *editing.history.settings() {
                         changes.push((path.clone(), becomes));
                     }
@@ -765,42 +800,156 @@ impl App {
         self.edit(|history, info| {
             let value = lightcraft_develop::controls::get(history.settings(), spec.id).unwrap_or(spec.default);
             history.set(|settings| {
-                edit::set_control(settings, info, spec.id, crate::slider::nudged(spec, value, steps));
+                edit::set_control(settings, info, spec.id, crate::slider::nudged(&spec, value, steps));
             })
         });
     }
 
-    /// What was done in the develop panel: a drag's changes are drafts
-    /// in the loupe and one step once it ends, saved then.
-    fn panel(&mut self, out: PanelOut) {
+    /// Set `what` on the current frame from the frame itself, as one step.
+    fn auto(&mut self, what: Auto) {
+        let Some(source) = self.shoot.as_ref().and_then(|shoot| self.renderer.source(&shoot.frame().path)) else { return };
+        let (mut found, mut changed, started) = (true, false, std::time::Instant::now());
+        self.edit(|history, info| {
+            changed = history.set(|settings| found = auto::apply(settings, info, &source, what));
+            changed
+        });
+        log::debug!("{what:?} in {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
+        // A press that changes nothing says why.
+        let text = match what {
+            _ if changed => return,
+            Auto::Level if !found => "Couldn't find a horizon or uprights to level by",
+            _ if !found => "There's no automatic value for that slider",
+            Auto::Tone => "Nothing clips that Whites or Blacks could bring in",
+            _ => "It's as Auto would set it already",
+        };
+        self.message = Some((text.to_owned(), false));
+    }
+
+    /// The current frame's size as it's shown uncropped, once its raw has
+    /// been decoded: what its crop is read against.
+    fn dims(&self) -> Option<(f64, f64)> {
+        let path = &self.shoot.as_ref()?.frame().path;
+        let source = self.renderer.source(path)?;
+        Some(crop::dims((source.width, source.height), self.edits.get(path)?.history.settings()))
+    }
+
+    /// A change to the current frame's edit under a drag: every change
+    /// until the drag has `stopped` is one step, saved then.
+    fn dragged(&mut self, change: Option<impl FnOnce(&mut DevelopSettings, &SourceInfo)>, stopped: bool) {
         let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
-        if out != PanelOut::default() && self.locked(&path) {
+        if (change.is_some() || stopped) && self.locked(&path) {
             return;
         }
         let Some(editing) = self.edits.get_mut(&path) else { return };
-        let mut save = false;
-        if out.as_shot {
-            save = editing.edit(|history, info| history.set(|settings| edit::as_shot(settings, info)));
+        if let Some(change) = change {
+            editing.edit(|history, info| {
+                history.change(|settings| change(settings, info));
+                true
+            });
         }
-        if let Some((index, slid)) = out.slider {
-            if slid.touched {
-                self.selected = index;
-            }
-            if let (Some(value), Some(spec)) = (slid.value, develop::sliders().nth(index)) {
-                editing.edit(|history, info| {
-                    history.change(|settings| {
-                        edit::set_control(settings, info, spec.id, value);
-                    });
-                    true
-                });
-            }
-            self.dragging = (self.dragging || slid.drag_started) && !slid.drag_stopped;
-            if slid.drag_stopped {
-                save = editing.edit(|history, _| history.commit());
-            }
-        }
-        if save {
+        if stopped && editing.edit(|history, _| history.commit()) {
             self.save(&path);
+        }
+    }
+
+    /// A slider of the current frame's moved, `set` being how its value is
+    /// written: a drag's changes are drafts in the loupe and one step once
+    /// it ends.
+    fn slide(&mut self, slid: SliderOut, set: impl FnOnce(&mut DevelopSettings, &SourceInfo, f64)) {
+        self.dragging = (self.dragging || slid.drag_started) && !slid.drag_stopped;
+        let change = slid.value.map(|value| move |settings: &mut DevelopSettings, info: &SourceInfo| set(settings, info, value));
+        self.dragged(change, slid.drag_stopped);
+    }
+
+    /// What was done to the crop on the frame, with the mouse.
+    fn crop_gesture(&mut self, out: crate::crop::Out) {
+        use crate::crop::Act;
+        if out.done {
+            self.crop = None;
+        }
+        let Some(dims) = self.dims() else { return };
+        let change = out.act.map(|act| {
+            move |settings: &mut DevelopSettings, _: &SourceInfo| match act {
+                Act::Drag { start, handle, from, to, keep_ratio } => crop::drag(settings, dims, start, handle, from, to, keep_ratio),
+                Act::Turn(angle) => crop::straighten(settings, dims, angle),
+                Act::Level { from, to } => crop::straighten_along(settings, dims, from, to),
+            }
+        });
+        self.dragged(change, out.stopped);
+    }
+
+    /// What was done in the develop panel.
+    fn panel(&mut self, out: PanelOut) {
+        if out.as_shot {
+            self.edit(|history, info| history.set(|settings| edit::as_shot(settings, info)));
+        }
+        if let Some(what) = out.auto {
+            self.auto(what);
+        }
+        if let Some(on) = out.remove_ca {
+            self.edit(|history, _| history.set(|settings| settings.optics.remove_ca = on));
+        }
+        let Some((index, slid)) = out.slider else { return };
+        let Some(spec) = develop::sliders().nth(index) else { return };
+        if slid.touched {
+            self.selected = index;
+        }
+        if slid.auto {
+            return self.auto(Auto::Control(spec.id));
+        }
+        self.slide(slid, |settings, info, value| {
+            edit::set_control(settings, info, spec.id, value);
+        });
+    }
+
+    /// What was done in the crop tool's panel.
+    fn crop_panel(&mut self, out: crop_panel::Out) {
+        let Some(dims) = self.dims() else { return };
+        if let Some(aspect) = out.aspect {
+            self.edit(|history, _| history.set(|settings| crop::set_aspect(settings, dims, aspect)));
+        }
+        if out.swap {
+            self.edit(|history, _| history.set(|settings| crop::swap_aspect(settings, dims)));
+        }
+        if out.lock {
+            self.crop_locked = !self.crop_locked;
+        }
+        self.slide(out.angle, |settings, _, angle| crop::straighten(settings, dims, angle));
+        if out.level {
+            self.auto(Auto::Level);
+        }
+        if let Some(clockwise) = out.turn {
+            self.edit(|history, _| history.set(|settings| crop::turn(settings, clockwise)));
+        }
+        if out.reset {
+            self.edit(|history, _| history.set(crop::reset));
+        }
+        if out.done {
+            self.crop = None;
+        }
+    }
+
+    /// The keys that are the crop tool's while it's open, Lightroom's: X
+    /// swaps the aspect, A locks it or lets it go, Return puts the tool
+    /// away, and Esc puts it away with the crop as it was when the tool
+    /// came to the frame.
+    fn crop_keys(&mut self, ctx: &egui::Context) {
+        let Some(dims) = self.dims() else { return };
+        let pressed = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+        if pressed(egui::Key::X) {
+            self.edit(|history, _| history.set(|settings| crop::swap_aspect(settings, dims)));
+        }
+        if pressed(egui::Key::A) {
+            self.crop_locked = !self.crop_locked;
+        }
+        if pressed(egui::Key::Enter) {
+            self.crop = None;
+        }
+        if pressed(egui::Key::Escape) {
+            let was = self.shoot.as_ref().zip(self.crop.take()).and_then(|(shoot, tool)| tool.was(&shoot.frame().path));
+            if let Some((crop, orientation)) = was {
+                self.edit(|history, _| history.set(|settings| (settings.crop, settings.orientation) = (crop, orientation)));
+            }
         }
     }
 
@@ -840,6 +989,10 @@ impl App {
         self.finish_exporting();
         self.disk_problems();
         if !ctx.egui_wants_keyboard_input() && self.choosing.is_none() {
+            // The crop tool's own keys first: its X isn't a reject.
+            if self.crop.is_some() {
+                self.crop_keys(ctx);
+            }
             for command in Command::pressed(ctx, &mut self.v_down) {
                 self.run(command, ctx);
             }
@@ -856,6 +1009,9 @@ impl App {
             self.filmstrip.collect(ctx, shoot.current());
             if self.at.as_ref() != Some(&shoot.frame().path) {
                 self.previous = self.at.replace(shoot.frame().path.clone());
+            }
+            if let (Some(tool), Some(editing)) = (&mut self.crop, self.edits.get(&shoot.frame().path)) {
+                tool.on(&shoot.frame().path, editing.history.settings());
             }
         }
         let title = match &self.shoot {
@@ -880,8 +1036,17 @@ impl App {
         if let Some(current) = wanted.first_mut().filter(|_| self.before) {
             current.settings = None;
         }
+        // The crop tool draws its crop over the current frame whole, so
+        // a change to the crop there is nothing to render again.
+        if self.crop.is_some()
+            && let Some(current) = wanted.first_mut()
+            && let Some(settings) = current.settings.as_mut().filter(|settings| settings.crop != Default::default())
+        {
+            Arc::make_mut(settings).crop = Default::default();
+        }
+        let zoom = self.loupe.zoom().filter(|_| self.crop.is_none());
         self.loupe.retain(|path| wanted.iter().any(|w| w.path == path));
-        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom: self.loupe.zoom() });
+        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom });
         for news in self.loupe.take(ctx, self.renderer.done()) {
             match news {
                 News::Decoded(path, info) => {
@@ -938,11 +1103,26 @@ impl App {
             egui::Panel::right("develop").frame(side).resizable(false).exact_size(PANEL_WIDTH).show(ui, |ui| self.develop_panel(ui));
         }
         let pasteboard = egui::Frame::new().fill(self.theme.pasteboard());
+        let dims = self.dims();
         let mut picked = None;
+        let mut cropped = None;
         let mut clicked = None;
         egui::CentralPanel::no_frame().frame(pasteboard).show(ui, |ui| match &self.shoot {
             Some(shoot) => {
-                picked = self.loupe.show(ui, &shoot.frame().path, self.selector);
+                let mouse = if self.crop.is_some() {
+                    Mouse::Tool
+                } else if self.selector {
+                    Mouse::Pick
+                } else {
+                    Mouse::Zoom
+                };
+                let path = &shoot.frame().path;
+                picked = self.loupe.show(ui, path, mouse);
+                if let (Some(tool), Some(editing), Some(dims)) = (&mut self.crop, self.edits.get(path), dims) {
+                    let settings = editing.history.settings();
+                    let frame = crate::crop::Frame { area: self.loupe.area(), whole: self.loupe.whole(path, settings.orientation), dims };
+                    cropped = Some(tool.show(ui, &self.theme, frame, settings, self.crop_locked));
+                }
                 if self.before {
                     let corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);
                     ui.painter().text(corner, Align2::LEFT_TOP, "Before", FontId::proportional(13.0), self.theme.foreground);
@@ -952,6 +1132,9 @@ impl App {
         });
         if let Some(at) = picked {
             self.pick_white_balance(at);
+        }
+        if let Some(cropped) = cropped {
+            self.crop_gesture(cropped);
         }
         if let Some(dir) = clicked {
             self.open(dir);
@@ -986,8 +1169,8 @@ impl App {
         }
     }
 
-    /// The histogram, and the panels under it: White Balance, Light,
-    /// Presence.
+    /// The histogram, and under it the crop tool's panel while the tool is
+    /// open, then the develop panels, which scroll.
     fn develop_panel(&mut self, ui: &mut Ui) {
         // The histogram of the frame as the loupe shows it.
         let path = self.shoot.as_ref().map(|shoot| &shoot.frame().path);
@@ -999,7 +1182,18 @@ impl App {
         // Not until the frame's raw has been decoded: the sliders are read against it.
         let editing = self.shoot.as_ref().and_then(|shoot| self.edits.get(&shoot.frame().path));
         let Some(editing) = editing.filter(|editing| editing.info.is_some()) else { return };
-        let out = develop::show(ui, &self.theme, editing.history.settings(), editing.history.fresh(), self.selected);
+        let (settings, fresh) = (editing.history.settings(), editing.history.fresh());
+        let dims = self.dims().filter(|_| self.crop.is_some());
+        let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+        let (cropped, out) = scroll
+            .show(ui, |ui| {
+                let cropped = dims.map(|dims| crop_panel::show(ui, &self.theme, settings, dims, self.crop_locked));
+                (cropped, develop::show(ui, &self.theme, settings, fresh, self.selected))
+            })
+            .inner;
+        if let Some(cropped) = cropped {
+            self.crop_panel(cropped);
+        }
         self.panel(out);
     }
 
@@ -1198,6 +1392,9 @@ mod tests {
         ctx: egui::Context,
         app: App,
         time: f64,
+        /// The window's size: taller for a test of the panels that are
+        /// below the fold at 600.
+        screen: egui::Vec2,
     }
 
     impl Harness {
@@ -1212,13 +1409,13 @@ mod tests {
             let wake = ctx.clone();
             let disk = Disk::new(move || wake.request_repaint());
             let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect(), Workers { renderer, disk }, paths);
-            Self { ctx, app, time: 0.0 }
+            Self { ctx, app, time: 0.0, screen: egui::vec2(800.0, 600.0) }
         }
 
         fn frame(&mut self, events: Vec<Event>) -> egui::FullOutput {
             self.time += 0.05;
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.screen)),
                 time: Some(self.time),
                 events,
                 ..Default::default()
@@ -1314,6 +1511,9 @@ mod tests {
         fn press(&mut self, modifiers: Modifiers, key: Key) -> egui::FullOutput {
             let mut events = key_events(modifiers, key, true);
             events.extend(key_events(modifiers, key, false));
+            // The modifiers are let go with the key: egui goes on taking
+            // them for held until it's told otherwise.
+            events.push(Event::ModifiersChanged(Modifiers::NONE));
             self.frame(events)
         }
 
@@ -1707,6 +1907,239 @@ mod tests {
         h.press(Modifiers::NONE, Key::Backslash);
         h.press(Modifiers::NONE, Key::ArrowRight);
         assert!(!h.app.before);
+    }
+
+    #[test]
+    fn r_opens_the_crop_tool_on_the_whole_frame_and_esc_puts_the_crop_back() {
+        let folder = Folder::new("crop-tool", &[1, 1]);
+        let raw = folder.0.join("DSC00001.ARW");
+        let mut h = Harness::new(&[]);
+        h.press(Modifiers::NONE, Key::R);
+        assert!(h.app.crop.is_none(), "nothing to crop with no shoot open");
+        h.app.open(folder.0.clone());
+        h.settle();
+        let dims = h.app.dims().unwrap();
+        h.app.edit(|history, _| history.set(|settings| crop::set_aspect(settings, dims, crop::Aspect::Ratio(1, 1))));
+        h.settle();
+        let rendered = |h: &Harness| h.app.loupe.shown(&raw).unwrap().render.as_ref().unwrap().settings.crop.geometry;
+        assert_eq!(rendered(&h), h.settings().crop.geometry, "cropped, in the loupe");
+
+        // The tool shows the frame whole, with the crop still in its settings.
+        h.press(Modifiers::NONE, Key::R);
+        h.settle();
+        assert!(h.app.crop.is_some());
+        assert!(rendered(&h).is_identity() && !h.settings().crop.geometry.is_identity());
+        assert!(h.app.loupe.whole(&raw, h.settings().orientation).is_some());
+        // Z doesn't zoom while it's open.
+        h.press(Modifiers::NONE, Key::Z);
+        assert!(h.app.loupe.zoom().is_none());
+
+        // X turns the crop on its side, and isn't a reject; A is the lock.
+        let square = h.settings().crop;
+        h.app.edit(|history, _| history.set(|settings| crop::set_aspect(settings, dims, crop::Aspect::Ratio(4, 5))));
+        let landscape = h.settings().crop.geometry.rect_px(dims.0, dims.1);
+        h.press(Modifiers::NONE, Key::X);
+        let portrait = h.settings().crop.geometry.rect_px(dims.0, dims.1);
+        assert!(landscape.width() > landscape.height() && portrait.width() < portrait.height(), "{landscape:?} {portrait:?}");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 1, "not rejected");
+        assert!(h.app.crop_locked);
+        h.press(Modifiers::NONE, Key::A);
+        assert!(!h.app.crop_locked);
+
+        // Esc puts the tool away with the crop as it was when it was opened.
+        h.press(Modifiers::NONE, Key::Escape);
+        assert!(h.app.crop.is_none());
+        assert_eq!(h.settings().crop, square);
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.settle();
+        assert_eq!(rendered(&h), square.geometry, "cropped again");
+
+        // Return keeps what was done, and the tool stays open from frame to frame.
+        h.press(Modifiers::NONE, Key::R);
+        h.press(Modifiers::NONE, Key::X);
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        assert!(h.app.crop.is_some());
+        h.press(Modifiers::NONE, Key::ArrowLeft);
+        h.press(Modifiers::NONE, Key::Enter);
+        assert!(h.app.crop.is_none());
+        // (A square on its side is the same square.)
+        assert_eq!(h.settings().crop.geometry, square.geometry);
+        // X is a reject again.
+        h.press(Modifiers::NONE, Key::X);
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, sidecar::REJECT);
+    }
+
+    /// Where the crop tool last drew the crop.
+    fn crop_box(h: &Harness) -> egui::Rect {
+        h.ctx.data(|d| d.get_temp(egui::Id::new("crop box"))).expect("the crop tool has drawn")
+    }
+
+    /// Press at `from`, move to `to` by way of the point halfway, and let
+    /// go there, with `modifiers` held.
+    fn drag(h: &mut Harness, from: egui::Pos2, to: egui::Pos2, modifiers: Modifiers) {
+        let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers };
+        let held = Event::ModifiersChanged(modifiers);
+        h.frame(vec![held.clone(), Event::PointerMoved(from)]);
+        h.frame(vec![held.clone(), button(from, true)]);
+        h.frame(vec![held.clone(), Event::PointerMoved(from + (to - from) / 2.0)]);
+        h.frame(vec![held.clone(), Event::PointerMoved(to)]);
+        h.frame(vec![held, button(to, false)]);
+        h.frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+    }
+
+    /// A shoot of one frame with the crop tool open on it.
+    fn cropping(name: &str) -> (Folder, Harness) {
+        let folder = Folder::new(name, &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+        h.settle();
+        (folder, h)
+    }
+
+    #[test]
+    fn the_crop_is_dragged_by_its_handles_and_moved_from_inside() {
+        let (_folder, mut h) = cropping("crop-drag");
+        let (w, h0) = h.app.dims().unwrap();
+        let shape = |h: &Harness| h.settings().crop.geometry.rect_px(w, h0).aspect();
+        let whole = crop_box(&h);
+        assert!((whole.aspect_ratio() - (w / h0) as f32).abs() < 0.01, "the whole frame to start with: {whole:?}");
+
+        // A corner, with the lock on: the crop keeps the frame's shape.
+        let corner = whole.right_bottom();
+        let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.frame(vec![Event::PointerMoved(corner)]);
+        h.frame(vec![button(corner, true)]);
+        h.frame(vec![Event::PointerMoved(corner - whole.size() / 2.0)]);
+        let rect = h.settings().crop.geometry.rect;
+        assert!((rect.x1 - 0.5).abs() < 0.01 && (shape(&h) - w / h0).abs() < 0.01, "{rect:?}");
+        assert_eq!((rect.x0, rect.y0), (0.0, 0.0), "the corner opposite stays");
+        assert_eq!(h.saved(), None, "nothing is saved until it's let go");
+        h.frame(vec![button(corner - whole.size() / 2.0, false)]);
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        assert!((crop_box(&h).size() - whole.size() / 2.0).length() < 0.5, "drawn where it is");
+
+        // From inside, it's moved, as far as the frame's edge.
+        let half = crop_box(&h);
+        drag(&mut h, half.center(), half.center() + egui::vec2(whole.width(), 0.0), Modifiers::NONE);
+        let rect = h.settings().crop.geometry.rect;
+        assert!((rect.x0 - 0.5).abs() < 1e-6 && (rect.x1 - 1.0).abs() < 1e-6 && rect.y0 == 0.0, "{rect:?}");
+
+        // With the lock off (A), an edge moves alone and the shape is its own.
+        h.press(Modifiers::NONE, Key::A);
+        let moved = crop_box(&h);
+        drag(&mut h, moved.center_bottom(), moved.center_bottom() - egui::vec2(0.0, moved.height() / 2.0), Modifiers::NONE);
+        let rect = h.settings().crop.geometry.rect;
+        assert!((rect.y1 - 0.25).abs() < 0.01 && (rect.x0 - 0.5).abs() < 1e-6 && (rect.x1 - 1.0).abs() < 1e-6, "{rect:?}");
+        assert_eq!(crop::aspect(h.settings(), (w, h0)), None);
+        // Shift holds the shape for one drag.
+        let wide = crop_box(&h);
+        drag(&mut h, wide.left_top(), wide.left_top() + egui::vec2(wide.width() / 2.0, 0.0), Modifiers::SHIFT);
+        assert!((shape(&h) - 2.0 * w / h0).abs() < 0.05, "{:?}", h.settings().crop.geometry.rect);
+
+        // Each drag was a step.
+        for _ in 0..4 {
+            h.press(Modifiers::COMMAND, Key::Z);
+        }
+        assert!(h.settings().crop.geometry.is_identity());
+        assert_eq!(crop_box(&h), whole);
+    }
+
+    #[test]
+    fn a_drag_outside_the_crop_turns_the_frame_and_a_line_with_ctrl_levels_it() {
+        let (_folder, mut h) = cropping("crop-turn");
+        let (w, h0) = h.app.dims().unwrap();
+        h.app.edit(|history, _| history.set(|settings| crop::set_aspect(settings, (w, h0), crop::Aspect::Ratio(1, 1))));
+        h.frame(vec![]);
+        let (on, area) = (crop_box(&h), h.app.loupe.area());
+        // Right of the square crop, level with the middle of the frame,
+        // and 5° round it, clockwise.
+        let (centre, reach) = (area.center(), on.width() / 2.0 + 30.0);
+        let round = |degrees: f32| centre + reach * egui::Vec2::angled(degrees.to_radians());
+        drag(&mut h, round(0.0), round(5.0), Modifiers::NONE);
+        let geometry = h.settings().crop.geometry;
+        assert!((geometry.angle - 5.0).abs() < 0.05, "{}", geometry.angle);
+        assert!(geometry.is_within_image(w, h0));
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().crop.geometry.angle, 0.0, "one step");
+
+        // A line drawn with Ctrl, dropping 3° to the right, is made level.
+        let from = centre - egui::vec2(100.0, 0.0);
+        drag(&mut h, from, from + 200.0 * egui::Vec2::angled(3f32.to_radians()), Modifiers::COMMAND);
+        assert!((h.settings().crop.geometry.angle + 3.0).abs() < 0.05, "{}", h.settings().crop.geometry.angle);
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+
+        // A double-click inside the crop puts the tool away.
+        let on = crop_box(&h);
+        for _ in 0..2 {
+            h.pointer(on.center(), Some(true));
+            h.pointer(on.center(), Some(false));
+        }
+        assert!(h.app.crop.is_none());
+        assert!((h.settings().crop.geometry.angle + 3.0).abs() < 0.05, "with the crop as it was");
+    }
+
+    #[test]
+    fn quarter_turns_and_the_crops_reset_are_steps_with_or_without_the_tool() {
+        let folder = Folder::new("turns", &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let (w, h0) = h.app.dims().unwrap();
+        h.press(Modifiers::COMMAND, Key::CloseBracket);
+        assert_eq!(h.app.dims(), Some((h0, w)), "on its side");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.press(Modifiers::COMMAND, Key::OpenBracket);
+        assert_eq!(h.app.dims(), Some((w, h0)));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.app.dims(), Some((h0, w)), "each turn is a step");
+
+        let dims = h.app.dims().unwrap();
+        h.app.edit(|history, _| history.set(|settings| crop::straighten(settings, dims, 5.0)));
+        assert_eq!(h.settings().crop.geometry.angle, 5.0);
+        h.press(Modifiers::COMMAND | Modifiers::ALT, Key::R);
+        assert!(h.settings().crop.geometry.is_identity());
+        assert_eq!(h.app.dims(), Some((h0, w)), "still on its side");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+    }
+
+    #[test]
+    fn ctrl_u_is_auto_tone_and_ctrl_shift_u_auto_white_balance_each_one_step() {
+        use lightcraft_develop::WbMode;
+        let folder = Folder::new("auto", &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().clone();
+
+        // The test's frame is one flat grey: nothing in it clips, so
+        // there's nothing for Whites and Blacks to bring in.
+        h.press(Modifiers::COMMAND, Key::U);
+        assert_eq!(h.settings(), &fresh);
+        assert_eq!(h.said(), "Nothing clips that Whites or Blacks could bring in");
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 1, "not unmarked");
+        // Auto sets them again where they've been moved.
+        h.app.edit(|history, _| history.set(|settings| (settings.light.whites, settings.light.blacks) = (30.0, -20.0)));
+        h.press(Modifiers::COMMAND, Key::U);
+        assert_eq!((h.settings().light.whites, h.settings().light.blacks), (0.0, 0.0));
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!((h.settings().light.whites, h.settings().light.blacks), (30.0, -20.0), "one step");
+        h.press(Modifiers::COMMAND, Key::Z);
+
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::U);
+        assert_eq!(h.settings().wb.mode, WbMode::Auto);
+        assert_eq!(h.settings().light, fresh.light, "and only the white balance");
+
+        // Exposure and level have no key: a script, or their buttons.
+        h.app.run(Command::AutoExposure, &h.ctx.clone());
+        assert_ne!(h.settings().light.exposure, 0.0);
+        let before = h.settings().clone();
+        h.app.run(Command::AutoLevel, &h.ctx.clone());
+        assert_eq!(h.settings(), &before);
+        assert_eq!(h.said(), "Couldn't find a horizon or uprights to level by");
     }
 
     #[test]
@@ -2404,6 +2837,278 @@ mod tests {
     }
 
     #[test]
+    fn detail_and_lens_corrections_sliders_are_drawn_and_drag_changes_setting() {
+        let folder = Folder::new("detail-lens", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        // The panels and subheadings are drawn.
+        let _ = h.text("Sharpening");
+        let _ = h.text("Noise Reduction");
+        let _ = h.text("Defringe");
+
+        // Detail sliders labelled as Lightroom's.
+        let _ = h.text("Amount");
+        let _ = h.text("Radius");
+        let _ = h.text("Detail");
+        let _ = h.text("Masking");
+        let _ = h.text("Luminance");
+        let _ = h.text("Color");
+
+        // Lens Corrections sliders labelled under Lightcraft's own names.
+        let _ = h.text("Purple Amount");
+        let _ = h.text("Purple Hue Low");
+        let _ = h.text("Purple Hue High");
+        let _ = h.text("Green Amount");
+        let _ = h.text("Green Hue Low");
+        let _ = h.text("Green Hue High");
+
+        // A drag on Amount changes that setting, is one step to undo, and is saved.
+        assert_eq!(h.settings().detail.sharpen_amount, 40.0);
+        let track = h.track("detail.sharpenAmount");
+        h.pointer(track.center(), None);
+        h.pointer(track.center(), Some(true));
+        h.pointer(track.center() + egui::vec2(track.width() / 4.0, 0.0), None);
+        h.pointer(track.center() + egui::vec2(track.width() / 4.0, 0.0), Some(false));
+        let amount = h.settings().detail.sharpen_amount;
+        assert!(amount > 40.0);
+        assert_eq!(h.saved().map(|s| s.detail.sharpen_amount), Some(amount));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().detail.sharpen_amount, 40.0, "one step to undo");
+        assert_eq!(h.saved().map(|s| s.detail.sharpen_amount), Some(40.0));
+
+        // A drag on Luminance changes that setting, is one step to undo, and is saved.
+        assert_eq!(h.settings().detail.nr_luminance, 0.0);
+        let track = h.track("detail.nrLuminance");
+        h.pointer(track.center(), None);
+        h.pointer(track.center(), Some(true));
+        h.pointer(track.center() + egui::vec2(track.width() / 4.0, 0.0), None);
+        h.pointer(track.center() + egui::vec2(track.width() / 4.0, 0.0), Some(false));
+        let luma = h.settings().detail.nr_luminance;
+        assert!(luma > 0.0);
+        assert_eq!(h.saved().map(|s| s.detail.nr_luminance), Some(luma));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().detail.nr_luminance, 0.0, "one step to undo");
+        assert_eq!(h.saved().map(|s| s.detail.nr_luminance), Some(0.0));
+    }
+
+    #[test]
+    fn double_click_on_amount_resets_to_fresh_raw_value_of_40() {
+        let folder = Folder::new("reset-amount", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        assert_eq!(h.settings().detail.sharpen_amount, 40.0);
+        // Change Amount away from 40.
+        let track = h.track("detail.sharpenAmount");
+        h.pointer(track.center() + egui::vec2(20.0, 0.0), Some(true));
+        h.pointer(track.center() + egui::vec2(20.0, 0.0), Some(false));
+        assert_ne!(h.settings().detail.sharpen_amount, 40.0);
+
+        for _ in 0..10 {
+            h.frame(vec![]);
+        }
+
+        // A plain double-click goes back to the fresh raw's 40, not to 0.
+        for _ in 0..2 {
+            h.pointer(track.center(), Some(true));
+            h.pointer(track.center(), Some(false));
+        }
+        assert_eq!(h.settings().detail.sharpen_amount, 40.0);
+    }
+
+    #[test]
+    fn comma_and_period_step_through_sliders_and_equals_nudges() {
+        let folder = Folder::new("step-sliders", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        // Selected begins on Exposure (index 2).
+        assert_eq!(h.app.selected, 2);
+
+        // Step back to index 0 (Temp).
+        h.press(Modifiers::NONE, Key::Comma);
+        h.press(Modifiers::NONE, Key::Comma);
+        assert_eq!(h.app.selected, 0);
+
+        // Step forward through Light (2..7), Presence (8..9), to Amount in Detail (10).
+        for _ in 0..10 {
+            h.press(Modifiers::NONE, Key::Period);
+        }
+        assert_eq!(h.app.selected, 10);
+        assert_eq!(h.settings().detail.sharpen_amount, 40.0);
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(h.settings().detail.sharpen_amount, 41.0, "nudged Amount");
+
+        // Step forward to Luminance (index 14).
+        for _ in 0..4 {
+            h.press(Modifiers::NONE, Key::Period);
+        }
+        assert_eq!(h.app.selected, 14);
+        assert_eq!(h.settings().detail.nr_luminance, 0.0);
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(h.settings().detail.nr_luminance, 1.0, "nudged Luminance");
+
+        // Step forward to Purple Amount in Lens Corrections (index 16).
+        h.press(Modifiers::NONE, Key::Period);
+        h.press(Modifiers::NONE, Key::Period);
+        assert_eq!(h.app.selected, 16);
+        assert_eq!(h.settings().optics.defringe_purple_amount, 0.0);
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(h.settings().optics.defringe_purple_amount, 1.0, "nudged Purple Amount");
+
+        // Step back with comma.
+        h.press(Modifiers::NONE, Key::Comma);
+        assert_eq!(h.app.selected, 15);
+    }
+
+    #[test]
+    fn clicking_remove_chromatic_aberration_turns_on_saves_and_ctrl_z_turns_off() {
+        let folder = Folder::new("remove-ca", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        assert!(!h.settings().optics.remove_ca);
+        let ca_rect = h.text("Remove Chromatic Aberration");
+        h.click(ca_rect.center());
+        assert!(h.settings().optics.remove_ca);
+        assert_eq!(h.saved().map(|s| s.optics.remove_ca), Some(true));
+
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert!(!h.settings().optics.remove_ca, "Ctrl+Z turns it off");
+        assert_eq!(h.saved().map(|s| s.optics.remove_ca), Some(false));
+    }
+
+    #[test]
+    fn auto_in_white_balance_sets_auto_mode_and_clicking_returns_to_as_shot() {
+        use lightcraft_develop::WbMode;
+        let folder = Folder::new("wb-auto", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        assert_eq!(h.settings().wb.mode, WbMode::AsShot);
+        // Initially state word is "As Shot", and to its left is "Auto".
+        let auto_btn = h.text("Auto");
+        h.click(auto_btn.center());
+        assert_eq!(h.settings().wb.mode, WbMode::Auto);
+
+        // State word is now "Auto", clicking it goes back to As Shot.
+        let auto_state = h.text("Auto");
+        h.click(auto_state.center());
+        assert_eq!(h.settings().wb.mode, WbMode::AsShot);
+    }
+
+    #[test]
+    fn auto_tone_and_auto_exposure_buttons_set_only_their_settings() {
+        let folder = Folder::new("auto-buttons", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().clone();
+
+        // "Auto Tone" sets Whites and Blacks and nothing else, in one step.
+        // Nothing clips in the tests' flat grey frame, so they're set to 0.
+        h.app.edit(|history, _| history.set(|settings| (settings.light.whites, settings.light.blacks, settings.light.contrast) = (30.0, -20.0, 10.0)));
+        let moved = h.settings().clone();
+        let tone_btn = h.text("Auto Tone");
+        h.click(tone_btn.center());
+        assert_eq!((h.settings().light.whites, h.settings().light.blacks), (0.0, 0.0));
+        assert_eq!(h.settings().light.contrast, 10.0);
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &moved, "one step to undo Auto Tone");
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh);
+
+        // "Auto Exposure" sets Exposure and nothing else; is one step to undo.
+        let exp_btn = h.text("Auto Exposure");
+        h.click(exp_btn.center());
+        assert_ne!(h.settings().light.exposure, 0.0);
+        assert_eq!(h.settings().light.whites, fresh.light.whites);
+        assert_eq!(h.settings().light.blacks, fresh.light.blacks);
+        assert_eq!(h.settings().light.contrast, fresh.light.contrast);
+        assert_eq!(h.settings().light.highlights, fresh.light.highlights);
+        assert_eq!(h.settings().light.shadows, fresh.light.shadows);
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh, "one step to undo Auto Exposure");
+    }
+
+    #[test]
+    fn shift_double_click_sets_control_alone_or_shows_no_automatic_value() {
+        let folder = Folder::new("shift-dc", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().clone();
+
+        // Shift+double-click on Exposure's name sets Exposure alone.
+        let exp_name = h.text("Exposure");
+        for _ in 0..2 {
+            h.click_with(exp_name.center(), Modifiers::SHIFT);
+        }
+        assert_ne!(h.settings().light.exposure, fresh.light.exposure);
+        assert_eq!(h.settings().light.contrast, fresh.light.contrast);
+        assert_eq!(h.settings().light.highlights, fresh.light.highlights);
+        assert_eq!(h.settings().light.shadows, fresh.light.shadows);
+        assert_eq!(h.settings().light.whites, fresh.light.whites);
+        assert_eq!(h.settings().light.blacks, fresh.light.blacks);
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh);
+        for _ in 0..10 {
+            h.frame(vec![]);
+        }
+
+        // Shift+double-click on Exposure's thumb also sets Exposure alone.
+        let track = h.track("light.exposure");
+        for _ in 0..2 {
+            h.click_with(track.center(), Modifiers::SHIFT);
+        }
+        assert_ne!(h.settings().light.exposure, fresh.light.exposure);
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh);
+        for _ in 0..10 {
+            h.frame(vec![]);
+        }
+
+        // Shift+double-click on Whites' name sets Whites alone: to 0, on
+        // a frame where nothing clips.
+        h.app.edit(|history, _| history.set(|settings| (settings.light.whites, settings.light.blacks) = (30.0, -20.0)));
+        let whites_name = h.text("Whites");
+        for _ in 0..2 {
+            h.click_with(whites_name.center(), Modifiers::SHIFT);
+        }
+        assert_eq!((h.settings().light.whites, h.settings().light.blacks), (0.0, -20.0));
+        assert_eq!(h.settings().light.exposure, fresh.light.exposure);
+        h.press(Modifiers::COMMAND, Key::Z);
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh);
+        for _ in 0..10 {
+            h.frame(vec![]);
+        }
+
+        // Shift+double-click on Amount changes nothing and status bar says no automatic value.
+        let amount_name = h.text("Amount");
+        for _ in 0..2 {
+            h.click_with(amount_name.center(), Modifiers::SHIFT);
+        }
+        assert_eq!(h.settings(), &fresh);
+        assert_eq!(h.said(), "There's no automatic value for that slider");
+    }
+
+    #[test]
     fn the_app_runs_with_no_monitor_found() {
         let mut h = Harness::new(&[]);
         h.frame(vec![]);
@@ -2594,21 +3299,21 @@ mod tests {
         // Unchecking White Balance, then Light.
         let wb_rect = h.text("White Balance");
         h.click(wb_rect.center());
-        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Light, Group::Presence]);
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), &Group::ALL[1..]);
 
         let light_rect = h.text("Light");
         h.click(light_rect.center());
-        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Presence]);
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), &Group::ALL[2..]);
 
         // Return copies only the rest into clipboard.
         h.press(Modifiers::NONE, Key::Enter);
         assert!(h.app.choosing.is_none());
-        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), [Group::Presence]);
+        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), &Group::ALL[2..]);
 
         // The next time it opens, the last choice is checked.
         h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
         assert!(h.app.choosing.is_some());
-        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Presence]);
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), &Group::ALL[2..]);
 
         // Check All selects everything again.
         let all_rect = h.text("Check All");
@@ -2618,11 +3323,11 @@ mod tests {
         // Esc copies nothing and leaves the clipboard as it was.
         h.press(Modifiers::NONE, Key::Escape);
         assert!(h.app.choosing.is_none());
-        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), [Group::Presence]);
+        assert_eq!(h.app.clipboard.as_ref().unwrap().groups(), &Group::ALL[2..]);
 
         // Since Esc cancelled, the next time it opens, the previously remembered choice is still checked.
         h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
-        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), [Group::Presence]);
+        assert_eq!(h.app.choosing.as_ref().unwrap().chosen(), &Group::ALL[2..]);
 
         // Closing the shoot closes the dialog.
         h.app.close();
@@ -2734,4 +3439,262 @@ mod tests {
         assert_eq!(h.said(), "DSC00005.ARW isn't in a stack");
         assert_eq!(h.saved(), None);
     }
+
+    #[test]
+    fn crop_panel_is_drawn_only_while_the_tool_is_open() {
+        let folder = Folder::new("crop-panel-open", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        let output = h.frame(vec![]);
+        assert!(!texts(&output).iter().any(|(t, _)| t == "Crop & Straighten"));
+
+        h.press(Modifiers::NONE, Key::R);
+        let output = h.frame(vec![]);
+        assert!(texts(&output).iter().any(|(t, _)| t == "Crop & Straighten"));
+
+        h.press(Modifiers::NONE, Key::Enter);
+        let output = h.frame(vec![]);
+        assert!(!texts(&output).iter().any(|(t, _)| t == "Crop & Straighten"));
+    }
+
+    #[test]
+    fn aspect_menu_crops_to_square_and_original_restores() {
+        let folder = Folder::new("crop-aspect-square", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        let orig = h.text("Original");
+        h.click(orig.center());
+        let one_by_one = h.text("1 x 1");
+        h.click(one_by_one.center());
+
+        let dims = h.app.dims().unwrap();
+        let rect = h.settings().crop.geometry.rect_px(dims.0, dims.1);
+        assert!((rect.width() - rect.height()).abs() < 1e-3, "square in pixels: {rect:?}");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+
+        let output = h.frame(vec![]);
+        assert!(texts(&output).iter().any(|(t, _)| t == "1 x 1"));
+
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert!(h.settings().crop.geometry.is_identity(), "one step to undo");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+
+        let orig = h.text("Original");
+        h.click(orig.center());
+        let one = h.text("1 x 1");
+        h.click(one.center());
+        assert!(!h.settings().crop.geometry.is_identity());
+
+        let combo = h.text("1 x 1");
+        h.click(combo.center());
+        let orig_menu = h.text("Original");
+        h.click(orig_menu.center());
+        assert!(h.settings().crop.geometry.is_identity(), "whole frame back");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+    }
+
+    #[test]
+    fn swap_turns_crop_on_its_side_and_combo_still_shows_ratio() {
+        let folder = Folder::new("crop-swap", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        let orig = h.text("Original");
+        h.click(orig.center());
+        let ratio = h.text("4 x 5 / 8 x 10");
+        h.click(ratio.center());
+
+        let dims = h.app.dims().unwrap();
+        let landscape = h.settings().crop.geometry.rect_px(dims.0, dims.1);
+        assert!(landscape.width() > landscape.height());
+
+        let swap = h.text("Swap");
+        h.click(swap.center());
+
+        let portrait = h.settings().crop.geometry.rect_px(dims.0, dims.1);
+        assert!(portrait.width() < portrait.height());
+
+        let output = h.frame(vec![]);
+        assert!(texts(&output).iter().any(|(t, _)| t == "4 x 5 / 8 x 10"));
+    }
+
+    #[test]
+    fn angle_slider_drag_and_double_click_reset() {
+        let folder = Folder::new("crop-angle-drag", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        let track = h.track("crop.angle");
+        let dims = h.app.dims().unwrap();
+
+        h.pointer(track.center(), Some(true));
+        h.pointer(track.center() + egui::vec2(track.width() / 4.0, 0.0), None);
+
+        assert!(h.settings().crop.geometry.angle > 0.0);
+        assert!(h.settings().crop.geometry.is_within_image(dims.0, dims.1));
+        assert_eq!(h.saved(), None, "not saved while dragging");
+
+        h.pointer(track.center() + egui::vec2(track.width() / 4.0, 0.0), Some(false));
+        assert!(h.saved().is_some(), "saved when drag ends");
+        let saved_angle = h.saved().unwrap().crop.geometry.angle;
+        assert_eq!(saved_angle, h.settings().crop.geometry.angle);
+
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().crop.geometry.angle, 0.0, "whole drag is one step to undo");
+        assert_eq!(h.saved().map(|s| s.crop.geometry.angle), Some(0.0));
+
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        assert_eq!(h.settings().crop.geometry.angle, saved_angle);
+
+        let name = h.text("Angle");
+        for _ in 0..2 {
+            h.pointer(name.center(), Some(true));
+            h.pointer(name.center(), Some(false));
+        }
+        assert_eq!(h.settings().crop.geometry.angle, 0.0);
+        assert_eq!(h.saved().map(|s| s.crop.geometry.angle), Some(0.0));
+    }
+
+    #[test]
+    fn typing_a_value_into_angle_sets_it() {
+        let folder = Folder::new("crop-angle-type", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        let value = h.value("crop.angle");
+        h.click(value.center());
+        h.type_text("5.0");
+        h.press(Modifiers::NONE, Key::Enter);
+
+        assert_eq!(h.settings().crop.geometry.angle, 5.0);
+        assert_eq!(h.saved().map(|s| s.crop.geometry.angle), Some(5.0));
+    }
+
+    #[test]
+    fn rotate_buttons_swap_dims_and_put_it_back_each_a_step() {
+        let folder = Folder::new("crop-rotate-btns", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        let (w, h0) = h.app.dims().unwrap();
+
+        let right = h.text("Rotate Right");
+        h.click(right.center());
+        assert_eq!(h.app.dims(), Some((h0, w)));
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+
+        let left = h.text("Rotate Left");
+        h.click(left.center());
+        assert_eq!(h.app.dims(), Some((w, h0)));
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.app.dims(), Some((h0, w)), "undo rotate left");
+
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.app.dims(), Some((w, h0)), "undo rotate right");
+    }
+
+    #[test]
+    fn reset_clears_crop_and_angle_but_not_quarter_turn_and_close_closes() {
+        let folder = Folder::new("crop-reset-close", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        let (w, h0) = h.app.dims().unwrap();
+        let right = h.text("Rotate Right");
+        h.click(right.center());
+        assert_eq!(h.app.dims(), Some((h0, w)));
+
+        let dims = h.app.dims().unwrap();
+        h.app.edit(|history, _| {
+            history.set(|settings| {
+                crop::set_aspect(settings, dims, crop::Aspect::Ratio(1, 1));
+                crop::straighten(settings, dims, 4.0);
+            })
+        });
+        assert_eq!(h.settings().crop.geometry.angle, 4.0);
+        assert!(!h.settings().crop.geometry.is_identity());
+
+        let reset = h.text("Reset");
+        h.click(reset.center());
+        assert_eq!(h.settings().crop.geometry.angle, 0.0);
+        assert!(h.settings().crop.geometry.is_identity());
+        assert_eq!(h.app.dims(), Some((h0, w)), "quarter turn stays");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+
+        assert!(h.app.crop.is_some());
+        let close = h.text("Close");
+        h.click(close.center());
+        assert!(h.app.crop.is_none());
+    }
+
+    #[test]
+    fn crop_lock_button_flips_crop_locked_and_shown_word() {
+        let folder = Folder::new("crop-lock", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        assert!(h.app.crop_locked);
+        let locked = h.text("Locked");
+        h.click(locked.center());
+
+        assert!(!h.app.crop_locked);
+        let output = h.frame(vec![]);
+        assert!(texts(&output).iter().any(|(t, _)| t == "Unlocked"));
+        assert!(!texts(&output).iter().any(|(t, _)| t == "Locked"));
+
+        let unlocked = h.text("Unlocked");
+        h.click(unlocked.center());
+
+        assert!(h.app.crop_locked);
+        let output = h.frame(vec![]);
+        assert!(texts(&output).iter().any(|(t, _)| t == "Locked"));
+        assert!(!texts(&output).iter().any(|(t, _)| t == "Unlocked"));
+    }
+
+    #[test]
+    fn auto_on_flat_grey_frame_changes_nothing_and_status_bar_says_so() {
+        let folder = Folder::new("crop-auto-level", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        assert_eq!(h.settings().crop.geometry.angle, 0.0);
+        // The crop panel's Auto, above White Balance's.
+        let output = h.frame(vec![]);
+        let auto = texts(&output).into_iter().filter(|(text, _)| text == "Auto").map(|(_, rect)| rect).min_by(|a, b| a.top().total_cmp(&b.top())).unwrap();
+        h.click(auto.center());
+
+        assert_eq!(h.settings().crop.geometry.angle, 0.0);
+        assert_eq!(h.said(), "Couldn't find a horizon or uprights to level by");
+    }
 }
+
