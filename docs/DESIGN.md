@@ -607,6 +607,30 @@ lensfun's database (see "Built on Lightcraft"), so:
 Lightcraft's automatic lateral CA estimate and its defringe cover the
 rest: Remove Chromatic Aberration and the fringes at f/1.8.
 
+As built in M5: **Sony's tables are the default**, lensfun's database the
+fallback for a raw without them. `omalux_engine::sony_lens` reads all
+three of the A7 III's (distortion `0x7037`, lateral CA `0x7035`,
+vignetting `0x7032`, in the raw IFD) into the pipeline's profile
+correction: the distortion as Lightcraft reads it for the A7R IVA
+(lifted, with the zoom that keeps the frame filled), the CA and
+vignetting as darktable reads them (ported, GPL, in OmaLux's crate). The
+pick was made against the camera's own JPEG, which Sony's lens
+compensation (on Auto in his maker notes) corrects: Sony's distortion
+lands on it to a quarter of a pixel at every radius and at its scale,
+lensfun's to a third, none to a half; the tables follow the focus
+distance, which lensfun's model doesn't; and they're in the raw, where
+a lensfun package update can't change a render. Their knots sit at
+Lightcraft's radii, not darktable's (a third of a pixel against a
+quarter on the FE 35).
+
+Lightroom's behaviour around it: a fresh raw opens with Enable Profile
+Corrections on, with the Distortion and Vignetting amounts (0 to 200);
+lensfun's correction is enlarged to fill the frame, as Lightroom's is
+and Sony's already is; and where the profile corrects lateral CA,
+Remove Chromatic Aberration's automatic estimate (made on the
+uncorrected picture) is left out rather than added to it
+(`look::effective`).
+
 ## AI
 
 Following Omapix and Omacull, not Lightcraft (whose SAM 3 runs on

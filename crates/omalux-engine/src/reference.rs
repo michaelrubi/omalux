@@ -62,14 +62,19 @@ fn looks(info: &SourceInfo) -> Vec<(&'static str, DevelopSettings)> {
 }
 
 /// And with what a frame opens with now: Camera match, Flat, and HDR on
-/// each side of the Light sliders.
+/// each side of the Light sliders, as process version 2 opened them
+/// (without the lens profile's corrections); and the lens profile's
+/// corrections, with Remove Chromatic Aberration, as M5 opens them.
 fn looks_now(info: &SourceInfo) -> Vec<(&'static str, DevelopSettings)> {
-    let fresh = look::fresh(info.as_shot_temp, info.as_shot_tint);
+    let lens = look::fresh(info.as_shot_temp, info.as_shot_tint);
+    let fresh = DevelopSettings { optics: lightcraft_develop::Optics { lens_profile: false, ..lens.optics }, ..lens.clone() };
     let mut flat = fresh.clone();
     Profile::Flat.set(&mut flat);
     let mut hdr = fresh.clone();
     (hdr.light.hdr, hdr.light.exposure, hdr.light.shadows) = (60.0, 0.3, -20.0);
-    vec![("camera", fresh), ("flat", flat), ("hdr", hdr)]
+    let mut lens = lens;
+    lens.optics.remove_ca = true;
+    vec![("camera", fresh), ("flat", flat), ("hdr", hdr), ("lens", lens)]
 }
 
 fn png(image: &Rgba8) -> Vec<u8> {

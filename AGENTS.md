@@ -2,7 +2,7 @@
 
 OmaLux is a fast, keyboard-first raw developer for Omarchy: the picks of a culled folder of raws in, 16-bit TIFFs ready to retouch out. It is the second stage of Michael's workflow and replaces darktable in it: cull in Omacull (`~/dev/omacull`), develop in OmaLux, retouch in Omapix (`~/dev/omapix`), export.
 
-**Status:** scoped on 2026-10-08 and re-planned on [Lightcraft](https://github.com/storytold/lightcraft)'s engine. M0 is done: Lightcraft vendored at `701f78e`, the workspace and an empty themed window (seen on Hyprland), the sidecar, the 16-bit export and the colour engine settled, and the `spike` and `lens` examples run on Michael's frames on the laptop (the camera match's gap there is DRO's shadow lift, as DESIGN.md expected). The GPU loupe's times jump because the GPU clocks down after half a second idle (the `idle` example), so the loupe prepares frames ahead and doesn't count on a cold render. M1, M2 (copy and paste, the selection, stacks) and M3 (Detail, Lens Corrections, Crop & Straighten, Auto) are built and haven't been tried by hand yet (see ROADMAP.md for each item, and what's open about exporting a frame again, selecting with stacks closed up, and what Auto tone does on backlit frames). M4 is under way on `m4`: a frame opens under Camera match from the ILCE-7M3's built-in Standard profile with DRO's shadow lift measured from its JPEG, Flat is on F, HDR is a slider, and the process version is 2 (an edit from 1 keeps the look fitted to its own JPEG); the DCP reader isn't wired in, and the side-by-side with Lightroom and Capture One waits for Michael's reference set (see ROADMAP.md). What M0 left moved to M4, M5 and M6 (see ROADMAP.md). raw.pixls.us is blocked in the cloud sessions, so real raws only go through the code on the laptop. Read [docs/DESIGN.md](docs/DESIGN.md) for scope and architecture and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones and the "Later" list.
+**Status:** scoped on 2026-10-08 and re-planned on [Lightcraft](https://github.com/storytold/lightcraft)'s engine. M0 is done: Lightcraft vendored at `701f78e`, the workspace and an empty themed window (seen on Hyprland), the sidecar, the 16-bit export and the colour engine settled, and the `spike` and `lens` examples run on Michael's frames on the laptop (the camera match's gap there is DRO's shadow lift, as DESIGN.md expected). The GPU loupe's times jump because the GPU clocks down after half a second idle (the `idle` example), so the loupe prepares frames ahead and doesn't count on a cold render. M1, M2 (copy and paste, the selection, stacks) and M3 (Detail, Lens Corrections, Crop & Straighten, Auto) are built and haven't been tried by hand yet (see ROADMAP.md for each item, and what's open about exporting a frame again, selecting with stacks closed up, and what Auto tone does on backlit frames). M4 is under way on `m4`: a frame opens under Camera match from the ILCE-7M3's built-in Standard profile with DRO's shadow lift measured from its JPEG, Flat is on F, HDR is a slider, and the process version is 2 (an edit from 1 keeps the look fitted to its own JPEG); the DCP reader isn't wired in, and the side-by-side with Lightroom and Capture One waits for Michael's reference set (see ROADMAP.md). M5 (lens profiles) is built on `m5`: a fresh raw opens with Sony's own distortion, vignetting and lateral CA corrections from the raw, picked over lensfun's against the camera's JPEG; not tried by hand yet, and the comparison with Lightroom's correction waits for Michael's renders. What M0 left moved to M4, M5 and M6 (see ROADMAP.md). raw.pixls.us is blocked in the cloud sessions, so real raws only go through the code on the laptop. Read [docs/DESIGN.md](docs/DESIGN.md) for scope and architecture and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones and the "Later" list.
 
 ## Principles
 
@@ -71,9 +71,11 @@ cargo run --release -p omalux-engine --example spike -- path/to/shoot --out /tmp
 # something small to do every 100 ms meanwhile)
 cargo run --release -p omalux-engine --example idle -- path/to/DSC01234.ARW
 
-# M0's lens spike: lensfun's match and Sony's table per frame, and renders
-# with lensfun's correction and without (OMALUX_LENSFUN_DIR, else
-# /usr/share/lensfun/version_1)
+# M5's lens comparison: each frame uncorrected, with lensfun's correction
+# and with Sony's, measured against the camera's (lens-compensated) JPEG
+# for distortion and vignetting, and a NAME.lightroom-lens.tif beside the
+# raw too; sheets at fit and the corner at 100% in --out
+# (OMALUX_LENSFUN_DIR, else /usr/share/lensfun/version_1)
 cargo run --release -p omalux-engine --example lens -- path/to/shoot --out /tmp/lens
 
 # M3's check of Remove Chromatic Aberration and Defringe: the lateral CA

@@ -899,6 +899,9 @@ impl App {
         if let Some(on) = out.remove_ca {
             self.edit(|history, _| history.set(|settings| settings.optics.remove_ca = on));
         }
+        if let Some(on) = out.lens_profile {
+            self.edit(|history, _| history.set(|settings| settings.optics.lens_profile = on));
+        }
         let Some((index, slid)) = out.slider else { return };
         let Some(spec) = develop::sliders().nth(index) else { return };
         if slid.touched {
@@ -2966,21 +2969,23 @@ mod tests {
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().detail.nr_luminance, 1.0, "nudged Luminance");
 
-        // Step forward to Purple Amount in Lens Corrections (index 17).
-        h.press(Modifiers::NONE, Key::Period);
-        h.press(Modifiers::NONE, Key::Period);
-        assert_eq!(h.app.selected, 17);
+        // Step forward past the profile's Distortion and Vignetting to
+        // Purple Amount in Lens Corrections (index 19).
+        for _ in 0..4 {
+            h.press(Modifiers::NONE, Key::Period);
+        }
+        assert_eq!(h.app.selected, 19);
         assert_eq!(h.settings().optics.defringe_purple_amount, 0.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().optics.defringe_purple_amount, 1.0, "nudged Purple Amount");
 
         // Step back with comma.
         h.press(Modifiers::NONE, Key::Comma);
-        assert_eq!(h.app.selected, 16);
+        assert_eq!(h.app.selected, 18);
     }
 
     #[test]
-    fn clicking_remove_chromatic_aberration_turns_on_saves_and_ctrl_z_turns_off() {
+    fn clicking_remove_chromatic_aberration_and_profile_corrections_saves_and_ctrl_z_undoes() {
         let folder = Folder::new("remove-ca", &[1]);
         let mut h = Harness::new(&[]);
         h.screen = egui::vec2(800.0, 2000.0);
@@ -2988,6 +2993,8 @@ mod tests {
         h.settle();
 
         assert!(!h.settings().optics.remove_ca);
+        assert!(h.settings().optics.lens_profile, "a fresh raw has its profile's corrections on");
+        let _ = h.text("No profile for this lens");
         let ca_rect = h.text("Remove Chromatic Aberration");
         h.click(ca_rect.center());
         assert!(h.settings().optics.remove_ca);
@@ -2996,6 +3003,14 @@ mod tests {
         h.press(Modifiers::COMMAND, Key::Z);
         assert!(!h.settings().optics.remove_ca, "Ctrl+Z turns it off");
         assert_eq!(h.saved().map(|s| s.optics.remove_ca), Some(false));
+
+        // Enable Profile Corrections likewise, the other way.
+        let profile_rect = h.text("Enable Profile Corrections");
+        h.click(profile_rect.center());
+        assert!(!h.settings().optics.lens_profile);
+        assert_eq!(h.saved().map(|s| s.optics.lens_profile), Some(false));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert!(h.settings().optics.lens_profile, "Ctrl+Z turns it back on");
     }
 
     #[test]
@@ -3185,10 +3200,10 @@ mod tests {
             h.frame(vec![]);
         }
 
-        // Shift+double-click on Amount changes nothing and status bar says no automatic value.
-        let amount_name = h.text("Amount");
+        // Shift+double-click on Masking changes nothing and status bar says no automatic value.
+        let masking_name = h.text("Masking");
         for _ in 0..2 {
-            h.click_with(amount_name.center(), Modifiers::SHIFT);
+            h.click_with(masking_name.center(), Modifiers::SHIFT);
         }
         assert_eq!(h.settings(), &fresh);
         assert_eq!(h.said(), "There's no automatic value for that slider");

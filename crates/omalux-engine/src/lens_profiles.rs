@@ -5,10 +5,10 @@
 //! directory in `OMALUX_LENSFUN_DIR`, else the system's (`pacman -S lensfun`: `/usr/share/lensfun/version_1`;
 //! CC-BY-SA, never shipped with OmaLux). The profile is converted to the same [`lightcraft_develop::EmbeddedLens`]
 //! form, so "Enable Profile Corrections", its amount sliders and the GPU path treat both alike. Without a database
-//! nothing changes. Which of lensfun's and Sony's own corrections is the default is M0's lens spike to decide.
+//! nothing changes. Sony's own corrections ([`crate::sony_lens`]) are the other [`Source`], and the default ([`DEFAULT`]).
 //!
 //! Lifted from Lightcraft (MIT OR Apache-2.0) at `701f78e`, `crates/engine/src/lens_profiles.rs`, with OmaLux's
-//! folder.
+//! folder and the choice of source.
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -55,18 +55,84 @@ pub fn lookup(db: &LensDb, m: &lightcraft_meta::Metadata, w: f64, h: f64, orient
     let crop =
         camera.map(|c| c.crop_factor).or_else(|| m.focal_length_35mm.map(|f35| f35 / focal).filter(|c| c.is_finite() && (0.1..=20.0).contains(c)));
     let shot = Shot { focal, aperture: m.f_number, distance: None, crop_factor: crop, width: w, height: h };
-    let corr = lens.correction(&shot)?;
+    let mut corr = lens.correction(&shot)?;
+    fill(&mut corr, w, h);
     Some(lightcraft_pipeline::optics::reorient_lens(&corr, orientation, w, h))
 }
 
-/// [`crate::raw::embedded_lens`], else the database profile ([`lookup`]) for a raw with metadata `meta`.
-pub fn for_raw(raw: &lightcraft_raw::RawInfo, meta: impl FnOnce() -> lightcraft_meta::Metadata) -> Option<EmbeddedLens> {
-    crate::raw::embedded_lens(raw).or_else(|| {
+/// Enlarge the picture under `lens`'s warp, for its `w × h` image, until it fills the frame, as Lightroom's profile
+/// correction does: correcting pincushion distortion pulls the edges in, and would leave the corners empty. (Sony's
+/// tables come with that zoom already: [`crate::sony_lens`].) The warp is radial about its centre, so scaling it is
+/// scaling where every output pixel samples from, about that centre.
+fn fill(lens: &mut EmbeddedLens, w: f64, h: f64) {
+    const STEPS: usize = 64;
+    let Some(warp) = lens.warp.as_mut() else { return };
+    let (cx, cy) = (warp.center.x * w, warp.center.y * h);
+    // how far along the ray from the centre a sample at offset d may go and stay on the picture
+    let room = |d: f64, centre: f64, size: f64| if d > 1e-9 { (size - 0.5 - centre) / d } else if d < -1e-9 { (0.5 - centre) / d } else { f64::INFINITY };
+    let mut zoom: f64 = 1.0;
+    for i in 0..=STEPS {
+        let t = i as f64 / STEPS as f64;
+        for (x, y) in [(t * w, 0.0), (t * w, h), (0.0, t * h), (w, t * h)] {
+            for ch in 0..3 {
+                let s = lightcraft_pipeline::optics::embedded_warp(warp, lightcraft_geom::Point::new(x, y), ch, w, h);
+                zoom = zoom.min(room(s.x - cx, cx, w)).min(room(s.y - cy, cy, h));
+            }
+        }
+    }
+    if zoom.is_finite() && zoom > 0.0 {
+        for plane in &mut warp.planes {
+            plane[..4].iter_mut().for_each(|k| *k *= zoom);
+        }
+    }
+}
+
+/// Where a frame's profile correction comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Source {
+    /// lensfun's database ([`lookup`]): a model per lens, focal length and aperture.
+    Lensfun,
+    /// The tables the camera wrote into the raw ([`crate::sony_lens`]), which follow the focus distance too.
+    Sony,
+}
+
+/// The source a frame's correction is taken from when it has both: Sony's, which M5's comparison with the camera's
+/// own JPEG picked (the `lens` example). Its distortion lands on the JPEG's to a quarter of a pixel at every radius
+/// at the JPEG's own scale, lensfun's to a third; it follows the focus distance; and it's in the raw, where a system
+/// package's update can't change a render.
+pub const DEFAULT: Source = Source::Sony;
+
+/// A frame's profile correction, and what the Lens Corrections panel says of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Found {
+    pub lens: EmbeddedLens,
+    pub source: Source,
+    /// The lens, as the panel names it: lensfun's name for it, or the one the raw gives.
+    pub name: String,
+}
+
+/// The profile correction for the raw `bytes`, whose header is `raw`: [`crate::raw::embedded_lens`] if the raw
+/// reader found one, else `source`'s, else the other source's.
+pub fn for_raw(raw: &lightcraft_raw::RawInfo, bytes: &[u8], source: Source) -> Option<Found> {
+    let meta = lightcraft_meta::extract(bytes);
+    let named = meta.lens_model.clone().unwrap_or_default();
+    if let Some(lens) = crate::raw::embedded_lens(raw) {
+        return Some(Found { lens, source: Source::Sony, name: named });
+    }
+    let lensfun = || {
         let db = database()?;
         let c = raw.crop.clipped(raw.active_area.width, raw.active_area.height);
         let (w, h) = if c.width == 0 || c.height == 0 { (raw.active_area.width, raw.active_area.height) } else { (c.width, c.height) };
-        lookup(db, &meta(), w as f64, h as f64, raw.orientation)
-    })
+        let lens = lookup(db, &meta, w as f64, h as f64, raw.orientation)?;
+        let camera = db.find_camera(meta.make.as_deref().unwrap_or_default(), meta.model.as_deref().unwrap_or_default());
+        let name = db.find_lens(meta.lens_make.as_deref(), meta.lens_model.as_deref()?, camera)?.models.first().cloned().unwrap_or_default();
+        Some(Found { lens, source: Source::Lensfun, name })
+    };
+    let sony = || crate::sony_lens::corrections(bytes, raw).map(|lens| Found { lens, source: Source::Sony, name: named.clone() });
+    match source {
+        Source::Lensfun => lensfun().or_else(sony),
+        Source::Sony => sony().or_else(lensfun),
+    }
 }
 
 #[cfg(test)]
@@ -106,6 +172,25 @@ mod tests {
         assert!(lookup(&db, &lightcraft_meta::Metadata { focal_length: None, ..meta() }, 6000.0, 4000.0, Orientation::Normal).is_none());
         let other = lightcraft_meta::Metadata { lens_model: Some("70-200mm F4".into()), ..meta() };
         assert!(lookup(&db, &other, 6000.0, 4000.0, Orientation::Normal).is_none());
+    }
+
+    /// Correcting pincushion distortion pulls the edges in: the picture is enlarged until every output pixel
+    /// samples the picture, and no more than that. Barrel distortion's correction needs nothing.
+    #[test]
+    fn a_pincushion_correction_fills_the_frame() {
+        let pincushion = DB.replace("k1=\"-0.03\"", "k1=\"0.03\"");
+        let (w, h) = (6000.0, 4000.0);
+        let corner = |db: &str| {
+            let lens = lookup(&LensDb::parse(db).unwrap(), &meta(), w, h, Orientation::Normal).unwrap();
+            (0..3).map(|ch| lightcraft_pipeline::optics::embedded_warp(&lens.warp.unwrap(), lightcraft_geom::Point::new(0.0, 0.0), ch, w, h)).collect::<Vec<_>>()
+        };
+        for s in corner(&pincushion) {
+            assert!(s.x >= 0.5 && s.y >= 0.5 && (s.x < 3.0 || s.y < 3.0), "the corner samples the picture's corner: {s:?}");
+        }
+        let unscaled = LensDb::parse(DB).unwrap().lenses[0].correction(&Shot { focal: 18.0, aperture: Some(3.5), distance: None, crop_factor: Some(1.5), width: w, height: h }).unwrap();
+        let scaled = lookup(&LensDb::parse(DB).unwrap(), &meta(), w, h, Orientation::Normal).unwrap().warp.unwrap().planes[1][0];
+        let zoom = scaled / unscaled.warp.unwrap().planes[1][0];
+        assert!((0.999..=1.0).contains(&zoom), "barrel: as it was, but for the half pixel kept in: {zoom}");
     }
 
     /// A synthetic grid recorded through the profile's barrel distortion comes out of the pipeline's geometry
