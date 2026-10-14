@@ -20,6 +20,7 @@ mod dro;
 pub mod edit;
 pub mod export;
 pub mod fusion;
+pub mod lens_check;
 pub mod lens_profiles;
 pub mod look;
 pub mod raw;
