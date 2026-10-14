@@ -13,7 +13,7 @@ use lightcraft_codecs::display::DisplayProfile;
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::SourceInfo;
 use omalux_engine::auto::{self, Auto};
-use omalux_engine::copy::{Copied, Group};
+use omalux_engine::copy::{self, Copied, Group};
 use omalux_engine::crop;
 use omalux_engine::disk::{Disk, Mark, Problem};
 use omalux_engine::edit::{self, History};
@@ -162,6 +162,12 @@ pub struct App {
     selector: bool,
     /// The loupe shows the current frame with no edit, until it's left.
     before: bool,
+    /// The keyboard shortcuts legend is open.
+    legend: bool,
+    /// The groups of settings whose panels are switched off: the loupe
+    /// shows every frame without them, until they're on again or another
+    /// shoot is opened. Never saved.
+    off: Vec<Group>,
     /// The folder picker, while it's open.
     picking: Option<Receiver<Option<PathBuf>>>,
     /// Frames being exported, while the export runs.
@@ -278,6 +284,8 @@ impl App {
             dragging: false,
             selector: false,
             before: false,
+            legend: false,
+            off: Vec::new(),
             picking: None,
             exporting: None,
             message: None,
@@ -357,6 +365,7 @@ impl App {
         (self.at, self.previous) = (None, None);
         self.choosing = None;
         self.crop = None;
+        self.off.clear();
         self.leave();
     }
 
@@ -528,6 +537,7 @@ impl App {
             }
             Command::BeforeAfter => self.before = !self.before && self.shoot.is_some(),
             Command::Clipping => self.clipping = !self.clipping,
+            Command::Shortcuts => self.legend = !self.legend,
             // The crop tool shows the frame whole.
             Command::Zoom if self.crop.is_some() => {}
             Command::Zoom => {
@@ -802,6 +812,9 @@ impl App {
     /// Move the selected slider by `steps` nudges.
     fn nudge(&mut self, steps: f64) {
         let Some(spec) = develop::sliders().nth(self.selected) else { return };
+        // As a touch of the slider would, it turns its panel back on.
+        let groups = develop::switches_of(self.selected);
+        self.off.retain(|group| !groups.contains(group));
         self.edit(|history, info| {
             let value = lightcraft_develop::controls::get(history.settings(), spec.id).unwrap_or(spec.default);
             history.set(|settings| {
@@ -887,6 +900,12 @@ impl App {
 
     /// What was done in the develop panel.
     fn panel(&mut self, out: PanelOut) {
+        if let Some((groups, on)) = out.switch {
+            self.off.retain(|group| !groups.contains(group));
+            if !on {
+                self.off.extend_from_slice(groups);
+            }
+        }
         if let Some(profile) = out.profile {
             self.edit(|history, _| history.set(|settings| profile.set(settings)));
         }
@@ -1003,11 +1022,14 @@ impl App {
         self.disk_problems();
         if !ctx.egui_wants_keyboard_input() && self.choosing.is_none() {
             // The crop tool's own keys first: its X isn't a reject.
-            if self.crop.is_some() {
+            if self.crop.is_some() && !self.legend {
                 self.crop_keys(ctx);
             }
+            // Under the legend, only its own key, to put it away.
             for command in Command::pressed(ctx, &mut self.v_down) {
-                self.run(command, ctx);
+                if !self.legend || command == Command::Shortcuts {
+                    self.run(command, ctx);
+                }
             }
         }
         self.run_script(ctx);
@@ -1040,23 +1062,7 @@ impl App {
     /// Ask for the current frame and its neighbours to be developed, and
     /// take in what's been finished.
     fn develop(&mut self, ctx: &egui::Context) {
-        let paths: Vec<PathBuf> = self.shoot.as_ref().map_or_else(Vec::new, |shoot| {
-            let frames = std::iter::once(shoot.current()).chain(shoot.neighbours(AHEAD, BEHIND));
-            frames.map(|i| shoot.frames()[i].path.clone()).collect()
-        });
-        let mut wanted: Vec<Wanted> = paths.into_iter().map(|path| Wanted { settings: self.settings_of(&path), path }).collect();
-        // Before: the current frame as a fresh raw (`None` is one).
-        if let Some(current) = wanted.first_mut().filter(|_| self.before) {
-            current.settings = None;
-        }
-        // The crop tool draws its crop over the current frame whole, so
-        // a change to the crop there is nothing to render again.
-        if self.crop.is_some()
-            && let Some(current) = wanted.first_mut()
-            && let Some(settings) = current.settings.as_mut().filter(|settings| settings.crop != Default::default())
-        {
-            Arc::make_mut(settings).crop = Default::default();
-        }
+        let wanted = self.wanted();
         let zoom = self.loupe.zoom().filter(|_| self.crop.is_none());
         self.loupe.retain(|path| wanted.iter().any(|w| w.path == path));
         self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom });
@@ -1081,6 +1087,37 @@ impl App {
                 News::Failed(path, error) => self.message = Some((format!("Couldn't develop {}: {error}", file_name(&path)), true)),
             }
         }
+    }
+
+    /// The current frame and its neighbours, as the loupe is to show them.
+    fn wanted(&mut self) -> Vec<Wanted> {
+        let paths: Vec<PathBuf> = self.shoot.as_ref().map_or_else(Vec::new, |shoot| {
+            let frames = std::iter::once(shoot.current()).chain(shoot.neighbours(AHEAD, BEHIND));
+            frames.map(|i| shoot.frames()[i].path.clone()).collect()
+        });
+        let mut wanted: Vec<Wanted> = paths.into_iter().map(|path| Wanted { settings: self.settings_of(&path), path }).collect();
+        // Panels switched off: each frame without them, once it's decoded
+        // and its fresh settings are known.
+        if !self.off.is_empty() {
+            for frame in &mut wanted {
+                if let Some(editing) = self.edits.get(&frame.path) {
+                    frame.settings = Some(Arc::new(copy::switched_off(&editing.settings, editing.history.fresh(), &self.off)));
+                }
+            }
+        }
+        // Before: the current frame as a fresh raw (`None` is one).
+        if let Some(current) = wanted.first_mut().filter(|_| self.before) {
+            current.settings = None;
+        }
+        // The crop tool draws its crop over the current frame whole, so
+        // a change to the crop there is nothing to render again.
+        if self.crop.is_some()
+            && let Some(current) = wanted.first_mut()
+            && let Some(settings) = current.settings.as_mut().filter(|settings| settings.crop != Default::default())
+        {
+            Arc::make_mut(settings).crop = Default::default();
+        }
+        wanted
     }
 
     /// A frame's settings as they stand: its edit this session, or else
@@ -1121,6 +1158,8 @@ impl App {
         let mut picked = None;
         let mut cropped = None;
         let mut clicked = None;
+        let context = self.menu_context();
+        let mut chosen = None;
         egui::CentralPanel::no_frame().frame(pasteboard).show(ui, |ui| match &self.shoot {
             Some(shoot) => {
                 let mouse = if self.crop.is_some() {
@@ -1131,15 +1170,23 @@ impl App {
                     Mouse::Zoom
                 };
                 let path = &shoot.frame().path;
-                picked = self.loupe.show(ui, path, mouse);
+                let response;
+                (picked, response) = self.loupe.show(ui, path, mouse);
+                if let Some(response) = &response {
+                    chosen = crate::menus::loupe(response, &self.theme, &context);
+                }
                 if let (Some(tool), Some(editing), Some(dims)) = (&mut self.crop, self.edits.get(path), dims) {
                     let settings = editing.history.settings();
                     let frame = crate::crop::Frame { area: self.loupe.area(), whole: self.loupe.whole(path, settings.orientation), dims };
                     cropped = Some(tool.show(ui, &self.theme, frame, settings, self.crop_locked));
                 }
+                // What the loupe leaves out, so it isn't forgotten.
+                let corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);
                 if self.before {
-                    let corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);
                     ui.painter().text(corner, Align2::LEFT_TOP, "Before", FontId::proportional(13.0), self.theme.foreground);
+                } else if !self.off.is_empty() {
+                    let off = Group::ALL.iter().filter(|group| self.off.contains(group)).map(|group| group.label()).collect::<Vec<_>>().join(", ");
+                    ui.painter().text(corner, Align2::LEFT_TOP, format!("Off: {off}"), FontId::proportional(13.0), self.theme.foreground);
                 }
             }
             None => clicked = self.empty_state(ui),
@@ -1152,6 +1199,12 @@ impl App {
         }
         if let Some(dir) = clicked {
             self.open(dir);
+        }
+        if let Some(command) = chosen {
+            self.run(command, &ui.ctx().clone());
+        }
+        if self.legend {
+            self.legend = crate::legend::show(ui.ctx(), &self.theme);
         }
         if let Some(mut dialog) = self.choosing.take() {
             match dialog.show(ui.ctx(), &self.theme) {
@@ -1168,18 +1221,46 @@ impl App {
     /// The shown frames' thumbnails, under the loupe.
     fn filmstrip(&mut self, ui: &mut Ui) {
         let Some(shoot) = &mut self.shoot else { return };
-        let Some((clicked, click)) = self.filmstrip.show(ui, shoot, &self.theme) else { return };
+        let (clicked, response) = self.filmstrip.show(ui, shoot, &self.theme);
         let was = shoot.current();
-        match click {
-            Click::Toggle => shoot.toggle_selected(clicked),
-            Click::Range => shoot.select_to(clicked),
-            Click::Plain => {
+        match clicked {
+            Some((clicked, Click::Toggle)) => shoot.toggle_selected(clicked),
+            Some((clicked, Click::Range)) => shoot.select_to(clicked),
+            Some((clicked, Click::Plain)) => {
                 shoot.clear_selection();
                 shoot.go_to(clicked);
             }
+            // The menu acts on the frame right-clicked, and on the
+            // selection only if that's in it, as in Lightroom.
+            Some((clicked, Click::Menu)) if !shoot.is_selected(clicked) => {
+                shoot.clear_selection();
+                shoot.go_to(clicked);
+            }
+            Some((clicked, Click::Menu)) => shoot.go_to(clicked),
+            None => {}
         }
         if shoot.current() != was {
             self.leave();
+        }
+        if let Some(command) = crate::menus::filmstrip(&response, &self.theme, &self.menu_context()) {
+            self.run(command, &ui.ctx().clone());
+        }
+    }
+
+    /// What the right-click menus are told about the current frame.
+    fn menu_context(&self) -> crate::menus::Context {
+        let Some(shoot) = &self.shoot else { return Default::default() };
+        let current = shoot.current();
+        let settings = self.edits.get(&shoot.frame().path).map(|editing| editing.history.settings());
+        crate::menus::Context {
+            rating: shoot.frame().rating,
+            copied: self.clipboard.is_some(),
+            previous: self.previous.is_some(),
+            stack: shoot.stack(current).map(|_| shoot.expanded(current)),
+            selection: shoot.selection().len() > 1,
+            before: self.before,
+            clipping: self.clipping,
+            flat: settings.is_some_and(|settings| Profile::of(settings) == Profile::Flat),
         }
     }
 
@@ -1202,7 +1283,7 @@ impl App {
         let (cropped, out) = scroll
             .show(ui, |ui| {
                 let cropped = dims.map(|dims| crop_panel::show(ui, &self.theme, settings, dims, self.crop_locked));
-                (cropped, develop::show(ui, &self.theme, settings, fresh, self.selected, &editing.camera))
+                (cropped, develop::show(ui, &self.theme, settings, fresh, self.selected, &editing.camera, &self.off))
             })
             .inner;
         if let Some(cropped) = cropped {
@@ -1543,6 +1624,14 @@ mod tests {
             if modifiers != Modifiers::NONE {
                 self.frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
             }
+        }
+
+        /// A right-click: what opens a menu.
+        fn right_click(&mut self, at: egui::Pos2) {
+            let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Modifiers::NONE };
+            self.frame(vec![Event::PointerMoved(at), button(true)]);
+            self.frame(vec![button(false)]);
+            self.frame(vec![]);
         }
     }
 
@@ -2951,37 +3040,37 @@ mod tests {
         h.press(Modifiers::NONE, Key::Comma);
         assert_eq!(h.app.selected, 0);
 
-        // Step forward through Light (2..7), HDR (8), Presence (9..10), to Amount in Detail (11).
-        for _ in 0..11 {
+        // Step forward through Light (2..7), HDR (8..10), Presence (11..12), to Amount in Detail (13).
+        for _ in 0..13 {
             h.press(Modifiers::NONE, Key::Period);
         }
-        assert_eq!(h.app.selected, 11);
+        assert_eq!(h.app.selected, 13);
         assert_eq!(h.settings().detail.sharpen_amount, 40.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().detail.sharpen_amount, 41.0, "nudged Amount");
 
-        // Step forward to Luminance (index 15).
+        // Step forward to Luminance (index 17).
         for _ in 0..4 {
             h.press(Modifiers::NONE, Key::Period);
         }
-        assert_eq!(h.app.selected, 15);
+        assert_eq!(h.app.selected, 17);
         assert_eq!(h.settings().detail.nr_luminance, 0.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().detail.nr_luminance, 1.0, "nudged Luminance");
 
         // Step forward past the profile's Distortion and Vignetting to
-        // Purple Amount in Lens Corrections (index 19).
+        // Purple Amount in Lens Corrections (index 21).
         for _ in 0..4 {
             h.press(Modifiers::NONE, Key::Period);
         }
-        assert_eq!(h.app.selected, 19);
+        assert_eq!(h.app.selected, 21);
         assert_eq!(h.settings().optics.defringe_purple_amount, 0.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().optics.defringe_purple_amount, 1.0, "nudged Purple Amount");
 
         // Step back with comma.
         h.press(Modifiers::NONE, Key::Comma);
-        assert_eq!(h.app.selected, 18);
+        assert_eq!(h.app.selected, 20);
     }
 
     #[test]
@@ -3069,6 +3158,43 @@ mod tests {
     }
 
     #[test]
+    fn a_panels_switch_shows_the_frame_without_it_and_saves_nothing() {
+        let folder = Folder::new("switches", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let specs: Vec<_> = develop::sliders().collect();
+        h.app.selected = specs.iter().position(|spec| spec.id == "light.hdr").unwrap();
+        for _ in 0..30 {
+            h.press(Modifiers::NONE, Key::Equals);
+        }
+        let saved = h.saved();
+        // The switch is just left of the panel's title.
+        let output = h.frame(vec![]);
+        let title = texts(&output).into_iter().find(|(text, _)| text == "HDR").map(|(_, rect)| rect).expect("the HDR panel");
+        let switch = title.left_center() - egui::vec2(10.0, 0.0);
+        let shown = |h: &mut Harness| h.app.wanted()[0].settings.as_ref().map(|settings| settings.light.hdr);
+        h.click(switch);
+        assert_eq!(h.app.off, [Group::Hdr]);
+        assert_eq!((shown(&mut h), h.settings().light.hdr), (Some(0.0), 30.0), "the loupe without it, the edit as it was");
+        assert_eq!(h.saved(), saved);
+        assert!(texts(&h.frame(vec![])).iter().any(|(text, _)| text == "Off: HDR"));
+        // Onto the next frame, and back: still off.
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.settle();
+        h.press(Modifiers::NONE, Key::ArrowLeft);
+        assert_eq!(h.app.off, [Group::Hdr]);
+        // A nudge of one of its sliders turns it back on.
+        h.press(Modifiers::NONE, Key::Equals);
+        assert!(h.app.off.is_empty());
+        assert_eq!(shown(&mut h), Some(31.0));
+        h.click(switch);
+        h.app.open(folder.0.clone());
+        assert!(h.app.off.is_empty(), "a shoot opens with every panel on");
+    }
+
+        #[test]
     fn hdr_is_a_slider_between_light_and_presence() {
         let folder = Folder::new("hdr", &[1]);
         let mut h = Harness::new(&[]);
@@ -3078,7 +3204,8 @@ mod tests {
 
         let specs: Vec<_> = develop::sliders().collect();
         let at = specs.iter().position(|spec| spec.id == "light.hdr").unwrap();
-        assert_eq!((specs[at - 1].id, specs[at + 1].id), ("light.blacks", "color.vibrance"));
+        let ids = |range: std::ops::RangeInclusive<usize>| specs[range].iter().map(|spec| spec.id).collect::<Vec<_>>();
+        assert_eq!(ids(at - 1..=at + 3), ["light.blacks", "light.hdr", "light.hdrHighlights", "light.hdrShadows", "color.vibrance"]);
         h.app.selected = at;
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().light.hdr, 1.0);
@@ -3214,6 +3341,28 @@ mod tests {
         let mut h = Harness::new(&[]);
         h.frame(vec![]);
         assert!(h.app.display.is_none());
+    }
+
+    #[test]
+    fn a_right_click_in_the_filmstrip_goes_to_the_frame_and_keeps_a_selection_its_in() {
+        let folder = Folder::new("right clicks", &[1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+        let cell = |h: &Harness, index: usize| h.app.filmstrip.cells.iter().find(|(i, _)| *i == index).map(|(_, r)| r.center()).expect("filmstrip cell");
+        h.right_click(cell(&h, 1));
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 1);
+        // Each right-click opens the menu: Esc puts it away (and it's
+        // gone from under the pointer a frame later).
+        h.press(Modifiers::NONE, Key::Escape);
+        h.frame(vec![]);
+        h.click_with(cell(&h, 2), Modifiers::COMMAND);
+        h.right_click(cell(&h, 1));
+        assert_eq!((h.app.shoot.as_ref().unwrap().current(), h.app.shoot.as_ref().unwrap().selection()), (1, vec![1, 2]));
+        h.press(Modifiers::NONE, Key::Escape);
+        h.frame(vec![]);
+        h.right_click(cell(&h, 0));
+        assert_eq!((h.app.shoot.as_ref().unwrap().current(), h.app.shoot.as_ref().unwrap().selection()), (0, vec![]));
     }
 
     #[test]
@@ -3381,9 +3530,12 @@ mod tests {
         assert!(h.app.choosing.is_none());
 
         h.app.open(folder.0.clone());
-        // Does not open before current frame has been decoded.
+        // Does not open before current frame has been decoded (which can
+        // be done by the frame the keys are read in, keys after).
         h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
-        assert!(h.app.choosing.is_none());
+        let decoded = h.app.edits.contains_key(&h.app.shoot.as_ref().unwrap().frame().path);
+        assert_eq!(h.app.choosing.is_some(), decoded);
+        h.app.choosing = None;
 
         h.settle();
 
@@ -3798,5 +3950,39 @@ mod tests {
         assert_eq!(h.settings().crop.geometry.angle, 0.0);
         assert_eq!(h.said(), "Couldn't find a horizon or uprights to level by");
     }
-}
 
+    #[test]
+    fn right_click_filmstrip_cell_and_click_pick() {
+        let folder = Folder::new("filmstrip-menu-pick", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+
+        let cell = |h: &Harness, index: usize| h.app.filmstrip.cells.iter().find(|(i, _)| *i == index).map(|(_, r)| r.center()).expect("filmstrip cell");
+        h.right_click(cell(&h, 0));
+        let output = h.frame(vec![]);
+        let pick = texts(&output).into_iter().find(|(text, _)| text == "Pick").map(|(_, rect)| rect).expect("Pick item in menu");
+        h.click(pick.center());
+
+        assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, omalux_engine::shoot::PICK);
+    }
+
+    #[test]
+    fn right_click_loupe_and_click_before_after() {
+        let folder = Folder::new("loupe-menu-before-after", &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        assert!(!h.app.before);
+
+        let loupe_center = h.app.loupe.area().center();
+        h.right_click(loupe_center);
+
+        let output = h.frame(vec![]);
+        let before_after = texts(&output).into_iter().find(|(text, _)| text == "Before/After").map(|(_, rect)| rect).expect("Before/After item in menu");
+        h.click(before_after.center());
+
+        assert!(h.app.before);
+    }
+}

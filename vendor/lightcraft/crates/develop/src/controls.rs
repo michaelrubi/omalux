@@ -141,6 +141,8 @@ controls! {
     "light.whites" => light.whites, "Whites", Light, -100, 100, 0, 1, 0, Centered;
     "light.blacks" => light.blacks, "Blacks", Light, -100, 100, 0, 1, 0, Centered;
     "light.hdr" => light.hdr, "HDR", Light, 0, 100, 0, 1, 0, Plain;
+    "light.hdrHighlights" => light.hdr_highlights, "HDR Highlights", Light, -100, 100, 0, 1, 0, Centered;
+    "light.hdrShadows" => light.hdr_shadows, "HDR Shadows", Light, -100, 100, 0, 1, 0, Centered;
     "hdr.maxEv" => hdr.max_ev, "HDR Headroom", Light, 0, 5, 3, 0.1, 1, Plain;
     "hdr.sdrBrightness" => hdr.sdr_brightness, "SDR Brightness", Light, -100, 100, 0, 1, 0, Centered;
     "hdr.sdrContrast" => hdr.sdr_contrast, "SDR Contrast", Light, -100, 100, 0, 1, 0, Centered;

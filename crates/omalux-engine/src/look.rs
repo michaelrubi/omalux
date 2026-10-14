@@ -11,7 +11,9 @@
 //!   ([`Camera`]): the Dynamic Range Optimizer's shadow lift. Camera match
 //!   puts it back under the Shadows slider, which stays at 0.
 //! - **HDR** is Highlights down and Shadows up together, by one amount, on
-//!   the pipeline's local tone mapping.
+//!   the pipeline's local tone mapping. Its own Highlights and Shadows give
+//!   either end more of it, or less, than the amount, darker to the left
+//!   and brighter to the right as Light's are.
 //!
 //! None of it is a stage of its own: [`effective`] gives the settings and
 //! the source facts the pipeline is handed, as Lightcraft's own profiles
@@ -141,15 +143,19 @@ fn profile_corrects_ca(settings: &DevelopSettings, info: &SourceInfo) -> bool {
 pub fn effective<'a>(settings: &'a DevelopSettings, info: &'a SourceInfo, camera: &Camera) -> (Cow<'a, DevelopSettings>, Cow<'a, SourceInfo>) {
     let profile = Profile::of(settings);
     let lift = if profile == Profile::Camera { camera.lift } else { 0.0 };
-    let hdr = settings.light.hdr.clamp(0.0, 100.0);
+    let hdr = |side: f64| (settings.light.hdr + side).clamp(0.0, 100.0);
+    // Both read as brightness, as Light's sliders do: HDR's Highlights to
+    // the left holds the highlights back more, its Shadows to the right
+    // lifts the shadows more.
+    let (highlights, shadows) = (hdr(-settings.light.hdr_highlights), hdr(settings.light.hdr_shadows));
     let ca = settings.optics.remove_ca && profile_corrects_ca(settings, info);
-    let settings = if lift == 0.0 && hdr == 0.0 && !ca {
+    let settings = if lift == 0.0 && highlights == 0.0 && shadows == 0.0 && !ca {
         Cow::Borrowed(settings)
     } else {
         let mut folded = settings.clone();
-        folded.light.shadows += lift + hdr * HDR_SHADOWS;
-        folded.light.highlights -= hdr * HDR_HIGHLIGHTS;
-        folded.light.hdr = 0.0;
+        folded.light.shadows += lift + shadows * HDR_SHADOWS;
+        folded.light.highlights -= highlights * HDR_HIGHLIGHTS;
+        (folded.light.hdr, folded.light.hdr_highlights, folded.light.hdr_shadows) = (0.0, 0.0, 0.0);
         folded.optics.remove_ca &= !ca;
         Cow::Owned(folded)
     };
@@ -224,6 +230,28 @@ mod tests {
         assert_eq!((folded.light.highlights, folded.light.shadows, folded.light.hdr), (-130.0, 110.0, 0.0));
         settings.light.hdr = 0.0;
         assert!(matches!(effective(&settings, &info, &Camera::default()).0, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn hdrs_highlights_and_shadows_move_its_ends_apart_within_0_and_100() {
+        let (info, _) = dro_frame();
+        let mut settings = fresh(5200.0, 3.0);
+        let folded = |settings: &DevelopSettings| {
+            let folded = effective(settings, &info, &Camera::default()).0;
+            (folded.light.highlights, folded.light.shadows, folded.light.hdr_highlights, folded.light.hdr_shadows)
+        };
+        // Left darkens and right brightens, as Light's Highlights and Shadows.
+        (settings.light.hdr, settings.light.hdr_highlights, settings.light.hdr_shadows) = (50.0, -30.0, -20.0);
+        assert_eq!(folded(&settings), (-80.0, 30.0, 0.0, 0.0));
+        settings.light.hdr_highlights = 30.0;
+        assert_eq!(folded(&settings).0, -20.0);
+        (settings.light.hdr_highlights, settings.light.hdr_shadows) = (-80.0, -90.0);
+        assert_eq!(folded(&settings), (-100.0, 0.0, 0.0, 0.0), "each end between none and all of it");
+        // Either end on its own, with no amount.
+        (settings.light.hdr, settings.light.hdr_highlights, settings.light.hdr_shadows) = (0.0, -25.0, 40.0);
+        assert_eq!(folded(&settings), (-25.0, 40.0, 0.0, 0.0));
+        (settings.light.hdr_highlights, settings.light.hdr_shadows) = (25.0, -40.0);
+        assert!(matches!(effective(&settings, &info, &Camera::default()).0, Cow::Borrowed(_)), "nothing below none");
     }
 
     #[test]

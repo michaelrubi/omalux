@@ -3,11 +3,17 @@
 //! Corrections. Which controls there are, their ranges and what they do
 //! are Lightcraft's (`lightcraft_develop::controls`), all but HDR, which
 //! is OmaLux's (`omalux_engine::look`).
+//!
+//! Each panel but the Profile has Lightroom's switch on its heading, which
+//! shows the frame without the panel's settings while it's off. It's a
+//! look, not an edit: nothing's saved, and touching one of its sliders
+//! turns the panel back on, as in Lightroom.
 
 use egui::{Align2, FontId, Sense, Ui, vec2};
 use lightcraft_develop::controls::{self, ControlSpec};
 use lightcraft_develop::{DevelopSettings, WbMode};
 use omalux_engine::auto::Auto;
+use omalux_engine::copy::Group;
 use omalux_engine::look::{Camera, Profile};
 
 use crate::commands::Command;
@@ -54,7 +60,9 @@ const PANELS: &[(&str, &[Row])] = &[
             Slider("light.blacks"),
         ],
     ),
-    ("HDR", &[Named("light.hdr", "Amount")]),
+    // Its Highlights and Shadows move either end of the range off the
+    // Amount, so one can have more of it than the other.
+    ("HDR", &[Named("light.hdr", "Amount"), Named("light.hdrHighlights", "Highlights"), Named("light.hdrShadows", "Shadows")]),
     ("Presence", &[Slider("color.vibrance"), Slider("color.saturation")]),
     (
         "Detail",
@@ -99,6 +107,26 @@ impl Row {
     }
 }
 
+/// The groups of settings a panel's switch turns off: none for the
+/// Profile, which has no switch.
+pub fn switches(title: &str) -> &'static [Group] {
+    match title {
+        "White Balance" => &[Group::WhiteBalance],
+        "Light" => &[Group::Light],
+        "HDR" => &[Group::Hdr],
+        "Presence" => &[Group::Presence],
+        "Detail" => &[Group::Sharpening, Group::NoiseReduction],
+        "Lens Corrections" => &[Group::LensCorrections],
+        _ => &[],
+    }
+}
+
+/// The groups of the panel the slider at `index` in [`sliders`] is in.
+pub fn switches_of(index: usize) -> &'static [Group] {
+    let mut panels = PANELS.iter().flat_map(|(title, rows)| rows.iter().filter(|row| row.spec().is_some()).map(move |_| switches(title)));
+    panels.nth(index).unwrap_or(&[])
+}
+
 /// Every slider's control, in order, as it's shown.
 pub fn sliders() -> impl Iterator<Item = ControlSpec> {
     PANELS.iter().flat_map(|(_, rows)| rows.iter()).filter_map(Row::spec)
@@ -120,6 +148,9 @@ pub struct PanelOut {
     pub remove_ca: Option<bool>,
     /// Enable Profile Corrections was ticked, or unticked.
     pub lens_profile: Option<bool>,
+    /// A panel's switch was flipped, or one of its sliders touched while
+    /// it was off: its groups, and whether they're on now.
+    pub switch: Option<(&'static [Group], bool)>,
 }
 
 /// A panel's title, and the row it's in, for what goes at its right.
@@ -127,6 +158,22 @@ pub fn heading(ui: &mut Ui, theme: &Theme, title: &str) -> egui::Rect {
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
     ui.painter().text(row.left_center() + vec2(4.0, 2.0), Align2::LEFT_CENTER, title, FontId::proportional(13.5), theme.dark_foreground);
     row
+}
+
+/// A panel's title with its switch at the left, as Lightroom draws it,
+/// and the row it's in. True in the second if the switch was clicked.
+fn switched_heading(ui: &mut Ui, theme: &Theme, title: &str, on: bool) -> (egui::Rect, bool) {
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+    let switch = egui::Rect::from_center_size(row.left_center() + vec2(12.0, 2.0), vec2(16.0, 9.0));
+    let clicked = ui.interact(switch.expand(4.0), ui.id().with(("switch", title)), Sense::click()).on_hover_text(if on { "Turn the panel off" } else { "Turn the panel on" }).clicked();
+    let painter = ui.painter();
+    let knob = if on { switch.right_center() - vec2(4.5, 0.0) } else { switch.left_center() + vec2(4.5, 0.0) };
+    painter.rect_filled(switch, 4.5, if on { theme.accent } else { theme.darker_background });
+    painter.rect_stroke(switch, 4.5, egui::Stroke::new(1.0, theme.muted), egui::StrokeKind::Inside);
+    painter.circle_filled(knob, 3.0, if on { theme.dark_background } else { theme.muted });
+    let colour = if on { theme.dark_foreground } else { theme.muted };
+    painter.text(switch.right_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, title, FontId::proportional(13.5), colour);
+    (row, clicked)
 }
 
 /// A heading inside a panel: smaller and dimmer than the panel's own.
@@ -155,12 +202,24 @@ fn word(ui: &mut Ui, right: &mut egui::Pos2, text: &str, colour: egui::Color32, 
 
 /// The sliders showing `settings`. `fresh` is what a double-click resets
 /// each to; `selected` is the slider the keys act on; `camera` is what
-/// the frame's camera did, which names its profile.
-pub fn show(ui: &mut Ui, theme: &Theme, settings: &DevelopSettings, fresh: &DevelopSettings, selected: usize, camera: &Camera) -> PanelOut {
+/// the frame's camera did, which names its profile; `off` is the groups
+/// switched off.
+pub fn show(ui: &mut Ui, theme: &Theme, settings: &DevelopSettings, fresh: &DevelopSettings, selected: usize, camera: &Camera, off: &[Group]) -> PanelOut {
     let mut out = PanelOut::default();
     let mut index = 0;
     for (title, rows) in PANELS {
-        let row = heading(ui, theme, title);
+        let groups = switches(title);
+        let on = !groups.iter().any(|group| off.contains(group));
+        let row = if groups.is_empty() {
+            heading(ui, theme, title)
+        } else {
+            let (row, clicked) = switched_heading(ui, theme, title, on);
+            if clicked {
+                out.switch = Some((groups, !on));
+            }
+            row
+        };
+        let before = out;
         let mut right = row.right_center() + vec2(-4.0, 2.0);
         match *title {
             "Profile" => {
@@ -197,15 +256,15 @@ pub fn show(ui: &mut Ui, theme: &Theme, settings: &DevelopSettings, fresh: &Deve
             match row {
                 Sub(title) => sub_heading(ui, theme, title),
                 RemoveCa => {
-                    let mut on = settings.optics.remove_ca;
-                    if ui.checkbox(&mut on, "Remove Chromatic Aberration").changed() {
-                        out.remove_ca = Some(on);
+                    let mut ticked = settings.optics.remove_ca;
+                    if ui.checkbox(&mut ticked, "Remove Chromatic Aberration").changed() {
+                        out.remove_ca = Some(ticked);
                     }
                 }
                 ProfileCorrections => {
-                    let mut on = settings.optics.lens_profile;
-                    if ui.checkbox(&mut on, "Enable Profile Corrections").changed() {
-                        out.lens_profile = Some(on);
+                    let mut ticked = settings.optics.lens_profile;
+                    if ui.checkbox(&mut ticked, "Enable Profile Corrections").changed() {
+                        out.lens_profile = Some(ticked);
                     }
                     // Lightroom's Lens Profile: which lens it found, or that
                     // it found none (and the checkbox does nothing).
@@ -225,6 +284,10 @@ pub fn show(ui: &mut Ui, theme: &Theme, settings: &DevelopSettings, fresh: &Deve
                 }
             }
         }
+        // Anything done in a panel that's off turns it on.
+        if !on && out.switch.is_none() && out != before {
+            out.switch = Some((groups, true));
+        }
         ui.add_space(6.0);
     }
     out
@@ -235,12 +298,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn each_slider_is_in_its_panels_switch() {
+        let of = |id| switches_of(sliders().position(|spec| spec.id == id).unwrap());
+        assert_eq!(of("wb.tint"), [Group::WhiteBalance]);
+        assert_eq!(of("light.hdrShadows"), [Group::Hdr]);
+        assert_eq!(of("detail.nrColor"), [Group::Sharpening, Group::NoiseReduction]);
+        assert_eq!(of("optics.defringeGreenHueHi"), [Group::LensCorrections]);
+        assert!(switches_of(sliders().count()).is_empty());
+    }
+
+        #[test]
     fn the_sliders_are_lightrooms_in_lightrooms_order() {
         let labels: Vec<&str> = sliders().map(|spec| spec.label).collect();
         assert_eq!(labels, [
             "Temp", "Tint",
             "Exposure", "Contrast", "Highlights", "Shadows", "Whites", "Blacks",
-            "Amount",
+            "Amount", "Highlights", "Shadows",
             "Vibrance", "Saturation",
             "Amount", "Radius", "Detail", "Masking", "Luminance", "Color",
             "Distortion", "Vignetting",
