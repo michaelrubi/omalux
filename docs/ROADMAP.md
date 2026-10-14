@@ -10,7 +10,7 @@ vendored, the workspace and an empty window up, and the spikes run on
 the laptop and Michael's frames. On 2026-10-13 what was left of it moved
 to the milestones that need it first, and M0 closed on its last question,
 why the GPU loupe's times jump between frames: the GPU's power states
-(see M0). M1 started the same day, and M2 and M3 after it.
+(see M0). M1 started the same day, and M2, M3 and M4 after it.
 
 Each milestone ends with something Michael can use on a real shoot. M1 is
 the point where OmaLux replaces darktable for a clean, low-ISO shoot;
@@ -394,11 +394,29 @@ Michael's to do from the installed binary.
 
 ## M4. The look and HDR
 
+Each item says where it stands. Started on 2026-10-13, on `m4`: Claude on
+the look itself (the profile as a setting, the camera's fixed profile,
+DRO's lift, HDR's folding, the panel and keys, the process version),
+Antigravity on three parts with nothing shared (the DCP reader, exposure
+fusion ported from Omapix with the `hdr` example, the `quality` example
+that compares against the reference set), each on a branch of its own.
+Everything here has headless tests, and the profile and the lift are
+measured on Michael's raws (read, never written to); none of it has been
+tried by hand yet, and what's left is mostly his: the reference set, a
+DRO Off frame beside a DRO Auto one, Adobe's DCPs, and his eye.
+
 - **From M0, first:** Michael gathers the reference set (see M0), and
   shoots one scene twice in Standard, DRO Off and DRO Auto, to confirm
   that the camera match's gap on his frames is DRO's lift. The 100%
   comparison of the render with Lightroom's and Capture One's, AHD
-  against RCD if AHD loses detail.
+  against RCD if AHD loses detail. *Michael's to gather.* The tool is
+  built: the `quality` example takes a folder of raws with Lightroom's,
+  Capture One's and darktable's TIFFs of each beside them, and writes
+  them side by side with OmaLux's render and the camera's JPEG, at fit
+  and at 100%, with each one's ΔE2000 against the camera (the naming is
+  in AGENTS.md). The gap being DRO's is as good as shown without the
+  pair (see "DRO matched"); RCD waits for the 100% comparison to ask
+  for it.
 - **Camera match, fixed per camera:** the target is the camera's own
   JPEG. Two candidates, measured the same way on held-out frames
   (CIEDE2000 against the camera's JPEG, overall and on saturated, skin and
@@ -414,19 +432,101 @@ Michael's to do from the installed binary.
 
   Either way, at least as close to the camera as Lightroom's Camera
   Standard and Camera Vivid are.
+
+  *The first is done, for Standard, and is what a frame opens with.* A
+  profile is per camera and Creative Style and holds the whole look
+  (matrix, hue/saturation table, tone curve, chroma curve); the
+  `calibrate` example fits them, and the ILCE-7M3's Standard is built
+  in, fitted over his four shoots (1376 raws). All of them have DRO
+  Auto, which hides the camera's own curve, so its tone curve is Sony's
+  for Standard without DRO, which Lightcraft pooled from ten bodies;
+  `calibrate` pools the camera's own once there are five frames shot
+  with DRO off. Measured with the `match` example, in the middle of the
+  frame, on a shoot the profile wasn't fitted to (Run Dinah Barbie, 158
+  frames): the per-frame fit M1 opened with comes to ΔE2000 4.51 from
+  the camera's JPEG and 4.4 L* darker; the profile alone 4.61 and 3.6
+  darker; with DRO's lift, which is Camera match, 3.16 and 0.8 darker
+  (saturated 5.18 from 7.67, skin 3.66 from 5.76, sky 5.33 from 6.67).
+  On every sixth raw of all four shoots (229 frames, their neighbours
+  fitted to): 5.01, 4.88 and 4.04. On the two CC0 raws, shot with DRO
+  off on other bodies, the per-frame fit is the closer by 0.4 (3.6 and
+  4.0 against 4.0 and 4.4): it fits each frame's own tone curve, which
+  a fixed one can't, and is the price of two frames of a burst looking
+  alike. Developing with the profile and measuring the lift takes 43 ms
+  of a 205 ms decode. There's no Vivid profile: he has shot nothing in
+  it, and a frame in a style without one gets the look fitted to its
+  own JPEG, with the lift. *The second is half done:* the DCP reader is
+  built (`omalux_engine::dcp`, tested on DCPs made in the tests) and
+  isn't wired into the develop path, which wants real ones to be
+  checked against: Adobe's Camera Standard and Camera Vivid for the
+  ILCE-7M3, in `~/.config/omalux/dcp/`. *Open:* the DCP measured beside
+  the profile; both against Lightroom's Camera Standard, which needs
+  the reference set; a Vivid profile; and the saturated colours, which
+  are the furthest off (ΔE 5 to 6) and 1.5 to 4 L* dark.
 - **DRO matched:** frames shot with DRO on open with its local shadow
   lift, on the HDR slider's local tone mapping, at a strength pooled per
   level (Lv1 to Lv5) or measured from the frame's JPEG (Auto), as part of
   the profile, with the slider at 0. Checked against the camera's JPEGs
-  of DRO frames. Needs the HDR work below, so it lands with it.
+  of DRO frames. Needs the HDR work below, so it lands with it. *Done*
+  for what his shoots have, which is Auto on every frame: the lift is
+  measured when a raw is decoded, by developing it small with Shadows
+  at one value after another and taking the one closest in lightness
+  to the JPEG, and Camera match renders it under the Shadows slider,
+  which stays at 0. On the 229 held-out frames it finds none on 56
+  (where the render was already as light as the JPEG, within 0.1 L*
+  on average), and up to 110 on the rest; the frames DRO lifted most
+  go from 10 L* darker than the JPEG to 1.5. Frames of one burst get
+  lifts a few points apart (30 to 38 over one, 58 on every frame of
+  another). The fixed levels are measured the same way: he has no frame
+  at one to pool a strength from. *Open:* whether a few points of lift
+  between the frames of a burst show when settings are pasted across
+  it (it could be rounded, or taken from the stack's first frame);
+  the frames lifted most are still ΔE 9 from the JPEG pixel for pixel,
+  since Lightcraft's local tone mapping isn't Sony's, which is for his
+  eye; the levels; and the DRO Off and Auto pair, which would show the
+  lift against the camera's own curve.
 - **Side by side** with Lightroom and Capture One on the reference set,
-  at fit and at 100%; what loses goes back to its stage.
-- **Flat**, one key away.
+  at fit and at 100%; what loses goes back to its stage. *Waits for the
+  reference set;* the `quality` example makes the sheets.
+- **Flat**, one key away. *Done:* F, or a click on the profile's name
+  at the top of the develop panel (Lightroom's "Profile", which names
+  it after the Creative Style: "Camera Standard"). Flat is Camera
+  match's colour without the camera's tone curve or DRO's lift, on
+  Lightcraft's own curve for raws. The profile is a setting, so it's
+  undone, copied and pasted (a group of its own) and saved like the
+  rest. *Open:* whether Lightcraft's curve is flat enough to be worth
+  the name, which is for his eye.
 - **HDR:** the slider, on Lightcraft's local tone mapping, or exposure
   fusion of virtual exposures if that can't reach the look. Both tried
-  on real frames.
+  on real frames. *Done* as the first: HDR is a slider of its own
+  between Light and Presence, 0 to 100, taking that much from
+  Highlights and giving it to Shadows under their sliders, past their
+  ends (Shadows at 100 with HDR at 100 is 200 to the pipeline); a copy
+  group of its own. Both tried, with the `hdr` example, which renders
+  HDR at 0, 50 and 100 beside a fusion of five exposures two stops
+  either side: on four of his frames HDR at 100 brings the darkest
+  quarter up from L* 12 to 27 and fusion to 19, with no halos to see
+  at 1600 pixels, and fusion takes about five times as long as one
+  render. *Open:* which
+  he likes, on his frames (the sheets are for his eye); whether 100
+  should reach further or bring some contrast back; and fusion as a
+  stage of the pipeline, which it isn't, if he prefers it.
 - The process version bumped for edits made before this, which keep
-  rendering as they did.
+  rendering as they did. *Done:* 2. The look is carried by the profile
+  setting, so an edit from 1 keeps Lightcraft's own profile id and
+  with it the look fitted to its frame's JPEG, with no lift; its raw is
+  decoded for that look. The reference renders M1 wrote are checked
+  against unchanged, beside new ones of what a frame opens with now.
+  Reset, or choosing a profile, brings such a frame to Camera match.
+
+Also found: Lightcraft has moved 256 commits since the pin (looked at
+`b3d392b4`, 2026-10-13). In the vendored crates it's other cameras
+(Canon, Nikon, Olympus, Pentax), Kelvin from Sony's presets for bodies
+without measured matrices (the ILCE-7M3 has them) and its own UI's
+controls, so nothing was taken. The one change that bears on M4 is in
+the per-frame fit, which is lifted, not vendored: the camera's toe
+fitted from dark JPEG tones (`c11764a1`). It's worth lifting when the
+ILCE-7M3's own tone curve is pooled from DRO Off frames.
 
 ## M5. Lens profiles
 

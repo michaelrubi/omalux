@@ -219,6 +219,7 @@ Omapix's are.
 | Click a slider's number | Type a value (Return applies, Esc doesn't) |
 | Shift+double-click a slider | Set it automatically |
 | W | White balance eyedropper |
+| F | The Flat profile, or Camera match again |
 | Ctrl+U | Auto tone |
 | Ctrl+Shift+U | Auto white balance |
 | R | Crop & Straighten |
@@ -243,6 +244,10 @@ Omapix's are.
 
 Keys inside a tool (crop's X to swap the aspect, for one) only apply
 while it's open, as in Lightroom.
+
+F is the one key that isn't Lightroom's for the same thing: Lightroom
+has no key for a profile, and its F is Full Screen, which is Hyprland's
+job here.
 
 ## Built on Lightcraft
 
@@ -364,7 +369,8 @@ presets, localisation, and the UI as a whole.
   these sidecars, it would drop OmaLux's part. That's a reason to stop
   using darktable on a shoot, not something to build around.)
 - **The process version** is OmaLux's, not Lightcraft's schema version:
-  it names how a frame was rendered. Re-syncing Lightcraft can change a
+  it names how a frame was rendered (1: M1 to M3; 2: M4, with the
+  profile as a setting and HDR). Re-syncing Lightcraft can change a
   rendering, so a set of reference frames (Michael's, and raw.pixls.us's
   A7 III files) is rendered before and after each re-sync; if they
   differ, the version is bumped and older edits keep the old behaviour
@@ -442,7 +448,21 @@ frame in a per-file fit is the fit's error, not the camera.
   smoothly there, and Lightcraft's highlight reconstruction and gamut
   mapping take over. That's where the raw should look better than the
   camera.
-- **Flat** skips the fitted curve and keeps a gentle one that never clips.
+- **Flat** skips the fitted curve and keeps a gentle one that never clips
+  (Lightcraft's own curve for raws), with Camera match's colour and
+  without DRO's lift.
+- **The profile is a setting** (M4), as Lightroom's is: it's in the edit
+  with the sliders, so it's undone, copied, pasted and saved with them,
+  and the develop panel names it at the top as Lightroom does ("Camera
+  Standard", after the Creative Style; a click or F swaps it with Flat).
+  That's also how an edit keeps its look when the look changes: one made
+  before M4 has no profile of OmaLux's in it, and keeps the look fitted
+  to its frame's own JPEG, as Lightroom's older edits kept Adobe
+  Standard when Adobe Color became the default. What a profile puts
+  under the sliders (DRO's lift, and the HDR slider's part) is folded
+  into the settings the pipeline is handed, the way Lightcraft folds in
+  its own profiles, so there's no stage for it and the CPU and GPU
+  render it alike (`omalux_engine::look`).
 - **White balance is in Kelvin** even without a DCP (found in M0): at
   `701f78e` Lightcraft has the ILCE-7M3's colour matrices measured from
   its spectral sensitivities (rawtoaces's data), and uses them for Temp
@@ -509,6 +529,14 @@ slider goes further on the same machinery: both at once, by an amount, so
 more of what the raw holds is visible. If that can't reach the look,
 exposure fusion of virtual exposures of the one raw is the alternative
 (Omapix's `fusion.rs`, which Merge to HDR uses). M4 tries both.
+
+As built in M4: the slider takes its amount from Highlights and gives it
+to Shadows, under their own sliders and past their ends (the pipeline
+doesn't stop at 100), so with both at their ends there's as much again.
+It's kept with the Light sliders in Lightcraft's settings, the one local
+change to the vendored crates (`UPSTREAM.md`). Fusion is ported
+(`omalux_engine::fusion`) for the comparison only: it works on finished
+renders, not in the pipeline.
 
 ## Pipeline
 
