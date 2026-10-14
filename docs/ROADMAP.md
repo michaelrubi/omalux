@@ -10,7 +10,7 @@ vendored, the workspace and an empty window up, and the spikes run on
 the laptop and Michael's frames. On 2026-10-13 what was left of it moved
 to the milestones that need it first, and M0 closed on its last question,
 why the GPU loupe's times jump between frames: the GPU's power states
-(see M0). M1 started the same day, and M2 after it.
+(see M0). M1 started the same day, and M2 and M3 after it.
 
 Each milestone ends with something Michael can use on a real shoot. M1 is
 the point where OmaLux replaces darktable for a clean, low-ISO shoot;
@@ -322,18 +322,75 @@ to do from the installed binary.
 
 ## M3. Detail, crop and auto
 
-Everything here is in Lightcraft's pipeline already: this milestone is
-the panels, keys and checks on real frames.
+Nearly everything here is in Lightcraft's pipeline already: this
+milestone is the panels, keys and checks on real frames. What wasn't is
+Auto tone (below).
+
+Each item says where it stands. Built on 2026-10-13, on `m3`: Claude on
+the commands, the engine (`omalux_engine::crop` and `auto`), the copy
+groups, and the crop drawn over the frame; Antigravity on the panels
+(Detail, Lens Corrections, the Auto buttons, the crop tool's), each on
+a branch of its own. Everything here has headless tests, and a script
+has cropped, turned and run each Auto on copies of Michael's raws from
+the built binary; none of it has been tried by hand yet, which is
+Michael's to do from the installed binary.
 
 - **Detail:** Sharpening (Amount, Radius, Detail, Masking) and Noise
-  Reduction (Luminance, Color).
+  Reduction (Luminance, Color). *Done,* under Lightroom's names
+  (Lightcraft's differ). A fresh raw opens with Lightcraft's raw
+  defaults, which are Lightroom's: Sharpening at 40 and Color at 25,
+  which is what a double-click goes back to. Sharpening and Noise
+  Reduction are copy groups of their own. The develop panel scrolls
+  now, under the histogram. *Open:* how they look at 100% on his
+  frames, which is for his eye.
 - **Lens:** Remove Chromatic Aberration (Lightcraft's automatic lateral
-  CA) and Defringe, checked on f/1.8 frames.
+  CA) and Defringe, checked on f/1.8 frames. *Done,* in a Lens
+  Corrections panel, which is a copy group; M5's profile corrections
+  join it. The check (the `fringe` example, on copies of nine of the
+  176 frames he has at f/1.8, all on the FE 85): the lens's lateral CA
+  is small, blue 0.4 to 1.4 pixels at the corners of the full-size
+  frame and red under a quarter of one, so Remove Chromatic Aberration
+  changes little on it; fringed pixels beside blown highlights are few
+  (about 40 in a million at most, and the count takes in real greens
+  and pinks), and Defringe at 8 takes the green ones down by a half to
+  three quarters, most visibly the rims of out-of-focus highlights
+  through leaves. *Open:* none of the nine fringes badly,
+  so the hard case (a dark edge against a blown sky at f/1.8) hasn't
+  been found on his shoots yet.
 - **Crop & Straighten** (R): aspect ratios, the rectangle, the angle and
-  a line to straighten along, 90° turns. In the copy checklist.
+  a line to straighten along, 90° turns. In the copy checklist. *Done*
+  as DESIGN.md's "Crop & Straighten" has it: the frame whole with the
+  crop over it, the picture turning under an upright crop as in
+  Lightroom (Lightcraft's own tool turns the crop over a still
+  picture); handles, moving, turning from outside, Ctrl+drag for a
+  line, the lock (A), X, Return, Esc; Lightroom's aspect list, Angle,
+  Auto, Rotate Left and Right (Ctrl+[ and Ctrl+]) and Reset
+  (Ctrl+Alt+R) in the panel. A drag is one step, saved when it ends.
+  The crop is a copy group, in Ctrl+C's everything too; quarter turns
+  are never pasted. *Open:* the filmstrip's thumbnails are the
+  camera's JPEGs, so they show neither the crop nor a turn until M1's
+  developed thumbnails are there; a crop pasted onto a frame that
+  hasn't been decoded yet isn't brought inside a frame of another
+  shape until it's next cropped (its shape isn't known until then);
+  and there's no overlay but thirds (a finer grid while turning).
 - **Auto:** white balance (Ctrl+Shift+U), exposure, tone (Ctrl+U) and
   level (Lightcraft's Upright Level), each a button, and
-  Shift+double-click on a slider.
+  Shift+double-click on a slider. *Done.* White balance, exposure and
+  level are Lightcraft's. Auto tone isn't in Lightcraft, whose Auto
+  leaves Whites and Blacks at 0, so it's OmaLux's own (see "Auto" in
+  DESIGN.md): the first version set Whites as high and Blacks as low as
+  they'd go without clipping, and on his frames that came to +100 and
+  -100 for very little change, so it brings them in only. On eleven
+  frames (nine of his, the two CC0 ones): Whites between 0 and -99,
+  below -55 on seven of them (one backlit frame goes from 15.5% of it
+  blown to 0.3% at -63); Blacks 0 on all of them (Lightcraft's Blacks
+  moves the dark end very little, so it's seldom what opens a shadow).
+  It takes 35 to 50 ms on the loupe's source, and level about 65. Each says so in the status bar when it has
+  nothing to do. *Open:* whether Whites that far down is what he
+  wants from Auto on a backlit frame (it only reaches the top of the
+  histogram: the rest of the picture hardly moves), which is for his
+  eye; and Auto white balance is kept as the Kelvin it found, so a
+  paste gives other frames that Kelvin and not an Auto of their own.
 
 ## M4. The look and HDR
 

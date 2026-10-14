@@ -83,13 +83,44 @@ afterwards in Omapix.
 - **Lens Corrections:** profile corrections (distortion and vignetting)
   found from the lens the raw names, and Remove Chromatic Aberration.
   Defringe for the purple and green fringes fast primes leave around
-  highlights at f/1.8.
-- **Crop & Straighten:** aspect ratios, the crop rectangle, the
-  straighten angle (and a line to draw along), 90° turns.
+  highlights at f/1.8: an amount and a hue range for each, the range as
+  two sliders (low and high) where Lightroom has one with two thumbs,
+  which neither Lightcraft nor OmaLux has a widget for.
+- **Crop & Straighten** (R): aspect ratios, the crop rectangle, the
+  straighten angle (and a line to draw along), 90° turns. As in
+  Lightroom, the tool shows the frame whole with the crop over it, and
+  the crop stays upright while the picture turns under it: drag a
+  corner or an edge, drag inside to move it, drag outside to turn the
+  picture, and with Ctrl held draw a line along the horizon (or an
+  upright) to straighten by it. The crop keeps its shape when dragged
+  while the lock is on (A; Shift holds it for one drag), and the lock
+  starts on, as Lightroom's does. X turns the crop on its side, Return
+  or a double-click inside puts the tool away, and Esc puts it away
+  with the crop as it was. The tool stays open from frame to frame.
+  Its settings (the aspect menu, Angle, Auto, the turns, Reset) are in
+  the panel under the histogram while it's open. A quarter turn takes
+  the crop round with the picture.
 - **Auto:** Auto white balance, Auto exposure, Auto tone (sets Whites and
   Blacks so nothing clips that needn't) and Auto level (straightens the
   horizon). Each is a button, and Shift+double-click on a slider sets
   that one, as in Lightroom.
+  - Auto tone is not Lightroom's Auto, which sets every Basic slider;
+    Lightroom's key for that (Ctrl+U) is Auto tone's here. It brings
+    Whites down from 0, and Blacks up, only as far as it takes:
+    highlights the sensor itself ran out on, and shadows that are black
+    wherever Blacks is, are left, and a frame where nothing else clips
+    gets 0 and 0. It doesn't push them the other way to fill the
+    histogram: on Lightcraft's pipeline Whites at +100 and Blacks at
+    -100 move the ends very little, so that would be large numbers for
+    nothing.
+  - Shift+double-click gives a slider what Lightcraft's own Auto would
+    (its fit to Lightroom's: Exposure from the scene, one recipe for
+    Contrast, Highlights, Shadows and Vibrance), Whites and Blacks as
+    Auto tone sets them, and Temp or Tint from Auto white balance. A
+    slider with no automatic value says so.
+  - Auto level is Lightcraft's Upright Level as its crop panel uses it:
+    the straighten angle that levels the frame's horizon or makes its
+    uprights plumb, when enough of its lines agree.
 - **Histogram:** always on, at the top of the right panel as in
   Lightroom, of the developed frame as it will be exported, with the
   clipping warnings (J).
@@ -120,6 +151,12 @@ afterwards in Omapix.
     is here).
   - A white balance copied as shot is pasted as shot: each frame gets
     its own, not the Kelvin of the frame it was copied from.
+  - The crop is a group like the rest, so Ctrl+C takes it (Lightroom's
+    Copy Settings leaves Crop unticked until it's asked for; here the
+    checklist is where to leave it out). A frame's quarter turns are in
+    no group: they're the way up it is, which another frame doesn't
+    want, as in Lightroom. A crop pasted onto a frame of another shape
+    is brought inside it.
   - A paste is one step to undo however many frames it reached: Ctrl+Z
     on the frame it was made from, or on any frame it reached, takes it
     back from all of them, except those edited since, which keep their
@@ -185,6 +222,11 @@ Omapix's are.
 | Ctrl+U | Auto tone |
 | Ctrl+Shift+U | Auto white balance |
 | R | Crop & Straighten |
+| In the crop tool: X, A | Turn the crop on its side; lock its shape, or let it go |
+| In the crop tool: Return, Esc | Put the tool away; and with the crop as it was |
+| In the crop tool: Ctrl+drag | Straighten along a line |
+| Ctrl+[, Ctrl+] | Rotate left, rotate right |
+| Ctrl+Alt+R | Reset the crop |
 | J | Clipping warnings |
 | Ctrl+click, Shift+click, Shift+← → | Add to the selection, select a run |
 | Ctrl+A, Ctrl+D | Select all, select none |
