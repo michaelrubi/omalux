@@ -582,6 +582,24 @@ been tried by hand yet.
   lenses), and where the profile does that, Remove Chromatic
   Aberration's estimate is left out rather than added to it.
 
+## Before M6: a look without the edit, HDR's ends, menus and keys
+
+Michael's asks of 2026-10-14, while there are no high-ISO frames to
+denoise. On `m6-prep`: Claude on the skeleton, the panel switches and
+HDR's ends; Antigravity on the legend and the menus, each on a branch of
+its own. None of it tried by hand yet.
+
+- A look without the adjustments. `\` (Lightroom's Before/After) was
+  already there for all of them; each panel but the Profile now has
+  Lightroom's switch on its heading for one at a time. *Done.* P stays
+  Pick, as in Lightroom.
+- More control of HDR: Highlights and Shadows under its Amount. *Done:*
+  shown always, not behind a toggle.
+- Right-click menus on the frame and the filmstrip, each item with its
+  key. *Antigravity's branch.*
+- The keys' legend on Ctrl+/ (Lightroom's Develop Shortcuts), showing
+  the keys in use, rebindings and all. *Antigravity's branch.*
+
 ## M6. AI Denoise
 
 - **From M0, first:** the comparison of models and runtimes (see M0's

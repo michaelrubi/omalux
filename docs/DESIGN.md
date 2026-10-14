@@ -72,8 +72,13 @@ afterwards in Omapix.
 - **Light:** Exposure, Contrast, Highlights, Shadows, Whites, Blacks.
 - **HDR:** one slider that brightens the shadows and holds back the
   highlights locally, so more of what the raw holds is visible, without
-  the flat, haloed look of pulling Highlights and Shadows to their ends.
-  See "HDR".
+  the flat, haloed look of pulling Highlights and Shadows to their ends;
+  and its own Highlights and Shadows under it, to give one end more of
+  it than the other. See "HDR".
+- **Panel switches:** Lightroom's switch on each panel's heading but the
+  Profile's shows the frame without that panel, and Before/After (`\`)
+  without any. A look, never saved: touching one of the panel's sliders
+  turns it back on, as in Lightroom.
 - **Presence:** Vibrance and Saturation.
 - **Detail:**
   - **AI Denoise:** a button and a strength, run on the raw before
@@ -241,6 +246,9 @@ Omapix's are.
 | Ctrl+Shift+E | Export |
 | Ctrl+O | Open a folder |
 | Ctrl+W | Close the folder |
+| Ctrl+/ | Every key, and the clicks that aren't keys (Lightroom's Develop Shortcuts) |
+| Right-click the frame or the filmstrip | A menu of what acts there, with its keys |
+| A panel's switch (left of its title) | The frame without the panel's settings, as a look |
 
 Keys inside a tool (crop's X to swap the aspect, for one) only apply
 while it's open, as in Lightroom.
@@ -537,6 +545,13 @@ It's kept with the Light sliders in Lightcraft's settings, the one local
 change to the vendored crates (`UPSTREAM.md`). Fusion is ported
 (`omalux_engine::fusion`) for the comparison only: it works on finished
 renders, not in the pipeline.
+
+HDR's Highlights and Shadows (2026-10-14, Michael's ask for more control)
+move either end off the Amount: Highlights +30 at an Amount of 50 holds
+the highlights back as HDR 80 would and lifts the shadows as 50, each
+end between none and all of it. At 0 they're not written, so an edit
+from before renders as it did. They're shown, not behind an "advanced"
+toggle: two sliders, in the panel they belong to.
 
 ## Pipeline
 
