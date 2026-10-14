@@ -94,7 +94,7 @@ impl Profile {
 }
 
 /// What a frame's camera did to its own JPEG, as far as Camera match
-/// follows it.
+/// follows it, and the lens it was shot through.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Camera {
     /// The Creative Style, as the camera wrote it ("Standard", "Vivid").
@@ -108,6 +108,9 @@ pub struct Camera {
     /// style. False where there's none for them, or under
     /// [`Profile::Fitted`]: its look was fitted to its own JPEG.
     pub fixed: bool,
+    /// The lens a profile correction was found for, as the Lens
+    /// Corrections panel names it ([`crate::lens_profiles::Found`]).
+    pub lens: Option<String>,
 }
 
 /// A fresh raw's settings, white balance as shot: Lightcraft's raw
@@ -155,7 +158,7 @@ mod tests {
         let tone = lightcraft_pipeline::tone::CameraTone::new(knots);
         assert!(tone.is_some());
         let info = SourceInfo { raw: true, camera_tone: tone, ..SourceInfo::default() };
-        (info, Camera { style: Some("Standard".into()), dro: Some(Dro::Auto), lift: 30.0, fixed: true })
+        (info, Camera { style: Some("Standard".into()), dro: Some(Dro::Auto), lift: 30.0, fixed: true, lens: None })
     }
 
     #[test]

@@ -28,5 +28,6 @@ mod reference;
 pub mod shoot;
 pub mod sidecar;
 pub mod sony;
+pub mod sony_lens;
 pub mod stacks;
 pub mod thumbs;

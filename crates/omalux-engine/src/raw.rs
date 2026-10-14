@@ -266,7 +266,7 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
     // Embedded lens corrections are applied by the pipeline ("Enable Profile Corrections"), not baked in
     // (removed before the camera look's binned sensor proxy too, which needs an empty `OpcodeList3`).
     let info = raw.info();
-    let lens = crate::lens_profiles::for_raw(&info, || lightcraft_meta::extract(bytes));
+    let lens = crate::lens_profiles::for_raw(&info, bytes, crate::lens_profiles::DEFAULT);
     raw.opcodes.list3.retain(|op| !op.is_lens_correction());
     // Which scale white balance is edited on, and the as-shot white on it, from the file's own colour tags or
     // the camera's measured matrices
@@ -276,7 +276,7 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
     // before there were any) the one fitted to this frame's own JPEG.
     let shot = crate::sony::settings(bytes);
     let fixed = if profile.fitted() { None } else { fixed_look(&raw, shot.creative_style.as_deref().unwrap_or_default()) };
-    let camera = Camera { style: shot.creative_style, dro: shot.dro, lift: 0.0, fixed: fixed.is_some() };
+    let camera = Camera { style: shot.creative_style, dro: shot.dro, lift: 0.0, fixed: fixed.is_some(), lens: lens.as_ref().map(|found| found.name.clone()) };
     let (xy, transform, camera_look) = fixed.unwrap_or_else(|| crate::camera_preview::starting_colour(&mut raw, bytes));
     // What DRO did to the camera's JPEG that the raw doesn't have, for Camera match to put back.
     let lifted = !profile.fitted() && camera.dro.is_some_and(|dro| dro != crate::sony::Dro::Off);
@@ -335,7 +335,7 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
         raw: true,
         as_shot_temp: temp,
         as_shot_tint: tint,
-        lens,
+        lens: lens.map(|found| found.lens),
         relative_wb: scale.relative,
         legacy_relative_wb: scale.legacy_relative,
         camera_color,

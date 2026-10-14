@@ -5,10 +5,11 @@
 //! directory in `OMALUX_LENSFUN_DIR`, else the system's (`pacman -S lensfun`: `/usr/share/lensfun/version_1`;
 //! CC-BY-SA, never shipped with OmaLux). The profile is converted to the same [`lightcraft_develop::EmbeddedLens`]
 //! form, so "Enable Profile Corrections", its amount sliders and the GPU path treat both alike. Without a database
-//! nothing changes. Which of lensfun's and Sony's own corrections is the default is M0's lens spike to decide.
+//! nothing changes. Sony's own corrections ([`crate::sony_lens`]) are the other [`Source`]; which is the default is
+//! M5's comparison to decide.
 //!
 //! Lifted from Lightcraft (MIT OR Apache-2.0) at `701f78e`, `crates/engine/src/lens_profiles.rs`, with OmaLux's
-//! folder.
+//! folder and the choice of source.
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -59,14 +60,49 @@ pub fn lookup(db: &LensDb, m: &lightcraft_meta::Metadata, w: f64, h: f64, orient
     Some(lightcraft_pipeline::optics::reorient_lens(&corr, orientation, w, h))
 }
 
-/// [`crate::raw::embedded_lens`], else the database profile ([`lookup`]) for a raw with metadata `meta`.
-pub fn for_raw(raw: &lightcraft_raw::RawInfo, meta: impl FnOnce() -> lightcraft_meta::Metadata) -> Option<EmbeddedLens> {
-    crate::raw::embedded_lens(raw).or_else(|| {
+/// Where a frame's profile correction comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Source {
+    /// lensfun's database ([`lookup`]): a model per lens, focal length and aperture.
+    Lensfun,
+    /// The tables the camera wrote into the raw ([`crate::sony_lens`]), which follow the focus distance too.
+    Sony,
+}
+
+/// The source a frame's correction is taken from when it has both.
+pub const DEFAULT: Source = Source::Lensfun;
+
+/// A frame's profile correction, and what the Lens Corrections panel says of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Found {
+    pub lens: EmbeddedLens,
+    pub source: Source,
+    /// The lens, as the panel names it: lensfun's name for it, or the one the raw gives.
+    pub name: String,
+}
+
+/// The profile correction for the raw `bytes`, whose header is `raw`: [`crate::raw::embedded_lens`] if the raw
+/// reader found one, else `source`'s, else the other source's.
+pub fn for_raw(raw: &lightcraft_raw::RawInfo, bytes: &[u8], source: Source) -> Option<Found> {
+    let meta = lightcraft_meta::extract(bytes);
+    let named = meta.lens_model.clone().unwrap_or_default();
+    if let Some(lens) = crate::raw::embedded_lens(raw) {
+        return Some(Found { lens, source: Source::Sony, name: named });
+    }
+    let lensfun = || {
         let db = database()?;
         let c = raw.crop.clipped(raw.active_area.width, raw.active_area.height);
         let (w, h) = if c.width == 0 || c.height == 0 { (raw.active_area.width, raw.active_area.height) } else { (c.width, c.height) };
-        lookup(db, &meta(), w as f64, h as f64, raw.orientation)
-    })
+        let lens = lookup(db, &meta, w as f64, h as f64, raw.orientation)?;
+        let camera = db.find_camera(meta.make.as_deref().unwrap_or_default(), meta.model.as_deref().unwrap_or_default());
+        let name = db.find_lens(meta.lens_make.as_deref(), meta.lens_model.as_deref()?, camera)?.models.first().cloned().unwrap_or_default();
+        Some(Found { lens, source: Source::Lensfun, name })
+    };
+    let sony = || crate::sony_lens::corrections(bytes, raw).map(|lens| Found { lens, source: Source::Sony, name: named.clone() });
+    match source {
+        Source::Lensfun => lensfun().or_else(sony),
+        Source::Sony => sony().or_else(lensfun),
+    }
 }
 
 #[cfg(test)]
