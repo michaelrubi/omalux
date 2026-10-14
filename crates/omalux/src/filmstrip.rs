@@ -41,6 +41,8 @@ pub enum Click {
     Toggle,
     /// Shift: the selection runs to here.
     Range,
+    /// A right-click, for the menu.
+    Menu,
 }
 
 /// A shoot's filmstrip: its thumbnails' loader, the ones on the GPU, and
@@ -127,8 +129,9 @@ impl Filmstrip {
     }
 
     /// Draw the filmstrip: thumbnails in a row that scrolls sideways and
-    /// keeps the current frame in view. Returns the frame clicked, and how.
-    pub fn show(&mut self, ui: &mut Ui, shoot: &Shoot, theme: &Theme) -> Option<(usize, Click)> {
+    /// keeps the current frame in view. Returns the frame clicked, and how,
+    /// and the strip's response, for its right-click menu.
+    pub fn show(&mut self, ui: &mut Ui, shoot: &Shoot, theme: &Theme) -> (Option<(usize, Click)>, egui::Response) {
         let (strip, response) = ui.allocate_exact_size(vec2(ui.available_width(), STRIP_HEIGHT), Sense::click());
         let painter = ui.painter_at(strip);
         let cell = vec2(STRIP_HEIGHT * 1.5, STRIP_HEIGHT);
@@ -207,14 +210,16 @@ impl Filmstrip {
             self.wanted = wanted;
         }
 
-        let pointer = response.interact_pointer_pos().filter(|_| response.clicked())?;
+        let pointer = response.interact_pointer_pos().filter(|_| response.clicked() || response.secondary_clicked());
         let modifiers = ui.input(|i| i.modifiers);
         let click = match () {
+            () if response.secondary_clicked() => Click::Menu,
             () if modifiers.command => Click::Toggle,
             () if modifiers.shift => Click::Range,
             () => Click::Plain,
         };
-        self.cells.iter().find(|(_, rect)| rect.contains(pointer)).map(|&(i, _)| (i, click))
+        let clicked = pointer.and_then(|pointer| self.cells.iter().find(|(_, rect)| rect.contains(pointer))).map(|&(i, _)| (i, click));
+        (clicked, response)
     }
 }
 

@@ -281,21 +281,23 @@ impl Loupe {
     /// Selector) the pointer is a crosshair over the frame, and a click on
     /// it is returned, as a share of the frame's width and height; with
     /// [`Mouse::Zoom`], the mouse zooms and pans. With [`Mouse::Tool`]
-    /// only the room is taken, and nothing drawn.
-    pub fn show(&mut self, ui: &mut Ui, path: &Path, mouse: Mouse) -> Option<[f64; 2]> {
+    /// only the room is taken, and nothing drawn. Also returns the loupe's
+    /// response, for its right-click menu, but under the crop tool.
+    pub fn show(&mut self, ui: &mut Ui, path: &Path, mouse: Mouse) -> (Option<[f64; 2]>, Option<egui::Response>) {
         let pixels_per_point = ui.ctx().pixels_per_point();
         self.area = ui.max_rect().shrink(MARGIN);
         let pixels = self.area.size() * pixels_per_point;
         self.size = (pixels.x.max(0.0) as usize, pixels.y.max(0.0) as usize);
         if mouse == Mouse::Tool {
             (self.zoomed, self.hold) = (false, None);
-            return None;
+            return (None, None);
         }
-        let Some(shown) = self.shown.get(path) else {
+        let menu = || ui.interact(self.area, ui.id().with("loupe menu"), egui::Sense::click());
+        let texture = self.shown.get(path).and_then(|shown| shown.render.as_ref().map(|r| &r.texture).or(shown.preview.as_ref()));
+        let (Some(shown), Some(texture)) = (self.shown.get(path), texture) else {
             (self.fit, self.full) = (Rect::NOTHING, Vec2::ZERO);
-            return None;
+            return (None, Some(menu()));
         };
-        let texture = shown.render.as_ref().map(|r| &r.texture).or(shown.preview.as_ref())?;
         self.fit = fit(texture.size_vec2(), self.area);
         self.full = shown.full.map_or(Vec2::ZERO, |(w, h)| vec2(w as f32, h as f32) / pixels_per_point);
         let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -320,14 +322,16 @@ impl Loupe {
         let on_frame = frame.intersect(self.area);
         if mouse == Mouse::Pick {
             let response = ui.interact(on_frame, ui.id().with("white balance selector"), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::Crosshair);
-            let at = response.clicked().then(|| response.interact_pointer_pos()).flatten()?;
-            return Some([f64::from((at.x - frame.left()) / frame.width()), f64::from((at.y - frame.top()) / frame.height())]);
+            let at = response.clicked().then(|| response.interact_pointer_pos()).flatten();
+            let at = at.map(|at| [f64::from((at.x - frame.left()) / frame.width()), f64::from((at.y - frame.top()) / frame.height())]);
+            return (at, Some(response));
         }
-        if mouse == Mouse::Zoom && self.full.x > 0.0 {
+        if self.full.x > 0.0 {
             let response = ui.interact(self.area, ui.id().with("loupe"), egui::Sense::click_and_drag());
             self.pointer(ui, &response);
+            return (None, Some(response));
         }
-        None
+        (None, Some(menu()))
     }
 }
 

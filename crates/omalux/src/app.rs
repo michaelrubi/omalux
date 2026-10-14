@@ -162,6 +162,8 @@ pub struct App {
     selector: bool,
     /// The loupe shows the current frame with no edit, until it's left.
     before: bool,
+    /// The keyboard shortcuts legend is open.
+    legend: bool,
     /// The folder picker, while it's open.
     picking: Option<Receiver<Option<PathBuf>>>,
     /// Frames being exported, while the export runs.
@@ -278,6 +280,7 @@ impl App {
             dragging: false,
             selector: false,
             before: false,
+            legend: false,
             picking: None,
             exporting: None,
             message: None,
@@ -528,6 +531,7 @@ impl App {
             }
             Command::BeforeAfter => self.before = !self.before && self.shoot.is_some(),
             Command::Clipping => self.clipping = !self.clipping,
+            Command::Shortcuts => self.legend = !self.legend,
             // The crop tool shows the frame whole.
             Command::Zoom if self.crop.is_some() => {}
             Command::Zoom => {
@@ -1006,8 +1010,11 @@ impl App {
             if self.crop.is_some() {
                 self.crop_keys(ctx);
             }
+            // Under the legend, only its own key, to put it away.
             for command in Command::pressed(ctx, &mut self.v_down) {
-                self.run(command, ctx);
+                if !self.legend || command == Command::Shortcuts {
+                    self.run(command, ctx);
+                }
             }
         }
         self.run_script(ctx);
@@ -1121,6 +1128,8 @@ impl App {
         let mut picked = None;
         let mut cropped = None;
         let mut clicked = None;
+        let context = self.menu_context();
+        let mut chosen = None;
         egui::CentralPanel::no_frame().frame(pasteboard).show(ui, |ui| match &self.shoot {
             Some(shoot) => {
                 let mouse = if self.crop.is_some() {
@@ -1131,7 +1140,11 @@ impl App {
                     Mouse::Zoom
                 };
                 let path = &shoot.frame().path;
-                picked = self.loupe.show(ui, path, mouse);
+                let response;
+                (picked, response) = self.loupe.show(ui, path, mouse);
+                if let Some(response) = &response {
+                    chosen = crate::menus::loupe(response, &self.theme, &context);
+                }
                 if let (Some(tool), Some(editing), Some(dims)) = (&mut self.crop, self.edits.get(path), dims) {
                     let settings = editing.history.settings();
                     let frame = crate::crop::Frame { area: self.loupe.area(), whole: self.loupe.whole(path, settings.orientation), dims };
@@ -1153,6 +1166,12 @@ impl App {
         if let Some(dir) = clicked {
             self.open(dir);
         }
+        if let Some(command) = chosen {
+            self.run(command, &ui.ctx().clone());
+        }
+        if self.legend {
+            self.legend = crate::legend::show(ui.ctx(), &self.theme);
+        }
         if let Some(mut dialog) = self.choosing.take() {
             match dialog.show(ui.ctx(), &self.theme) {
                 Outcome::KeepOpen => self.choosing = Some(dialog),
@@ -1168,18 +1187,46 @@ impl App {
     /// The shown frames' thumbnails, under the loupe.
     fn filmstrip(&mut self, ui: &mut Ui) {
         let Some(shoot) = &mut self.shoot else { return };
-        let Some((clicked, click)) = self.filmstrip.show(ui, shoot, &self.theme) else { return };
+        let (clicked, response) = self.filmstrip.show(ui, shoot, &self.theme);
         let was = shoot.current();
-        match click {
-            Click::Toggle => shoot.toggle_selected(clicked),
-            Click::Range => shoot.select_to(clicked),
-            Click::Plain => {
+        match clicked {
+            Some((clicked, Click::Toggle)) => shoot.toggle_selected(clicked),
+            Some((clicked, Click::Range)) => shoot.select_to(clicked),
+            Some((clicked, Click::Plain)) => {
                 shoot.clear_selection();
                 shoot.go_to(clicked);
             }
+            // The menu acts on the frame right-clicked, and on the
+            // selection only if that's in it, as in Lightroom.
+            Some((clicked, Click::Menu)) if !shoot.is_selected(clicked) => {
+                shoot.clear_selection();
+                shoot.go_to(clicked);
+            }
+            Some((clicked, Click::Menu)) => shoot.go_to(clicked),
+            None => {}
         }
         if shoot.current() != was {
             self.leave();
+        }
+        if let Some(command) = crate::menus::filmstrip(&response, &self.theme, &self.menu_context()) {
+            self.run(command, &ui.ctx().clone());
+        }
+    }
+
+    /// What the right-click menus are told about the current frame.
+    fn menu_context(&self) -> crate::menus::Context {
+        let Some(shoot) = &self.shoot else { return Default::default() };
+        let current = shoot.current();
+        let settings = self.edits.get(&shoot.frame().path).map(|editing| editing.history.settings());
+        crate::menus::Context {
+            rating: shoot.frame().rating,
+            copied: self.clipboard.is_some(),
+            previous: self.previous.is_some(),
+            stack: shoot.stack(current).map(|_| shoot.expanded(current)),
+            selection: shoot.selection().len() > 1,
+            before: self.before,
+            clipping: self.clipping,
+            flat: settings.is_some_and(|settings| Profile::of(settings) == Profile::Flat),
         }
     }
 

@@ -76,6 +76,8 @@ pub enum Command {
     AutoLevel,
     /// The Flat profile, or Camera match again.
     Flat,
+    /// The legend of every command and its key, or put it away.
+    Shortcuts,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -134,6 +136,7 @@ impl Command {
         Command::AutoExposure,
         Command::AutoLevel,
         Command::Flat,
+        Command::Shortcuts,
     ];
 
     /// Look a command up by its name in code, e.g. "Open".
@@ -193,6 +196,7 @@ impl Command {
         Command::AutoWhiteBalance,
         Command::AutoTone,
         Command::Flat,
+        Command::Shortcuts,
     ];
 
     pub fn label(self) -> &'static str {
@@ -247,6 +251,7 @@ impl Command {
             Command::AutoExposure => "Auto Exposure",
             Command::AutoLevel => "Auto Level",
             Command::Flat => "Flat Profile, or Camera Match",
+            Command::Shortcuts => "Keyboard Shortcuts",
         }
     }
 
@@ -311,6 +316,8 @@ impl Command {
             // Lightroom has no key for a profile. Its F is Full Screen,
             // which is Hyprland's here.
             Command::Flat => s(Modifiers::NONE, Key::F),
+            // Lightroom's Develop Shortcuts.
+            Command::Shortcuts => s(CMD, Key::Slash),
         }
     }
 
@@ -445,6 +452,7 @@ mod tests {
         assert_eq!(press(&ctx, Modifiers::SHIFT, Key::Plus), [Command::IncreaseMore]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::W), [Command::WhiteBalance]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::Backslash), [Command::BeforeAfter]);
+        assert_eq!(press(&ctx, CMD, Key::Slash), [Command::Shortcuts]);
     }
 
     #[test]
