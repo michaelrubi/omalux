@@ -2,11 +2,12 @@
 //! act on what was clicked, each with its key, so they can be found
 //! without knowing it.
 //!
-//! Modelled on Omapix's layer and mask context menus in layers_panel.rs.
+//! Modelled on Omapix's layer and mask menus (`omapix/src/layers_panel.rs`).
 
 use omalux_engine::shoot::Rating;
 
 use crate::commands::Command;
+use crate::hotkeys;
 use crate::theme::Theme;
 
 /// What the menus need to know about the frame and the app, to tick what's
@@ -29,95 +30,48 @@ pub struct Context {
     pub flat: bool,
 }
 
+/// A menu's item: a command, or the Rating submenu of the stars.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Entry {
     Command(Command),
-    RatingSubmenu,
+    Rating,
 }
 
-const LOUPE_GROUPS: &[&[Entry]] = &[
-    &[
-        Entry::Command(Command::BeforeAfter),
-        Entry::Command(Command::Clipping),
-        Entry::Command(Command::Zoom),
-    ],
-    &[
-        Entry::Command(Command::WhiteBalance),
-        Entry::Command(Command::Flat),
-        Entry::Command(Command::AutoTone),
-        Entry::Command(Command::AutoWhiteBalance),
-        Entry::Command(Command::Crop),
-    ],
-    &[
-        Entry::Command(Command::Copy),
-        Entry::Command(Command::CopyChoose),
-        Entry::Command(Command::Paste),
-        Entry::Command(Command::PastePrevious),
-    ],
-    &[
-        Entry::Command(Command::Pick),
-        Entry::Command(Command::Reject),
-        Entry::Command(Command::Unmark),
-        Entry::RatingSubmenu,
-    ],
-    &[
-        Entry::Command(Command::Reset),
-    ],
-    &[
-        Entry::Command(Command::Export),
-        Entry::Command(Command::ExportAndEdit),
-    ],
-    &[
-        Entry::Command(Command::Shortcuts),
-    ],
+use Entry::{Command as C, Rating as Stars};
+
+/// The loupe's menu, in groups between separators.
+const LOUPE: &[&[Entry]] = &[
+    &[C(Command::BeforeAfter), C(Command::Clipping), C(Command::Zoom)],
+    &[C(Command::WhiteBalance), C(Command::Flat), C(Command::AutoTone), C(Command::AutoWhiteBalance), C(Command::Crop)],
+    &[C(Command::Copy), C(Command::CopyChoose), C(Command::Paste), C(Command::PastePrevious)],
+    &[C(Command::Pick), C(Command::Reject), C(Command::Unmark), Stars],
+    &[C(Command::Reset)],
+    &[C(Command::Export), C(Command::ExportAndEdit)],
+    &[C(Command::Shortcuts)],
 ];
 
-const FILMSTRIP_GROUPS: &[&[Entry]] = &[
-    &[
-        Entry::Command(Command::Pick),
-        Entry::Command(Command::Reject),
-        Entry::Command(Command::Unmark),
-        Entry::RatingSubmenu,
-    ],
-    &[
-        Entry::Command(Command::Copy),
-        Entry::Command(Command::Paste),
-        Entry::Command(Command::PasteStack),
-    ],
-    &[
-        Entry::Command(Command::ToggleStack),
-    ],
-    &[
-        Entry::Command(Command::SelectAll),
-        Entry::Command(Command::SelectNone),
-    ],
-    &[
-        Entry::Command(Command::Reset),
-        Entry::Command(Command::Export),
-    ],
-    &[
-        Entry::Command(Command::Shortcuts),
-    ],
+/// The filmstrip's.
+const FILMSTRIP: &[&[Entry]] = &[
+    &[C(Command::Pick), C(Command::Reject), C(Command::Unmark), Stars],
+    &[C(Command::Copy), C(Command::Paste), C(Command::PasteStack)],
+    &[C(Command::ToggleStack)],
+    &[C(Command::SelectAll), C(Command::SelectNone)],
+    &[C(Command::Reset), C(Command::Export)],
+    &[C(Command::Shortcuts)],
 ];
 
-const RATING_STARS: &[Command] = &[
-    Command::Star1,
-    Command::Star2,
-    Command::Star3,
-    Command::Star4,
-    Command::Star5,
-];
+const STARS: &[Command] = &[Command::Star1, Command::Star2, Command::Star3, Command::Star4, Command::Star5];
 
-/// Whether this command is shown in the menu for this context.
-pub fn visible(command: Command, context: &Context) -> bool {
+/// Whether `command` is in the menu at all: the stack's only in a stack.
+fn visible(command: Command, context: &Context) -> bool {
     match command {
         Command::PasteStack | Command::ToggleStack => context.stack.is_some(),
         _ => true,
     }
 }
 
-/// Whether this command can be run right now.
-pub fn enabled(command: Command, context: &Context) -> bool {
+/// Whether `command` can be done now.
+fn enabled(command: Command, context: &Context) -> bool {
     match command {
         Command::Paste | Command::PasteStack => context.copied,
         Command::PastePrevious => context.previous,
@@ -126,130 +80,78 @@ pub fn enabled(command: Command, context: &Context) -> bool {
     }
 }
 
-/// Whether this toggle command is on.
-pub fn ticked(command: Command, context: &Context) -> bool {
+/// Whether `command` is a toggle that's on, or the mark the frame has.
+fn ticked(command: Command, context: &Context) -> bool {
     match command {
         Command::BeforeAfter => context.before,
         Command::Clipping => context.clipping,
         Command::Flat => context.flat,
-        Command::Star1 | Command::Star2 | Command::Star3 | Command::Star4 | Command::Star5 => {
-            command.rating() == Some(context.rating)
-        }
+        _ if STARS.contains(&command) => command.rating() == Some(context.rating),
         _ => false,
     }
 }
 
-/// The label shown in the menu for this command.
-pub fn label(command: Command, context: &Context) -> &'static str {
+/// What the item says: the command's label, but where a menu says what it
+/// will do.
+fn label(command: Command, context: &Context) -> &'static str {
     match command {
-        Command::ToggleStack => {
-            if context.stack == Some(true) {
-                "Close Up the Stack"
-            } else {
-                "Open Out the Stack"
-            }
-        }
+        Command::ToggleStack if context.stack == Some(true) => "Close Up the Stack",
+        Command::ToggleStack => "Open Out the Stack",
         Command::Flat => "Flat Profile",
         _ => command.label(),
     }
 }
 
-/// Add one menu item button: label on the left, key on the right in muted
-/// colour, greyed out when disabled, and a check mark when ticked.
-fn menu_item(ui: &mut egui::Ui, theme: &Theme, context: &Context, command: Command) -> Option<Command> {
+/// One item: its label, a tick if it's on, its key at the right; greyed
+/// out when it can't be done. The command, if it was clicked.
+fn item(ui: &mut egui::Ui, theme: &Theme, context: &Context, command: Command) -> Option<Command> {
     if !visible(command, context) {
         return None;
     }
-    let is_ticked = ticked(command, context);
-    let is_enabled = enabled(command, context);
-    let item_label = label(command, context);
-    let text = if is_ticked {
-        format!("✓ {item_label}")
-    } else {
-        item_label.to_owned()
-    };
-    let mut button = egui::Button::new(text);
-    if let Some(shortcut) = crate::hotkeys::current().command(command) {
-        let key_str = crate::hotkeys::format_shortcut(&shortcut);
-        button = button.shortcut_text(egui::RichText::new(key_str).color(theme.muted));
+    let label = label(command, context);
+    let mut button = egui::Button::new(if ticked(command, context) { format!("✓ {label}") } else { label.to_owned() });
+    if let Some(shortcut) = hotkeys::current().command(command) {
+        button = button.shortcut_text(egui::RichText::new(hotkeys::format_shortcut(&shortcut)).color(theme.muted));
     }
-    if ui.add_enabled(is_enabled, button).clicked() {
+    ui.add_enabled(enabled(command, context), button).clicked().then(|| {
         ui.close();
-        Some(command)
-    } else {
-        None
-    }
+        command
+    })
 }
 
-fn render_menu(
-    ui: &mut egui::Ui,
-    theme: &Theme,
-    context: &Context,
-    groups: &[&[Entry]],
-) -> Option<Command> {
+/// A menu of `groups`, those with nothing to show left out.
+fn menu(ui: &mut egui::Ui, theme: &Theme, context: &Context, groups: &[&[Entry]]) -> Option<Command> {
     let mut chosen = None;
-    let mut rendered_any = false;
-
-    for group in groups {
-        let has_visible = group.iter().any(|entry| match entry {
-            Entry::Command(cmd) => visible(*cmd, context),
-            Entry::RatingSubmenu => true,
-        });
-
-        if !has_visible {
-            continue;
-        }
-
-        if rendered_any {
+    let shown = groups.iter().filter(|group| group.iter().any(|entry| !matches!(entry, C(command) if !visible(*command, context))));
+    for (i, group) in shown.enumerate() {
+        if i > 0 {
             ui.separator();
         }
-
         for entry in *group {
-            match entry {
-                Entry::Command(cmd) => {
-                    if let Some(c) = menu_item(ui, theme, context, *cmd) {
-                        chosen = Some(c);
-                    }
-                }
-                Entry::RatingSubmenu => {
+            match *entry {
+                C(command) => chosen = item(ui, theme, context, command).or(chosen),
+                Stars => {
                     ui.menu_button("Rating", |ui| {
-                        for &star in RATING_STARS {
-                            if let Some(c) = menu_item(ui, theme, context, star) {
-                                chosen = Some(c);
-                            }
+                        for &star in STARS {
+                            chosen = item(ui, theme, context, star).or(chosen);
                         }
                     });
                 }
             }
         }
-
-        rendered_any = true;
     }
-
     chosen
 }
 
 /// The loupe's menu, on `response`: the command chosen, if one was.
 pub fn loupe(response: &egui::Response, theme: &Theme, context: &Context) -> Option<Command> {
-    let mut chosen = None;
-    egui::Popup::context_menu(response)
-        .sense(egui::Sense::hover())
-        .show(|ui| {
-            chosen = render_menu(ui, theme, context, LOUPE_GROUPS);
-        });
-    chosen
+    egui::Popup::context_menu(response).show(|ui| menu(ui, theme, context, LOUPE)).and_then(|shown| shown.inner)
 }
 
 /// The filmstrip's menu, on `response`: the command chosen, if one was.
 /// The frame right-clicked is the current one by then.
 pub fn filmstrip(response: &egui::Response, theme: &Theme, context: &Context) -> Option<Command> {
-    let mut chosen = None;
-    egui::Popup::context_menu(response)
-        .sense(egui::Sense::hover())
-        .show(|ui| {
-            chosen = render_menu(ui, theme, context, FILMSTRIP_GROUPS);
-        });
-    chosen
+    egui::Popup::context_menu(response).show(|ui| menu(ui, theme, context, FILMSTRIP)).and_then(|shown| shown.inner)
 }
 
 #[cfg(test)]
@@ -312,13 +214,7 @@ mod tests {
         assert!(!ticked(Command::Star4, &off));
         assert!(!ticked(Command::Star5, &off));
 
-        let on = Context {
-            before: true,
-            clipping: true,
-            flat: true,
-            rating: 3,
-            ..Default::default()
-        };
+        let on = Context { before: true, clipping: true, flat: true, rating: 3, ..Default::default() };
         assert!(ticked(Command::BeforeAfter, &on));
         assert!(ticked(Command::Clipping, &on));
         assert!(ticked(Command::Flat, &on));

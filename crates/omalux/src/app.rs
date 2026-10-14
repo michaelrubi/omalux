@@ -3280,9 +3280,15 @@ mod tests {
         let cell = |h: &Harness, index: usize| h.app.filmstrip.cells.iter().find(|(i, _)| *i == index).map(|(_, r)| r.center()).expect("filmstrip cell");
         h.right_click(cell(&h, 1));
         assert_eq!(h.app.shoot.as_ref().unwrap().current(), 1);
+        // Each right-click opens the menu: Esc puts it away (and it's
+        // gone from under the pointer a frame later).
+        h.press(Modifiers::NONE, Key::Escape);
+        h.frame(vec![]);
         h.click_with(cell(&h, 2), Modifiers::COMMAND);
         h.right_click(cell(&h, 1));
         assert_eq!((h.app.shoot.as_ref().unwrap().current(), h.app.shoot.as_ref().unwrap().selection()), (1, vec![1, 2]));
+        h.press(Modifiers::NONE, Key::Escape);
+        h.frame(vec![]);
         h.right_click(cell(&h, 0));
         assert_eq!((h.app.shoot.as_ref().unwrap().current(), h.app.shoot.as_ref().unwrap().selection()), (0, vec![]));
     }
@@ -3877,10 +3883,7 @@ mod tests {
         h.app.open(folder.0.clone());
         h.frame(vec![]);
 
-        let cell = |h: &Harness, index: usize| {
-            h.app.filmstrip.cells.iter().find(|(i, _)| *i == index).map(|(_, r)| r.center()).expect("filmstrip cell")
-        };
-
+        let cell = |h: &Harness, index: usize| h.app.filmstrip.cells.iter().find(|(i, _)| *i == index).map(|(_, r)| r.center()).expect("filmstrip cell");
         h.right_click(cell(&h, 0));
         let output = h.frame(vec![]);
         let pick = texts(&output).into_iter().find(|(text, _)| text == "Pick").map(|(_, rect)| rect).expect("Pick item in menu");
@@ -3902,15 +3905,9 @@ mod tests {
         h.right_click(loupe_center);
 
         let output = h.frame(vec![]);
-        let before_after = texts(&output)
-            .into_iter()
-            .find(|(text, _)| text == "Before/After")
-            .map(|(_, rect)| rect)
-            .expect("Before/After item in menu");
+        let before_after = texts(&output).into_iter().find(|(text, _)| text == "Before/After").map(|(_, rect)| rect).expect("Before/After item in menu");
         h.click(before_after.center());
 
         assert!(h.app.before);
     }
 }
-
-
