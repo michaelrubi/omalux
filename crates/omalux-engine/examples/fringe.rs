@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lightcraft_develop::DevelopSettings;
-use lightcraft_pipeline::{PixelWindow, RenderRequest, SourceInfo};
-use lightcraft_raster::{Rgb32f, Rgba8};
+use lightcraft_pipeline::{PixelWindow, RenderRequest};
+use lightcraft_raster::Rgba8;
+use omalux_engine::look::Profile;
 use omalux_engine::raw;
 
 /// The Defringe amounts tried: Lightroom's range is 0 to 20.
@@ -71,7 +72,7 @@ fn png(path: &Path, image: &Rgba8) -> Result<(), String> {
 
 fn check(file: &Path, out: Option<&Path>) -> Result<(), String> {
     let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
-    let (full, info): (Rgb32f, SourceInfo) = raw::load(&bytes, usize::MAX)?;
+    let raw::Loaded { image: full, info, .. } = raw::load(&bytes, usize::MAX, Profile::Fitted)?;
     let full = Arc::new(full);
     let fresh = DevelopSettings::for_raw(info.as_shot_temp, info.as_shot_tint);
     let mut remove_ca = fresh.clone();

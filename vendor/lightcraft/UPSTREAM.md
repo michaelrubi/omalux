@@ -52,9 +52,20 @@ Their tests need real raws for the corpus tests, which skip without them:
 
 ## Local changes
 
-None yet. Every change to a file under `vendor/lightcraft/` is listed here,
-with why, kept small and clean-room (nothing ported from GPL code), so it
-could go upstream.
+Every change to a file under `vendor/lightcraft/` is listed here, with why,
+kept small and clean-room (nothing ported from GPL code), so it could go
+upstream.
+
+- **`light.hdr`** (M4, 2026-10-13): `Light` has an `hdr` amount (0 to 100,
+  not written while it's 0, so settings without it keep their JSON and
+  `hash64`), with its row in the control table (`develop/src/settings.rs`,
+  `controls.rs`). It's OmaLux's HDR slider, kept where the other Light
+  sliders are so that undo, copy and paste, the sidecar and the slider
+  widget carry it as they carry those. The pipeline doesn't read it:
+  `omalux_engine::look::effective` folds it into Highlights and Shadows
+  before a render, as Lightcraft's own profiles are folded in
+  (`pipeline::profiles::effective`). Offered upstream, the folding would
+  go there.
 
 ## Re-syncing
 

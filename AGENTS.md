@@ -2,7 +2,7 @@
 
 OmaLux is a fast, keyboard-first raw developer for Omarchy: the picks of a culled folder of raws in, 16-bit TIFFs ready to retouch out. It is the second stage of Michael's workflow and replaces darktable in it: cull in Omacull (`~/dev/omacull`), develop in OmaLux, retouch in Omapix (`~/dev/omapix`), export.
 
-**Status:** scoped on 2026-10-08 and re-planned on [Lightcraft](https://github.com/storytold/lightcraft)'s engine. M0 is done: Lightcraft vendored at `701f78e`, the workspace and an empty themed window (seen on Hyprland), the sidecar, the 16-bit export and the colour engine settled, and the `spike` and `lens` examples run on Michael's frames on the laptop (the camera match's gap there is DRO's shadow lift, as DESIGN.md expected). The GPU loupe's times jump because the GPU clocks down after half a second idle (the `idle` example), so the loupe prepares frames ahead and doesn't count on a cold render. M1, M2 (copy and paste, the selection, stacks) and M3 (Detail, Lens Corrections, Crop & Straighten, Auto) are built and haven't been tried by hand yet (see ROADMAP.md for each item, and what's open about exporting a frame again, selecting with stacks closed up, and what Auto tone does on backlit frames). What M0 left moved to M4, M5 and M6 (see ROADMAP.md). raw.pixls.us is blocked in the cloud sessions, so real raws only go through the code on the laptop. Read [docs/DESIGN.md](docs/DESIGN.md) for scope and architecture and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones and the "Later" list.
+**Status:** scoped on 2026-10-08 and re-planned on [Lightcraft](https://github.com/storytold/lightcraft)'s engine. M0 is done: Lightcraft vendored at `701f78e`, the workspace and an empty themed window (seen on Hyprland), the sidecar, the 16-bit export and the colour engine settled, and the `spike` and `lens` examples run on Michael's frames on the laptop (the camera match's gap there is DRO's shadow lift, as DESIGN.md expected). The GPU loupe's times jump because the GPU clocks down after half a second idle (the `idle` example), so the loupe prepares frames ahead and doesn't count on a cold render. M1, M2 (copy and paste, the selection, stacks) and M3 (Detail, Lens Corrections, Crop & Straighten, Auto) are built and haven't been tried by hand yet (see ROADMAP.md for each item, and what's open about exporting a frame again, selecting with stacks closed up, and what Auto tone does on backlit frames). M4 is under way on `m4`: a frame opens under Camera match from the ILCE-7M3's built-in Standard profile with DRO's shadow lift measured from its JPEG, Flat is on F, HDR is a slider, and the process version is 2 (an edit from 1 keeps the look fitted to its own JPEG); the DCP reader isn't wired in, and the side-by-side with Lightroom and Capture One waits for Michael's reference set (see ROADMAP.md). What M0 left moved to M4, M5 and M6 (see ROADMAP.md). raw.pixls.us is blocked in the cloud sessions, so real raws only go through the code on the laptop. Read [docs/DESIGN.md](docs/DESIGN.md) for scope and architecture and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones and the "Later" list.
 
 ## Principles
 
@@ -27,6 +27,7 @@ OmaLux is a fast, keyboard-first raw developer for Omarchy: the picks of a culle
 - Sony ARW from an ILCE-7M3 is the only target; other cameras are on the roadmap's "Later" list. Say so wherever they come up.
 - Hand testing: Michael tests from the installed binary, not `cargo run`. After a change he'll try by hand, run `make install` and ask him to restart OmaLux.
 - Never try edits or marks on Michael's shoots, from a script or a test: they write to his sidecars. Copy a raw or two (and their sidecars) to a temporary folder and open that.
+- Everything that renders a frame hands the pipeline `omalux_engine::look::effective`'s settings and source facts, not the edit's own: that's where the profile's part (DRO's lift, Flat's curve) and HDR go in.
 - Whenever non-trivial UI or engine logic is added, write a headless test. GPU pipeline stages are checked against Lightcraft's CPU pipeline, as Lightcraft does.
 
 ## Build and test commands
@@ -79,6 +80,29 @@ cargo run --release -p omalux-engine --example lens -- path/to/shoot --out /tmp/
 # estimated for each frame and how much of it is fringed, as it opens and
 # with each, and the worst part at 100% (three side by side) with --out
 cargo run --release -p omalux-engine --example fringe -- path/to/raws --out /tmp/fringe
+
+# M4's camera profiles: one per camera model and Creative Style, fitted
+# to the camera's JPEGs over folders of raws (only read), written to --out
+# (else ~/.config/omalux/camera-profiles, which OmaLux reads before the
+# built-in ones); --every 6 holds every sixth raw out and lists them
+cargo run --release -p omalux-engine --example calibrate -- --max 0 --every 6 --out /tmp/profiles path/to/shoots
+
+# M4's measure of the camera match: ΔE2000 against the camera's JPEG for
+# the per-frame fit, the profile, and the profile with DRO's lift (Camera
+# match), per frame and over all (OMALUX_CAMERA_PROFILES for profiles that
+# aren't installed; --list for calibrate's held-out raws)
+OMALUX_CAMERA_PROFILES=/tmp/profiles cargo run --release -p omalux-engine --example match -- --list /tmp/profiles/held-out.txt
+
+# M4's HDR try-out: HDR at 0, 50 and 100 beside an exposure fusion of the
+# same frame, side by side in --out, with what each did to the ends
+cargo run --release -p omalux-engine --example hdr -- path/to/raws --out /tmp/hdr
+
+# M4's side-by-side with other programs: a folder of raws with, beside
+# each, any of NAME.lightroom-camera.tif, NAME.lightroom-adobe.tif,
+# NAME.captureone.tif and NAME.darktable.tif (16-bit, with their profiles);
+# sheets at fit and at 100% in --out (--at 0.3,0.6 for where), and each
+# one's ΔE2000 against the camera's JPEG
+cargo run --release -p omalux-engine --example quality -- path/to/reference-set --out /tmp/quality
 
 # The reference renders the process version guards: checked by the tests
 # (with the corpus raws), written again after a change that's meant, with

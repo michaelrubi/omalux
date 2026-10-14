@@ -22,6 +22,7 @@ use lightcraft_develop::{DevelopSettings, WbMode};
 use lightcraft_pipeline::{RenderRequest, SourceInfo, StageCache};
 use lightcraft_raster::Rgb32f;
 
+use crate::look::{self, Camera};
 use crate::{crop, edit};
 
 /// Something to set automatically.
@@ -47,24 +48,30 @@ const SPECKS: f64 = 0.0005;
 /// Set `what` in `settings` from the frame itself. False if there was
 /// nothing to go by (no horizon to level, a slider with no automatic
 /// value), and the settings are as they were.
-pub fn apply(settings: &mut DevelopSettings, info: &SourceInfo, source: &Arc<Rgb32f>, what: Auto) -> bool {
+///
+/// The frame is looked at as it's rendered: with what its profile and
+/// HDR put under the sliders ([`look::effective`]).
+pub fn apply(settings: &mut DevelopSettings, info: &SourceInfo, camera: &Camera, source: &Arc<Rgb32f>, what: Auto) -> bool {
+    let (rendered, facts) = look::effective(settings, info, camera);
+    let (mut rendered, facts) = (rendered.into_owned(), &facts.into_owned());
     match what {
         Auto::WhiteBalance => {
             let (temp, tint) = lightcraft_pipeline::auto::auto_wb(source, info);
             lightcraft_pipeline::local::normalize_wb(settings, info);
             (settings.wb.mode, settings.wb.temp, settings.wb.tint) = (WbMode::Auto, temp, tint);
         }
-        Auto::Exposure => settings.light.exposure = lightcraft_pipeline::auto::auto_tone(source, info, settings).exposure,
+        Auto::Exposure => settings.light.exposure = lightcraft_pipeline::auto::auto_tone(source, facts, &rendered).exposure,
         Auto::Tone => {
-            settings.light.whites = whites(settings, info, source);
-            settings.light.blacks = blacks(settings, info, source);
+            settings.light.whites = whites(&rendered, facts, source);
+            rendered.light.whites = settings.light.whites;
+            settings.light.blacks = blacks(&rendered, facts, source);
         }
         Auto::Level => {
             let Some(angle) = lightcraft_pipeline::upright::level_degrees(source, info, settings) else { return false };
             crop::straighten(settings, crop::dims((source.width, source.height), settings), angle);
         }
         Auto::Control(id) => {
-            let tone = || lightcraft_pipeline::auto::auto_tone(source, info, settings);
+            let tone = || lightcraft_pipeline::auto::auto_tone(source, facts, &rendered);
             let value = match id {
                 "wb.temp" => lightcraft_pipeline::auto::auto_wb(source, info).0,
                 "wb.tint" => lightcraft_pipeline::auto::auto_wb(source, info).1,
@@ -72,8 +79,8 @@ pub fn apply(settings: &mut DevelopSettings, info: &SourceInfo, source: &Arc<Rgb
                 "light.contrast" => tone().contrast,
                 "light.highlights" => tone().highlights,
                 "light.shadows" => tone().shadows,
-                "light.whites" => whites(settings, info, source),
-                "light.blacks" => blacks(settings, info, source),
+                "light.whites" => whites(&rendered, facts, source),
+                "light.blacks" => blacks(&rendered, facts, source),
                 "color.vibrance" => tone().vibrance,
                 "color.saturation" => tone().saturation,
                 _ => return false,
@@ -185,7 +192,7 @@ mod tests {
         let mut s = DevelopSettings::default();
         assert_eq!(clipping(&s, &info, &source), (0.0, 0.0));
         (s.light.whites, s.light.blacks) = (30.0, -20.0);
-        assert!(apply(&mut s, &info, &source, Auto::Tone));
+        assert!(apply(&mut s, &info, &Camera::default(), &source, Auto::Tone));
         assert_eq!((s.light.whites, s.light.blacks), (0.0, 0.0), "not pushed out to fill the histogram, and what was set is set again");
     }
 
@@ -199,7 +206,7 @@ mod tests {
         let (blown, _) = clipping(&s, &info, &source);
         let hopeless = clipping(&DevelopSettings { light: lightcraft_develop::Light { whites: -100.0, ..Default::default() }, ..s.clone() }, &info, &source).0;
         assert!(blown > hopeless + 0.02, "more blown than need be to start with: {blown}, {hopeless}");
-        assert!(apply(&mut s, &info, &source, Auto::Tone));
+        assert!(apply(&mut s, &info, &Camera::default(), &source, Auto::Tone));
         assert!(s.light.whites < 0.0 && s.light.whites.fract() == 0.0, "whites {}", s.light.whites);
         let (now_blown, _) = clipping(&s, &info, &source);
         assert!(now_blown <= hopeless + 2.0 * SPECKS, "{now_blown} of {blown}, {hopeless} past help");
@@ -215,7 +222,7 @@ mod tests {
         let patched = Arc::new(patched);
         let mut s = DevelopSettings::default();
         assert!(clipping(&s, &info, &patched).0 > 0.03, "the patch is blown as developed");
-        assert!(apply(&mut s, &info, &patched, Auto::Tone));
+        assert!(apply(&mut s, &info, &Camera::default(), &patched, Auto::Tone));
         assert!(s.light.whites < 0.0 && s.light.whites > -100.0, "whites {}", s.light.whites);
         assert!(clipping(&s, &info, &patched).0 <= 2.0 * SPECKS);
         let mut less = s.clone();
@@ -228,7 +235,7 @@ mod tests {
         let info = SourceInfo::default();
         let ramp = ramp(0.0, 1.6);
         let mut plain = DevelopSettings::default();
-        apply(&mut plain, &info, &ramp, Auto::Tone);
+        apply(&mut plain, &info, &Camera::default(), &ramp, Auto::Tone);
         // The same frame with a window in it, blown out in the raw: every
         // pixel of it at the one value the sensor stops at.
         let mut window = (*ramp).clone();
@@ -239,7 +246,7 @@ mod tests {
         }
         let window = Arc::new(window);
         let mut s = DevelopSettings::default();
-        assert!(apply(&mut s, &info, &window, Auto::Tone));
+        assert!(apply(&mut s, &info, &Camera::default(), &window, Auto::Tone));
         assert_eq!(s.light.whites, plain.light.whites, "the window doesn't pull Whites down any further");
         assert!(clipping(&s, &info, &window).0 > 0.03, "and stays white");
     }
@@ -253,14 +260,14 @@ mod tests {
         s.light.blacks = -100.0;
         let crushed = clipping(&s, &info, &source).1;
         let mut auto = s.clone();
-        assert!(apply(&mut auto, &info, &source, Auto::Tone));
+        assert!(apply(&mut auto, &info, &Camera::default(), &source, Auto::Tone));
         assert!(auto.light.blacks >= 0.0, "blacks {}", auto.light.blacks);
         assert!(clipping(&auto, &info, &source).1 <= crushed);
         // Black in the raw is black wherever Blacks is: it's left.
         let mut black = Rgb32f::new(64, 48);
         black.data.fill([0.0; 3]);
         let mut s = DevelopSettings::default();
-        assert!(apply(&mut s, &info, &Arc::new(black), Auto::Tone));
+        assert!(apply(&mut s, &info, &Camera::default(), &Arc::new(black), Auto::Tone));
         assert_eq!((s.light.whites, s.light.blacks), (0.0, 0.0));
     }
 
@@ -269,7 +276,7 @@ mod tests {
         let info = SourceInfo::default();
         let source = ramp(0.001, 0.02);
         let mut s = DevelopSettings::default();
-        assert!(apply(&mut s, &info, &source, Auto::Exposure));
+        assert!(apply(&mut s, &info, &Camera::default(), &source, Auto::Exposure));
         assert!(s.light.exposure > 0.5, "{}", s.light.exposure);
         let expected = DevelopSettings { light: lightcraft_develop::Light { exposure: s.light.exposure, ..Default::default() }, ..DevelopSettings::default() };
         assert_eq!(s, expected);
@@ -281,7 +288,7 @@ mod tests {
         let mut warm = Rgb32f::new(64, 48);
         warm.data.fill([0.3, 0.2, 0.1]);
         let mut s = DevelopSettings::default();
-        assert!(apply(&mut s, &info, &Arc::new(warm), Auto::WhiteBalance));
+        assert!(apply(&mut s, &info, &Camera::default(), &Arc::new(warm), Auto::WhiteBalance));
         assert_eq!(s.wb.mode, WbMode::Auto);
         assert!(s.wb.temp < 6000.0, "{:?}", s.wb);
     }
@@ -291,7 +298,7 @@ mod tests {
         let info = SourceInfo::default();
         let source = ramp(0.05, 0.35);
         let mut s = DevelopSettings::default();
-        assert!(apply(&mut s, &info, &source, Auto::Control("light.shadows")));
+        assert!(apply(&mut s, &info, &Camera::default(), &source, Auto::Control("light.shadows")));
         assert!(s.light.shadows > 0.0);
         let expected = DevelopSettings { light: lightcraft_develop::Light { shadows: s.light.shadows, ..Default::default() }, ..DevelopSettings::default() };
         assert_eq!(s, expected);
@@ -299,16 +306,16 @@ mod tests {
         // Whites alone, on a frame that clips.
         let bright = ramp(0.0, 1.6);
         let mut both = DevelopSettings::default();
-        apply(&mut both, &info, &bright, Auto::Tone);
+        apply(&mut both, &info, &Camera::default(), &bright, Auto::Tone);
         s.light.blacks = 15.0;
-        assert!(apply(&mut s, &info, &bright, Auto::Control("light.whites")));
+        assert!(apply(&mut s, &info, &Camera::default(), &bright, Auto::Control("light.whites")));
         assert!(s.light.whites < 0.0 && s.light.blacks == 15.0 && both.light.blacks == 0.0, "whites {}", s.light.whites);
 
-        assert!(apply(&mut s, &info, &source, Auto::Control("wb.tint")));
+        assert!(apply(&mut s, &info, &Camera::default(), &source, Auto::Control("wb.tint")));
         assert_eq!(s.wb.mode, WbMode::Custom, "a slider set by hand or by Auto is a custom white balance");
 
         let before = s.clone();
-        assert!(!apply(&mut s, &info, &source, Auto::Control("detail.sharpenAmount")), "no automatic value");
+        assert!(!apply(&mut s, &info, &Camera::default(), &source, Auto::Control("detail.sharpenAmount")), "no automatic value");
         assert_eq!(s, before);
     }
 
@@ -330,14 +337,14 @@ mod tests {
             }
         });
         let mut s = DevelopSettings::default();
-        assert!(apply(&mut s, &info, &Arc::new(tilted), Auto::Level));
+        assert!(apply(&mut s, &info, &Camera::default(), &Arc::new(tilted), Auto::Level));
         assert!((s.crop.geometry.angle + 4.0).abs() < 0.5, "{}", s.crop.geometry.angle);
         assert!(s.crop.geometry.is_within_image(w as f64, h as f64));
 
         let mut plain = Rgb32f::new(w, h);
         plain.data.fill([0.2; 3]);
         let mut s = DevelopSettings::default();
-        assert!(!apply(&mut s, &info, &Arc::new(plain), Auto::Level), "nothing to go by");
+        assert!(!apply(&mut s, &info, &Camera::default(), &Arc::new(plain), Auto::Level), "nothing to go by");
         assert_eq!(s, DevelopSettings::default());
     }
 }

@@ -325,6 +325,10 @@ pub struct Light {
     pub shadows: f64,
     pub whites: f64,
     pub blacks: f64,
+    /// HDR 0..100: Highlights held back and Shadows brought up together, by one amount. Not written while it is 0,
+    /// so settings without it keep their JSON and `hash64`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub hdr: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

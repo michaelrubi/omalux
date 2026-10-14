@@ -74,6 +74,8 @@ pub enum Command {
     AutoExposure,
     /// Straighten by the frame's own horizon or uprights.
     AutoLevel,
+    /// The Flat profile, or Camera match again.
+    Flat,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -131,6 +133,7 @@ impl Command {
         Command::AutoWhiteBalance,
         Command::AutoExposure,
         Command::AutoLevel,
+        Command::Flat,
     ];
 
     /// Look a command up by its name in code, e.g. "Open".
@@ -189,6 +192,7 @@ impl Command {
         Command::ResetCrop,
         Command::AutoWhiteBalance,
         Command::AutoTone,
+        Command::Flat,
     ];
 
     pub fn label(self) -> &'static str {
@@ -242,6 +246,7 @@ impl Command {
             Command::AutoWhiteBalance => "Auto White Balance",
             Command::AutoExposure => "Auto Exposure",
             Command::AutoLevel => "Auto Level",
+            Command::Flat => "Flat Profile, or Camera Match",
         }
     }
 
@@ -303,6 +308,9 @@ impl Command {
             Command::AutoWhiteBalance => s(CMD_SHIFT, Key::U),
             // Lightroom has one Auto, on Ctrl+U; these two are buttons.
             Command::AutoExposure | Command::AutoLevel => None,
+            // Lightroom has no key for a profile. Its F is Full Screen,
+            // which is Hyprland's here.
+            Command::Flat => s(Modifiers::NONE, Key::F),
         }
     }
 
