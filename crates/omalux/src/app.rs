@@ -3164,4 +3164,260 @@ mod tests {
         assert_eq!(h.said(), "DSC00005.ARW isn't in a stack");
         assert_eq!(h.saved(), None);
     }
+
+    #[test]
+    fn crop_panel_is_drawn_only_while_the_tool_is_open() {
+        let folder = Folder::new("crop-panel-open", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+
+        let output = h.frame(vec![]);
+        assert!(!texts(&output).iter().any(|(t, _)| t == "Crop & Straighten"));
+
+        h.press(Modifiers::NONE, Key::R);
+        let output = h.frame(vec![]);
+        assert!(texts(&output).iter().any(|(t, _)| t == "Crop & Straighten"));
+
+        h.press(Modifiers::NONE, Key::Enter);
+        let output = h.frame(vec![]);
+        assert!(!texts(&output).iter().any(|(t, _)| t == "Crop & Straighten"));
+    }
+
+    #[test]
+    fn aspect_menu_crops_to_square_and_original_restores() {
+        let folder = Folder::new("crop-aspect-square", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        let orig = h.text("Original");
+        h.click(orig.center());
+        let one_by_one = h.text("1 x 1");
+        h.click(one_by_one.center());
+
+        let dims = h.app.dims().unwrap();
+        let rect = h.settings().crop.geometry.rect_px(dims.0, dims.1);
+        assert!((rect.width() - rect.height()).abs() < 1e-3, "square in pixels: {rect:?}");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+
+        let output = h.frame(vec![]);
+        assert!(texts(&output).iter().any(|(t, _)| t == "1 x 1"));
+
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert!(h.settings().crop.geometry.is_identity(), "one step to undo");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+
+        let orig = h.text("Original");
+        h.click(orig.center());
+        let one = h.text("1 x 1");
+        h.click(one.center());
+        assert!(!h.settings().crop.geometry.is_identity());
+
+        let combo = h.text("1 x 1");
+        h.click(combo.center());
+        let orig_menu = h.text("Original");
+        h.click(orig_menu.center());
+        assert!(h.settings().crop.geometry.is_identity(), "whole frame back");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+    }
+
+    #[test]
+    fn swap_turns_crop_on_its_side_and_combo_still_shows_ratio() {
+        let folder = Folder::new("crop-swap", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        let orig = h.text("Original");
+        h.click(orig.center());
+        let ratio = h.text("4 x 5 / 8 x 10");
+        h.click(ratio.center());
+
+        let dims = h.app.dims().unwrap();
+        let landscape = h.settings().crop.geometry.rect_px(dims.0, dims.1);
+        assert!(landscape.width() > landscape.height());
+
+        let swap = h.text("Swap");
+        h.click(swap.center());
+
+        let portrait = h.settings().crop.geometry.rect_px(dims.0, dims.1);
+        assert!(portrait.width() < portrait.height());
+
+        let output = h.frame(vec![]);
+        assert!(texts(&output).iter().any(|(t, _)| t == "4 x 5 / 8 x 10"));
+    }
+
+    #[test]
+    fn angle_slider_drag_and_double_click_reset() {
+        let folder = Folder::new("crop-angle-drag", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        let track = h.track("crop.angle");
+        let dims = h.app.dims().unwrap();
+
+        h.pointer(track.center(), Some(true));
+        h.pointer(track.center() + egui::vec2(track.width() / 4.0, 0.0), None);
+
+        assert!(h.settings().crop.geometry.angle > 0.0);
+        assert!(h.settings().crop.geometry.is_within_image(dims.0, dims.1));
+        assert_eq!(h.saved(), None, "not saved while dragging");
+
+        h.pointer(track.center() + egui::vec2(track.width() / 4.0, 0.0), Some(false));
+        assert!(h.saved().is_some(), "saved when drag ends");
+        let saved_angle = h.saved().unwrap().crop.geometry.angle;
+        assert_eq!(saved_angle, h.settings().crop.geometry.angle);
+
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().crop.geometry.angle, 0.0, "whole drag is one step to undo");
+        assert_eq!(h.saved().map(|s| s.crop.geometry.angle), Some(0.0));
+
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        assert_eq!(h.settings().crop.geometry.angle, saved_angle);
+
+        let name = h.text("Angle");
+        for _ in 0..2 {
+            h.pointer(name.center(), Some(true));
+            h.pointer(name.center(), Some(false));
+        }
+        assert_eq!(h.settings().crop.geometry.angle, 0.0);
+        assert_eq!(h.saved().map(|s| s.crop.geometry.angle), Some(0.0));
+    }
+
+    #[test]
+    fn typing_a_value_into_angle_sets_it() {
+        let folder = Folder::new("crop-angle-type", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        let value = h.value("crop.angle");
+        h.click(value.center());
+        h.type_text("5.0");
+        h.press(Modifiers::NONE, Key::Enter);
+
+        assert_eq!(h.settings().crop.geometry.angle, 5.0);
+        assert_eq!(h.saved().map(|s| s.crop.geometry.angle), Some(5.0));
+    }
+
+    #[test]
+    fn rotate_buttons_swap_dims_and_put_it_back_each_a_step() {
+        let folder = Folder::new("crop-rotate-btns", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        let (w, h0) = h.app.dims().unwrap();
+
+        let right = h.text("Rotate Right");
+        h.click(right.center());
+        assert_eq!(h.app.dims(), Some((h0, w)));
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+
+        let left = h.text("Rotate Left");
+        h.click(left.center());
+        assert_eq!(h.app.dims(), Some((w, h0)));
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.app.dims(), Some((h0, w)), "undo rotate left");
+
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.app.dims(), Some((w, h0)), "undo rotate right");
+    }
+
+    #[test]
+    fn reset_clears_crop_and_angle_but_not_quarter_turn_and_close_closes() {
+        let folder = Folder::new("crop-reset-close", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        let (w, h0) = h.app.dims().unwrap();
+        let right = h.text("Rotate Right");
+        h.click(right.center());
+        assert_eq!(h.app.dims(), Some((h0, w)));
+
+        let dims = h.app.dims().unwrap();
+        h.app.edit(|history, _| {
+            history.set(|settings| {
+                crop::set_aspect(settings, dims, crop::Aspect::Ratio(1, 1));
+                crop::straighten(settings, dims, 4.0);
+            })
+        });
+        assert_eq!(h.settings().crop.geometry.angle, 4.0);
+        assert!(!h.settings().crop.geometry.is_identity());
+
+        let reset = h.text("Reset");
+        h.click(reset.center());
+        assert_eq!(h.settings().crop.geometry.angle, 0.0);
+        assert!(h.settings().crop.geometry.is_identity());
+        assert_eq!(h.app.dims(), Some((h0, w)), "quarter turn stays");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+
+        assert!(h.app.crop.is_some());
+        let close = h.text("Close");
+        h.click(close.center());
+        assert!(h.app.crop.is_none());
+    }
+
+    #[test]
+    fn crop_lock_button_flips_crop_locked_and_shown_word() {
+        let folder = Folder::new("crop-lock", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        assert!(h.app.crop_locked);
+        let locked = h.text("Locked");
+        h.click(locked.center());
+
+        assert!(!h.app.crop_locked);
+        let output = h.frame(vec![]);
+        assert!(texts(&output).iter().any(|(t, _)| t == "Unlocked"));
+        assert!(!texts(&output).iter().any(|(t, _)| t == "Locked"));
+
+        let unlocked = h.text("Unlocked");
+        h.click(unlocked.center());
+
+        assert!(h.app.crop_locked);
+        let output = h.frame(vec![]);
+        assert!(texts(&output).iter().any(|(t, _)| t == "Locked"));
+        assert!(!texts(&output).iter().any(|(t, _)| t == "Unlocked"));
+    }
+
+    #[test]
+    fn auto_on_flat_grey_frame_changes_nothing_and_status_bar_says_so() {
+        let folder = Folder::new("crop-auto-level", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+
+        assert_eq!(h.settings().crop.geometry.angle, 0.0);
+        let auto = h.text("Auto");
+        h.click(auto.center());
+
+        assert_eq!(h.settings().crop.geometry.angle, 0.0);
+        assert_eq!(h.said(), "Couldn't find a horizon or uprights to level by");
+    }
 }
+
