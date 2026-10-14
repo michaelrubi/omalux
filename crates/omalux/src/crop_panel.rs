@@ -3,9 +3,9 @@
 //! aspect and its lock, the angle, Auto, the quarter turns, Reset and
 //! Close.
 //!
-//! Lifted from Lightcraft's crop drawer (`crates/ui-egui/src/panels/right.rs`
-//! at `701f78e`) and restyled to Omarchy's theme, with Lightroom's controls
-//! and shortcuts.
+//! What's in it follows Lightcraft's crop panel (`crop` in
+//! `ui-egui/src/panels/right.rs` at `701f78e`), without its flips, custom
+//! aspect and overlay chooser, in egui's own widgets.
 
 use egui::{Button, ComboBox, FontId, TextStyle, Ui};
 use lightcraft_develop::DevelopSettings;
@@ -50,16 +50,12 @@ pub fn show(ui: &mut Ui, theme: &Theme, settings: &DevelopSettings, dims: (f64, 
         ui.style_mut().text_styles.insert(TextStyle::Button, FontId::proportional(12.5));
         ui.style_mut().text_styles.insert(TextStyle::Body, FontId::proportional(12.5));
 
+        // A ratio is the same ratio on its side (4 x 5 swapped is still 4 x 5).
         let current_aspect = crop::aspect(settings, dims);
+        let is_current = |ratio: (u32, u32)| matches!(current_aspect, Some(Aspect::Ratio(w, h)) if (w, h) == ratio || (h, w) == ratio);
         let current_label = match current_aspect {
             Some(Aspect::Original) => "Original",
-            Some(Aspect::Ratio(w, h)) => {
-                crop::RATIOS
-                    .iter()
-                    .find(|(_, (rw, rh))| (*rw == w && *rh == h) || (*rw == h && *rh == w))
-                    .map_or("Custom", |(label, _)| *label)
-            }
-            None => "Custom",
+            _ => crop::RATIOS.iter().find(|(_, ratio)| is_current(*ratio)).map_or("Custom", |(label, _)| *label),
         };
 
         ui.horizontal(|ui| {
@@ -71,13 +67,9 @@ pub fn show(ui: &mut Ui, theme: &Theme, settings: &DevelopSettings, dims: (f64, 
                     if ui.selectable_label(is_orig, "Original").clicked() {
                         out.aspect = Some(Aspect::Original);
                     }
-                    for (label, (rw, rh)) in crop::RATIOS {
-                        let is_selected = match current_aspect {
-                            Some(Aspect::Ratio(w, h)) => (*rw == w && *rh == h) || (*rw == h && *rh == w),
-                            _ => false,
-                        };
-                        if ui.selectable_label(is_selected, *label).clicked() {
-                            out.aspect = Some(Aspect::Ratio(*rw, *rh));
+                    for (label, ratio) in crop::RATIOS {
+                        if ui.selectable_label(is_current(*ratio), *label).clicked() {
+                            out.aspect = Some(Aspect::Ratio(ratio.0, ratio.1));
                         }
                     }
                 });
