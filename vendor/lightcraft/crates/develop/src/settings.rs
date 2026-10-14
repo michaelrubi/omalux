@@ -329,6 +329,13 @@ pub struct Light {
     /// so settings without it keep their JSON and `hash64`.
     #[serde(skip_serializing_if = "is_zero")]
     pub hdr: f64,
+    /// -100..100: how much more (or less) of HDR goes to the highlights than its amount, on its own. Not written
+    /// while it is 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub hdr_highlights: f64,
+    /// -100..100: the same for the shadows.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub hdr_shadows: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

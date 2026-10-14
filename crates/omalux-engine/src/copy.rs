@@ -68,7 +68,7 @@ impl Group {
             Group::WhiteBalance => &[("wb", &[])],
             Group::Profile => &[("profile", &[])],
             Group::Light => &[("light", &["exposure", "contrast", "highlights", "shadows", "whites", "blacks"])],
-            Group::Hdr => &[("light", &["hdr"])],
+            Group::Hdr => &[("light", &["hdr", "hdr_highlights", "hdr_shadows"])],
             Group::Presence => &[("color", &[])],
             Group::Sharpening => &[("detail", &["sharpen_amount", "sharpen_radius", "sharpen_detail", "sharpen_masking"])],
             Group::NoiseReduction => {
@@ -125,6 +125,14 @@ impl Copied {
     }
 }
 
+/// `settings` with `groups` switched off, as a panel's switch shows it:
+/// each group as a fresh raw would have it with nothing applied (no
+/// sharpening, no lens corrections), but the white balance as shot.
+pub fn switched_off(settings: &DevelopSettings, fresh: &DevelopSettings, groups: &[Group]) -> DevelopSettings {
+    let off = DevelopSettings { wb: fresh.wb, ..DevelopSettings::default() };
+    Copied::new(&off, groups).paste(settings, fresh)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,7 +169,21 @@ mod tests {
     }
 
     #[test]
-    fn the_profile_and_hdr_are_groups_of_their_own() {
+    fn a_panel_switched_off_is_as_a_fresh_raw_with_nothing_applied() {
+        let fresh = crate::look::fresh(5200.0, 3.0);
+        let mut settings = fresh.clone();
+        (settings.wb.temp, settings.wb.mode) = (7000.0, WbMode::Custom);
+        (settings.light.exposure, settings.light.hdr, settings.light.hdr_shadows) = (0.7, 40.0, 20.0);
+        settings.color.vibrance = 30.0;
+        let off = switched_off(&settings, &fresh, &[Group::WhiteBalance, Group::Hdr, Group::Sharpening, Group::LensCorrections]);
+        assert_eq!((off.wb.temp, off.wb.mode), (5200.0, WbMode::AsShot));
+        assert_eq!((off.light.exposure, off.light.hdr, off.light.hdr_shadows), (0.7, 0.0, 0.0));
+        assert_eq!((off.detail.sharpen_amount, off.optics.lens_profile, off.color.vibrance), (0.0, false, 30.0));
+        assert_eq!(switched_off(&settings, &fresh, &[]), settings);
+    }
+
+    #[test]
+        fn the_profile_and_hdr_are_groups_of_their_own() {
         let fresh = crate::look::fresh(6100.0, -2.0);
         let mut from = fresh.clone();
         crate::look::Profile::Flat.set(&mut from);

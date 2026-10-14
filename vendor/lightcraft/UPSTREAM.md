@@ -66,6 +66,11 @@ upstream.
   before a render, as Lightcraft's own profiles are folded in
   (`pipeline::profiles::effective`). Offered upstream, the folding would
   go there.
+- **`light.hdrHighlights`, `light.hdrShadows`** (2026-10-14): two more
+  amounts beside `light.hdr` (-100 to 100, not written while they're 0),
+  each moving how much of HDR goes to its end of the range, with their
+  rows in the control table. Same files, same reasons; `look::effective`
+  folds them in with HDR.
 
 ## Re-syncing
 
