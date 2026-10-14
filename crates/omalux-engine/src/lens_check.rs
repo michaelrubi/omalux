@@ -72,8 +72,8 @@ pub fn check(render: &Rgba8, jpeg: &Rgba8) -> Result<Measure, String> {
     };
 
     let (w, h) = (jpeg.width, jpeg.height);
-    let (lum_r, gx_r, gy_r) = luminance_and_gradients(render);
-    let (lum_j, gx_j, gy_j) = luminance_and_gradients(jpeg);
+    let (gx_r, gy_r) = gradients(render);
+    let (gx_j, gy_j) = gradients(jpeg);
 
     let patches: Vec<(f64, f64, f64, f64)> = (0..GRID_ROWS)
         .into_par_iter()
@@ -139,18 +139,18 @@ pub fn check(render: &Rgba8, jpeg: &Rgba8) -> Result<Measure, String> {
         translation = t;
     }
 
-    let final_residuals: Vec<(f64, f64, f64)> = inliers
+    let final_residuals: Vec<(f64, f64)> = inliers
         .iter()
         .map(|&(x, y, u, v)| {
             let pred_u = (scale - 1.0) * x + translation[0];
             let pred_v = (scale - 1.0) * y + translation[1];
             let res = (u - pred_u).hypot(v - pred_v);
             let r = x.hypot(y);
-            (r, res, res)
+            (r, res)
         })
         .collect();
 
-    let mut all_res: Vec<f64> = final_residuals.iter().map(|&(_, res, _)| res).collect();
+    let mut all_res: Vec<f64> = final_residuals.iter().map(|&(_, res)| res).collect();
     all_res.sort_by(f64::total_cmp);
     let median_residual = all_res[all_res.len() / 2];
     let p95_residual = all_res[((all_res.len() - 1) as f64 * 0.95).round() as usize];
@@ -174,7 +174,7 @@ pub fn check(render: &Rgba8, jpeg: &Rgba8) -> Result<Measure, String> {
                     norm_r >= r_min && norm_r < r_max
                 }
             })
-            .map(|&(_, res, _)| res)
+            .map(|&(_, res)| res)
             .collect();
 
         let mean_residual = if bin_res.is_empty() { 0.0 } else { bin_res.iter().sum::<f64>() / bin_res.len() as f64 };
@@ -193,7 +193,6 @@ pub fn check(render: &Rgba8, jpeg: &Rgba8) -> Result<Measure, String> {
 
     let vignetting_diff = bins.last().map(|b| b.delta_l).unwrap_or(0.0) - bins.first().map(|b| b.delta_l).unwrap_or(0.0);
 
-    let _ = (lum_r, lum_j);
     Ok(Measure {
         scale,
         translation,
@@ -205,7 +204,8 @@ pub fn check(render: &Rgba8, jpeg: &Rgba8) -> Result<Measure, String> {
     })
 }
 
-fn luminance_and_gradients(img: &Rgba8) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+/// The horizontal and vertical gradients of `img`'s luminance.
+fn gradients(img: &Rgba8) -> (Vec<f32>, Vec<f32>) {
     let (w, h) = (img.width, img.height);
     let mut lum = Vec::with_capacity(w * h);
     for p in &img.data {
@@ -228,7 +228,7 @@ fn luminance_and_gradients(img: &Rgba8) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         }
     }
 
-    (lum, gx, gy)
+    (gx, gy)
 }
 
 fn match_patch(

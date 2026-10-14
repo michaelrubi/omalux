@@ -304,8 +304,9 @@ pub fn corrections(bytes: &[u8], raw: &lightcraft_raw::RawInfo) -> Option<Embedd
         return None;
     }
 
+    // The opcodes are centred and normalised on the DNG default crop, in active-area coordinates, as Lightcraft's
+    // are; the image keeps the decoder's own crop, which `embedded_lens` re-expresses them for.
     let mut raw_clone = raw.clone();
-    raw_clone.crop = crop;
     raw_clone.opcodes.list3.clear();
     if let Some(w) = warp {
         raw_clone.opcodes.list3.push(w);
@@ -514,39 +515,6 @@ mod tests {
             let found = crate::lens_profiles::for_raw(&info, &bytes, crate::lens_profiles::Source::Sony)
                 .unwrap_or_else(|| panic!("{name}: for_raw Sony"));
             assert_eq!(found.source, crate::lens_profiles::Source::Sony, "{name}: Source::Sony");
-        }
-    }
-
-    #[test]
-    fn report_lens_raws_measurements() {
-        let Some(dir) = std::env::var_os("OMALUX_LENS_RAWS").map(std::path::PathBuf::from) else { return };
-        let mut raws: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
-        raws.retain(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("arw")));
-        raws.sort();
-        for path in raws {
-            let bytes = std::fs::read(&path).unwrap();
-            let header = lightcraft_raw::decode(&bytes).unwrap();
-            let info = header.info();
-            let lens = corrections(&bytes, &info).unwrap();
-            let warp = lens.warp.unwrap();
-            let vig = lens.vignette.unwrap();
-            let (w, h) = (info.crop.width as f64, info.crop.height as f64);
-            let corner_pt = Point::new(w, h);
-            let center = Point::new(warp.center.x * w, warp.center.y * h);
-            let s_g = lightcraft_pipeline::optics::embedded_warp(&warp, corner_pt, 1, w, h);
-            let s_r = lightcraft_pipeline::optics::embedded_warp(&warp, corner_pt, 0, w, h);
-            let s_b = lightcraft_pipeline::optics::embedded_warp(&warp, corner_pt, 2, w, h);
-            let r_out = corner_pt.dist(center);
-            let corner_disp = r_out - s_g.dist(center);
-            let ca_r = s_r.dist(center) - s_g.dist(center);
-            let ca_b = s_b.dist(center) - s_g.dist(center);
-            let vig_gain = lightcraft_pipeline::optics::embedded_vignette_gain(&vig, corner_pt, w, h);
-            let vig_stops = vig_gain.log2();
-            let name = path.file_name().unwrap().to_string_lossy();
-            let lens_name = info.metadata.lens_model.as_deref().unwrap_or("no lens");
-            let focal = info.metadata.focal_length.unwrap_or(0.0);
-            let fnum = info.metadata.f_number.unwrap_or(0.0);
-            println!("{name:12} | {lens_name:20} {focal:>4.0} mm f/{fnum:<3.1} | Disp: {corner_disp:6.2} px | Vig: {vig_stops:5.3} stops ({vig_gain:4.2}x) | CA: R {ca_r:+5.2} px, B {ca_b:+5.2} px");
         }
     }
 }

@@ -5,8 +5,7 @@
 //! directory in `OMALUX_LENSFUN_DIR`, else the system's (`pacman -S lensfun`: `/usr/share/lensfun/version_1`;
 //! CC-BY-SA, never shipped with OmaLux). The profile is converted to the same [`lightcraft_develop::EmbeddedLens`]
 //! form, so "Enable Profile Corrections", its amount sliders and the GPU path treat both alike. Without a database
-//! nothing changes. Sony's own corrections ([`crate::sony_lens`]) are the other [`Source`]; which is the default is
-//! M5's comparison to decide.
+//! nothing changes. Sony's own corrections ([`crate::sony_lens`]) are the other [`Source`], and the default ([`DEFAULT`]).
 //!
 //! Lifted from Lightcraft (MIT OR Apache-2.0) at `701f78e`, `crates/engine/src/lens_profiles.rs`, with OmaLux's
 //! folder and the choice of source.
@@ -97,8 +96,11 @@ pub enum Source {
     Sony,
 }
 
-/// The source a frame's correction is taken from when it has both.
-pub const DEFAULT: Source = Source::Lensfun;
+/// The source a frame's correction is taken from when it has both: Sony's, which M5's comparison with the camera's
+/// own JPEG picked (the `lens` example). Its distortion lands on the JPEG's to a quarter of a pixel at every radius
+/// at the JPEG's own scale, lensfun's to a third; it follows the focus distance; and it's in the raw, where a system
+/// package's update can't change a render.
+pub const DEFAULT: Source = Source::Sony;
 
 /// A frame's profile correction, and what the Lens Corrections panel says of it.
 #[derive(Clone, Debug, PartialEq)]

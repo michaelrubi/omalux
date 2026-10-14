@@ -10,7 +10,8 @@ vendored, the workspace and an empty window up, and the spikes run on
 the laptop and Michael's frames. On 2026-10-13 what was left of it moved
 to the milestones that need it first, and M0 closed on its last question,
 why the GPU loupe's times jump between frames: the GPU's power states
-(see M0). M1 started the same day, and M2, M3 and M4 after it.
+(see M0). M1 started the same day, and M2, M3 and M4 after it; M5 on
+2026-10-14.
 
 Each milestone ends with something Michael can use on a real shoot. M1 is
 the point where OmaLux replaces darktable for a clean, low-ISO shoot;
@@ -530,19 +531,56 @@ ILCE-7M3's own tone curve is pooled from DRO Off frames.
 
 ## M5. Lens profiles
 
+Each item says where it stands. Started on 2026-10-14, on `m5`: Claude on
+the skeleton (the source of a frame's correction, `lens_profiles::Source`),
+the default, the panel and the render path; Antigravity on Sony's tables
+(`omalux_engine::sony_lens`) and the comparison (`lens_check` and the
+`lens` example), each on a branch of its own. Everything here has
+headless tests, and the comparison ran on copies of 13 of Michael's raws
+(FE 35 at f/5.6 and f/8, FE 85 at f/1.8, f/2.5 and f/4); none of it has
+been tried by hand yet.
+
 - **From M0, first:** pick the default. lensfun's correction against
   Sony's embedded table (opening Lightcraft's ILCE-7RM4A-only gate,
   `vendor/arw_lens.rs`, on a test branch) and Lightroom's, on FE 35 and
   FE 85 frames with straight lines and a plain sky (the `lens` example;
   Michael's shoots have no FE 50 frames). Sony's table follows the focus
-  distance, which lensfun's model doesn't (see M0).
+  distance, which lensfun's model doesn't (see M0). *Picked: Sony's,*
+  without opening the gate: OmaLux reads the tables in its own crate.
+  His maker notes have the camera's lens compensation on Auto for all
+  three, so the camera's JPEG is corrected by Sony and the `lens` example
+  measures each correction against it (patches matched across the frame,
+  a scale and a shift taken out). Distortion, median residual: Sony 0.21
+  to 0.27 px at every radius and at the JPEG's own scale (1.000), lensfun
+  0.26 to 0.37, none 0.36 to 0.48 (at the JPEG's 1616 pixels; the FE 35's
+  corners 1.7 px uncorrected, 0.7 with lensfun's, 0.25 with Sony's).
+  Darktable's knot radii put Sony's at 0.33 px on the FE 35, Lightcraft's
+  at 0.23, so Lightcraft's are kept. *Open:* Lightroom's correction of
+  the same frames, beside the raws as `NAME.lightroom-lens.tif` (the
+  example takes it), which is Michael's to export; and vignetting, which
+  the JPEG can't settle: Sony's table brings the corners up by about half
+  what lensfun's does (0.9 stops at f/1.8 on the FE 85, 0.8 on the FE 35
+  at f/5.6), and the JPEG's corners are darker than either (the camera's
+  own shading compensation looks partial, and DRO lifts locally), so how
+  much is right is for his eye; the Vignetting amount goes to 200.
 - Profile corrections for ARWs: distortion and vignetting from lensfun's
   database (Lightcraft's `lensdb`) or Sony's embedded data (whichever
   the comparison picked as the default), found from the lens the raw names, fed to
   Lightcraft's Optics. On by default. Checked against Lightroom's
-  correction of the same frames.
+  correction of the same frames. *Done* but for Lightroom's: a fresh
+  raw opens with Enable Profile Corrections on, which edits saved before
+  keep off (so they render as they did, and the process version stays
+  at 2). The Lens Corrections panel has the checkbox, the lens found ("No
+  profile for this lens" without one) and Lightroom's Amount for
+  Distortion and Vignetting. lensfun's correction, the fallback, is
+  enlarged to fill the frame as Lightroom's is (it left the corners
+  empty on pincushion); Sony's has that already. Reference renders of a
+  fresh raw with them on are new beside the old.
 - Lateral CA from the profile where it has it, Lightcraft's automatic
-  estimate where it doesn't.
+  estimate where it doesn't. *Done:* Sony's CA table warps the red and
+  blue planes (under a pixel at the corners of the full frame on his
+  lenses), and where the profile does that, Remove Chromatic
+  Aberration's estimate is left out rather than added to it.
 
 ## M6. AI Denoise
 
