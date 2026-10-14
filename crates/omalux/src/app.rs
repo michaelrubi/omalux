@@ -1114,8 +1114,8 @@ impl App {
                 picked = self.loupe.show(ui, path, mouse);
                 if let (Some(tool), Some(editing), Some(dims)) = (&mut self.crop, self.edits.get(path), dims) {
                     let settings = editing.history.settings();
-                    let whole = self.loupe.whole(path, settings.orientation);
-                    cropped = Some(tool.show(ui, &self.theme, self.loupe.area(), whole, settings, dims, self.crop_locked));
+                    let frame = crate::crop::Frame { area: self.loupe.area(), whole: self.loupe.whole(path, settings.orientation), dims };
+                    cropped = Some(tool.show(ui, &self.theme, frame, settings, self.crop_locked));
                 }
                 if self.before {
                     let corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);

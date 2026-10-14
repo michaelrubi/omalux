@@ -60,6 +60,16 @@ pub struct Out {
     pub done: bool,
 }
 
+/// The frame the crop is drawn over.
+pub struct Frame<'a> {
+    /// The room it has.
+    pub area: Rect,
+    /// Its render, whole and uncropped, once there is one.
+    pub whole: Option<&'a TextureHandle>,
+    /// Its size as it's shown.
+    pub dims: (f64, f64),
+}
+
 /// The tool, while it's open.
 #[derive(Default)]
 pub struct Tool {
@@ -107,12 +117,11 @@ impl Tool {
         self.was.as_ref().filter(|(on, ..)| on == path).map(|(_, crop, orientation)| (*crop, *orientation))
     }
 
-    /// Draw the frame in `area` (`whole`, its render uncropped, once
-    /// there is one) with `settings`' crop over it, and take the mouse.
-    /// `dims` is the frame's size as it's shown; `locked`, whether the
-    /// crop keeps its shape when a handle is dragged (Shift holds it for
-    /// one drag).
-    pub fn show(&mut self, ui: &mut Ui, theme: &Theme, area: Rect, whole: Option<&TextureHandle>, settings: &DevelopSettings, dims: (f64, f64), locked: bool) -> Out {
+    /// Draw `frame` with `settings`' crop over it, and take the mouse.
+    /// `locked` is whether the crop keeps its shape when a handle is
+    /// dragged (Shift holds it for one drag).
+    pub fn show(&mut self, ui: &mut Ui, theme: &Theme, frame: Frame, settings: &DevelopSettings, locked: bool) -> Out {
+        let Frame { area, whole, dims } = frame;
         let mut out = Out::default();
         let geometry = settings.crop.geometry;
         // Where the frame would be unturned: the straightened frame the
