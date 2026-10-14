@@ -13,7 +13,7 @@
 //! its shape matters.
 
 use lightcraft_develop::DevelopSettings;
-use lightcraft_geom::{Affine, Rect, crop_fit_angle, drag_crop};
+use lightcraft_geom::{Rect, crop_fit_angle, drag_crop};
 
 pub use lightcraft_geom::{CropGeometry, CropHandle, Orientation, Point};
 
@@ -94,12 +94,12 @@ pub fn straighten(settings: &mut DevelopSettings, (w, h): (f64, f64), angle: f64
 }
 
 /// Straighten so the line from `from` to `to` is level, or plumb if it's
-/// nearer upright: Lightroom's Straighten tool. The points are shares of
-/// the frame's width and height as it's shown uncropped and unturned. A
-/// line too short to mean anything (under a hundredth of the frame)
-/// changes nothing.
-pub fn straighten_along(settings: &mut DevelopSettings, (w, h): (f64, f64), from: [f64; 2], to: [f64; 2]) {
-    let (dx, dy) = ((to[0] - from[0]) * w, (to[1] - from[1]) * h);
+/// nearer upright: Lightroom's Straighten tool. The points are in the
+/// frame as the crop tool shows it, turned by the angle it's straightened
+/// by so far, as shares of its width and height. A line too short to mean
+/// anything (under a hundredth of the frame) changes nothing.
+pub fn straighten_along(settings: &mut DevelopSettings, (w, h): (f64, f64), from: Point, to: Point) {
+    let (dx, dy) = ((to.x - from.x) * w, (to.y - from.y) * h);
     let length = dx.hypot(dy);
     if length.is_nan() || length <= 0.01 * w.max(h) {
         return;
@@ -112,33 +112,13 @@ pub fn straighten_along(settings: &mut DevelopSettings, (w, h): (f64, f64), from
     while degrees < -45.0 {
         degrees += 90.0;
     }
-    straighten(settings, (w, h), -degrees);
-}
-
-/// A point of the frame as it's shown uncropped and unturned (shares of
-/// its width and height) in the straightened frame the crop rectangle
-/// lives in: where a pointer is, for [`drag`]. Lightcraft's `to_straight`
-/// (`ui-egui/src/panels/detail.rs` at `701f78e`).
-pub fn straightened(at: [f64; 2], angle: f64, (w, h): (f64, f64)) -> Point {
-    let turned = Affine::rotate_about(angle.to_radians(), Point::new(w / 2.0, h / 2.0)).apply(Point::new(at[0] * w, at[1] * h));
-    Point::new(turned.x / w, turned.y / h)
-}
-
-/// The crop rectangle's corners (top left, top right, bottom right, bottom
-/// left) on the frame as it's shown uncropped and unturned, as shares of
-/// its width and height: where to draw it.
-pub fn corners(settings: &DevelopSettings, (w, h): (f64, f64)) -> [[f64; 2]; 4] {
-    let geometry = settings.crop.geometry;
-    let back = Affine::rotate_about(-geometry.angle.to_radians(), Point::new(w / 2.0, h / 2.0));
-    geometry.rect_px(w, h).corners().map(|corner| {
-        let at = back.apply(corner);
-        [at.x / w, at.y / h]
-    })
+    straighten(settings, (w, h), settings.crop.geometry.angle - degrees);
 }
 
 /// Drag `handle` of the crop `start` (as it was when the drag began) from
-/// `from` to `to`, both in the straightened frame ([`straightened`]). It
-/// stops at the picture's edge, and with `keep_ratio` keeps the shape it
+/// `from` to `to`, both in the straightened frame the crop rectangle
+/// lives in, as shares of its width and height. It stops at the
+/// picture's edge, and with `keep_ratio` keeps the shape it
 /// had. The rules are Lightcraft's `drag_crop`.
 pub fn drag(settings: &mut DevelopSettings, (w, h): (f64, f64), start: CropGeometry, handle: CropHandle, from: Point, to: Point, keep_ratio: bool) {
     let ratio = keep_ratio.then(|| start.rect_px(w, h).aspect()).filter(|a| a.is_finite() && *a > 0.0);
@@ -223,37 +203,26 @@ mod tests {
     fn a_line_drawn_along_the_horizon_levels_it() {
         let mut s = DevelopSettings::default();
         // A horizon that drops 6° to the right.
-        let drop = 6f64.to_radians().tan() * 0.5 * 6000.0 / 4000.0;
-        straighten_along(&mut s, LANDSCAPE, [0.25, 0.5], [0.75, 0.5 + drop]);
+        let drop = |degrees: f64| degrees.to_radians().tan() * 0.5 * 6000.0 / 4000.0;
+        straighten_along(&mut s, LANDSCAPE, Point::new(0.25, 0.5), Point::new(0.75, 0.5 + drop(6.0)));
         assert!((s.crop.geometry.angle + 6.0).abs() < 0.01, "{}", s.crop.geometry.angle);
+        // The tool shows the frame as it's straightened so far: a line
+        // that's level there changes nothing, and one that isn't adds to it.
+        straighten_along(&mut s, LANDSCAPE, Point::new(0.25, 0.5), Point::new(0.75, 0.5));
+        assert!((s.crop.geometry.angle + 6.0).abs() < 0.01);
+        straighten_along(&mut s, LANDSCAPE, Point::new(0.75, 0.5 + drop(2.0)), Point::new(0.25, 0.5));
+        assert!((s.crop.geometry.angle + 8.0).abs() < 0.01, "either way along it: {}", s.crop.geometry.angle);
 
         // A wall that leans 3° is made plumb, not laid flat.
         let mut s = DevelopSettings::default();
         let lean = 3f64.to_radians().tan() * 0.5 * 4000.0 / 6000.0;
-        straighten_along(&mut s, LANDSCAPE, [0.5, 0.75], [0.5 + lean, 0.25]);
+        straighten_along(&mut s, LANDSCAPE, Point::new(0.5, 0.75), Point::new(0.5 + lean, 0.25));
         assert!((s.crop.geometry.angle.abs() - 3.0).abs() < 0.01, "{}", s.crop.geometry.angle);
 
         // A click isn't a line.
         let mut s = DevelopSettings::default();
-        straighten_along(&mut s, LANDSCAPE, [0.5, 0.5], [0.501, 0.505]);
+        straighten_along(&mut s, LANDSCAPE, Point::new(0.5, 0.5), Point::new(0.501, 0.505));
         assert_eq!(s.crop.geometry.angle, 0.0);
-    }
-
-    #[test]
-    fn where_the_crop_is_drawn_is_where_a_pointer_finds_it() {
-        let mut s = DevelopSettings::default();
-        set_aspect(&mut s, LANDSCAPE, Aspect::Ratio(1, 1));
-        straighten(&mut s, LANDSCAPE, 10.0);
-        let rect = s.crop.geometry.rect;
-        let drawn = corners(&s, LANDSCAPE);
-        let found = drawn.map(|corner| straightened(corner, 10.0, LANDSCAPE));
-        for (found, corner) in found.iter().zip([(rect.x0, rect.y0), (rect.x1, rect.y0), (rect.x1, rect.y1), (rect.x0, rect.y1)]) {
-            assert!(near(found.x, corner.0) && near(found.y, corner.1), "{found:?} {corner:?}");
-        }
-        // Unturned, it's drawn where it is.
-        let mut s = DevelopSettings::default();
-        s.crop.geometry.rect = Rect::new(0.1, 0.2, 0.6, 0.9);
-        assert_eq!(corners(&s, LANDSCAPE), [[0.1, 0.2], [0.6, 0.2], [0.6, 0.9], [0.1, 0.9]]);
     }
 
     #[test]

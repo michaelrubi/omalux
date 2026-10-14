@@ -16,6 +16,7 @@ use egui::{Pos2, Rect, Response, TextureHandle, TextureOptions, Ui, Vec2, vec2};
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::SourceInfo;
 use lightcraft_raster::Histogram;
+use omalux_engine::crop::Orientation;
 
 use crate::render::{Done, Key, ZoomKey};
 
@@ -47,11 +48,10 @@ pub struct Zoomed {
 pub struct Render {
     pub texture: TextureHandle,
     pub histogram: Histogram,
-    /// Which render it is, and the settings it was rendered with: only
-    /// the tests ask, so far.
+    /// Which render it is: only the tests ask, so far.
     #[cfg_attr(not(test), allow(dead_code))]
     pub key: Key,
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The settings it was rendered with.
     pub settings: Arc<DevelopSettings>,
 }
 
@@ -62,8 +62,8 @@ pub enum Mouse {
     Zoom,
     /// The White Balance Selector: a click picks.
     Pick,
-    /// A tool that draws over the frame has it (Crop & Straighten), and
-    /// the frame stays whole.
+    /// A tool has it, and draws the frame itself (Crop & Straighten, on
+    /// [`Loupe::whole`]).
     Tool,
 }
 
@@ -263,19 +263,33 @@ impl Loupe {
         news
     }
 
+    /// The room the frame has, as last drawn.
+    pub fn area(&self) -> Rect {
+        self.area
+    }
+
+    /// A frame's render, if it's of the whole frame, uncropped and turned
+    /// as `orientation`: what the crop tool draws the crop over.
+    pub fn whole(&self, path: &Path, orientation: Orientation) -> Option<&TextureHandle> {
+        let render = self.shown.get(path)?.render.as_ref()?;
+        (render.settings.crop == Default::default() && render.settings.orientation == orientation).then_some(&render.texture)
+    }
+
     /// Draw `path`'s frame: its render, or the camera's JPEG until that's
     /// in; whole, or at 100%. With [`Mouse::Pick`] (the White Balance
     /// Selector) the pointer is a crosshair over the frame, and a click on
     /// it is returned, as a share of the frame's width and height; with
-    /// [`Mouse::Zoom`], the mouse zooms and pans.
+    /// [`Mouse::Zoom`], the mouse zooms and pans. With [`Mouse::Tool`]
+    /// only the room is taken, and nothing drawn.
     pub fn show(&mut self, ui: &mut Ui, path: &Path, mouse: Mouse) -> Option<[f64; 2]> {
-        if mouse == Mouse::Tool {
-            (self.zoomed, self.hold) = (false, None);
-        }
         let pixels_per_point = ui.ctx().pixels_per_point();
         self.area = ui.max_rect().shrink(MARGIN);
         let pixels = self.area.size() * pixels_per_point;
         self.size = (pixels.x.max(0.0) as usize, pixels.y.max(0.0) as usize);
+        if mouse == Mouse::Tool {
+            (self.zoomed, self.hold) = (false, None);
+            return None;
+        }
         let Some(shown) = self.shown.get(path) else {
             (self.fit, self.full) = (Rect::NOTHING, Vec2::ZERO);
             return None;

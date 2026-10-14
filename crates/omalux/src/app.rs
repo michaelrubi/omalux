@@ -827,25 +827,49 @@ impl App {
         Some(crop::dims((source.width, source.height), self.edits.get(path)?.history.settings()))
     }
 
-    /// A slider of the current frame's moved, `set` being how its value is
-    /// written: a drag's changes are drafts in the loupe and one step once
-    /// it ends, saved then.
-    fn slide(&mut self, slid: SliderOut, set: impl FnOnce(&mut DevelopSettings, &SourceInfo, f64)) {
+    /// A change to the current frame's edit under a drag: every change
+    /// until the drag has `stopped` is one step, saved then.
+    fn dragged(&mut self, change: Option<impl FnOnce(&mut DevelopSettings, &SourceInfo)>, stopped: bool) {
         let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
-        if slid != SliderOut::default() && self.locked(&path) {
+        if (change.is_some() || stopped) && self.locked(&path) {
             return;
         }
         let Some(editing) = self.edits.get_mut(&path) else { return };
-        if let Some(value) = slid.value {
+        if let Some(change) = change {
             editing.edit(|history, info| {
-                history.change(|settings| set(settings, info, value));
+                history.change(|settings| change(settings, info));
                 true
             });
         }
-        self.dragging = (self.dragging || slid.drag_started) && !slid.drag_stopped;
-        if slid.drag_stopped && editing.edit(|history, _| history.commit()) {
+        if stopped && editing.edit(|history, _| history.commit()) {
             self.save(&path);
         }
+    }
+
+    /// A slider of the current frame's moved, `set` being how its value is
+    /// written: a drag's changes are drafts in the loupe and one step once
+    /// it ends.
+    fn slide(&mut self, slid: SliderOut, set: impl FnOnce(&mut DevelopSettings, &SourceInfo, f64)) {
+        self.dragging = (self.dragging || slid.drag_started) && !slid.drag_stopped;
+        let change = slid.value.map(|value| move |settings: &mut DevelopSettings, info: &SourceInfo| set(settings, info, value));
+        self.dragged(change, slid.drag_stopped);
+    }
+
+    /// What was done to the crop on the frame, with the mouse.
+    fn crop_gesture(&mut self, out: crate::crop::Out) {
+        use crate::crop::Act;
+        if out.done {
+            self.crop = None;
+        }
+        let Some(dims) = self.dims() else { return };
+        let change = out.act.map(|act| {
+            move |settings: &mut DevelopSettings, _: &SourceInfo| match act {
+                Act::Drag { start, handle, from, to, keep_ratio } => crop::drag(settings, dims, start, handle, from, to, keep_ratio),
+                Act::Turn(angle) => crop::straighten(settings, dims, angle),
+                Act::Level { from, to } => crop::straighten_along(settings, dims, from, to),
+            }
+        });
+        self.dragged(change, out.stopped);
     }
 
     /// What was done in the develop panel.
@@ -1006,12 +1030,13 @@ impl App {
         if let Some(current) = wanted.first_mut().filter(|_| self.before) {
             current.settings = None;
         }
-        // The crop tool shows the current frame whole, straight and uncropped.
+        // The crop tool draws its crop over the current frame whole, so
+        // a change to the crop there is nothing to render again.
         if self.crop.is_some()
             && let Some(current) = wanted.first_mut()
-            && let Some(settings) = current.settings.as_mut().filter(|settings| !settings.crop.geometry.is_identity())
+            && let Some(settings) = current.settings.as_mut().filter(|settings| settings.crop != Default::default())
         {
-            Arc::make_mut(settings).crop.geometry = Default::default();
+            Arc::make_mut(settings).crop = Default::default();
         }
         let zoom = self.loupe.zoom().filter(|_| self.crop.is_none());
         self.loupe.retain(|path| wanted.iter().any(|w| w.path == path));
@@ -1072,7 +1097,9 @@ impl App {
             egui::Panel::right("develop").frame(side).resizable(false).exact_size(PANEL_WIDTH).show(ui, |ui| self.develop_panel(ui));
         }
         let pasteboard = egui::Frame::new().fill(self.theme.pasteboard());
+        let dims = self.dims();
         let mut picked = None;
+        let mut cropped = None;
         let mut clicked = None;
         egui::CentralPanel::no_frame().frame(pasteboard).show(ui, |ui| match &self.shoot {
             Some(shoot) => {
@@ -1083,7 +1110,13 @@ impl App {
                 } else {
                     Mouse::Zoom
                 };
-                picked = self.loupe.show(ui, &shoot.frame().path, mouse);
+                let path = &shoot.frame().path;
+                picked = self.loupe.show(ui, path, mouse);
+                if let (Some(tool), Some(editing), Some(dims)) = (&mut self.crop, self.edits.get(path), dims) {
+                    let settings = editing.history.settings();
+                    let whole = self.loupe.whole(path, settings.orientation);
+                    cropped = Some(tool.show(ui, &self.theme, self.loupe.area(), whole, settings, dims, self.crop_locked));
+                }
                 if self.before {
                     let corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);
                     ui.painter().text(corner, Align2::LEFT_TOP, "Before", FontId::proportional(13.0), self.theme.foreground);
@@ -1093,6 +1126,9 @@ impl App {
         });
         if let Some(at) = picked {
             self.pick_white_balance(at);
+        }
+        if let Some(cropped) = cropped {
+            self.crop_gesture(cropped);
         }
         if let Some(dir) = clicked {
             self.open(dir);
@@ -1884,6 +1920,7 @@ mod tests {
         h.settle();
         assert!(h.app.crop.is_some());
         assert!(rendered(&h).is_identity() && !h.settings().crop.geometry.is_identity());
+        assert!(h.app.loupe.whole(&raw, h.settings().orientation).is_some());
         // Z doesn't zoom while it's open.
         h.press(Modifiers::NONE, Key::Z);
         assert!(h.app.loupe.zoom().is_none());
@@ -1921,6 +1958,118 @@ mod tests {
         // X is a reject again.
         h.press(Modifiers::NONE, Key::X);
         assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, sidecar::REJECT);
+    }
+
+    /// Where the crop tool last drew the crop.
+    fn crop_box(h: &Harness) -> egui::Rect {
+        h.ctx.data(|d| d.get_temp(egui::Id::new("crop box"))).expect("the crop tool has drawn")
+    }
+
+    /// Press at `from`, move to `to` by way of the point halfway, and let
+    /// go there, with `modifiers` held.
+    fn drag(h: &mut Harness, from: egui::Pos2, to: egui::Pos2, modifiers: Modifiers) {
+        let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers };
+        let held = Event::ModifiersChanged(modifiers);
+        h.frame(vec![held.clone(), Event::PointerMoved(from)]);
+        h.frame(vec![held.clone(), button(from, true)]);
+        h.frame(vec![held.clone(), Event::PointerMoved(from + (to - from) / 2.0)]);
+        h.frame(vec![held.clone(), Event::PointerMoved(to)]);
+        h.frame(vec![held, button(to, false)]);
+        h.frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+    }
+
+    /// A shoot of one frame with the crop tool open on it.
+    fn cropping(name: &str) -> (Folder, Harness) {
+        let folder = Folder::new(name, &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.press(Modifiers::NONE, Key::R);
+        h.settle();
+        (folder, h)
+    }
+
+    #[test]
+    fn the_crop_is_dragged_by_its_handles_and_moved_from_inside() {
+        let (_folder, mut h) = cropping("crop-drag");
+        let (w, h0) = h.app.dims().unwrap();
+        let shape = |h: &Harness| h.settings().crop.geometry.rect_px(w, h0).aspect();
+        let whole = crop_box(&h);
+        assert!((whole.aspect_ratio() - (w / h0) as f32).abs() < 0.01, "the whole frame to start with: {whole:?}");
+
+        // A corner, with the lock on: the crop keeps the frame's shape.
+        let corner = whole.right_bottom();
+        let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.frame(vec![Event::PointerMoved(corner)]);
+        h.frame(vec![button(corner, true)]);
+        h.frame(vec![Event::PointerMoved(corner - whole.size() / 2.0)]);
+        let rect = h.settings().crop.geometry.rect;
+        assert!((rect.x1 - 0.5).abs() < 0.01 && (shape(&h) - w / h0).abs() < 0.01, "{rect:?}");
+        assert_eq!((rect.x0, rect.y0), (0.0, 0.0), "the corner opposite stays");
+        assert_eq!(h.saved(), None, "nothing is saved until it's let go");
+        h.frame(vec![button(corner - whole.size() / 2.0, false)]);
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        assert!((crop_box(&h).size() - whole.size() / 2.0).length() < 0.5, "drawn where it is");
+
+        // From inside, it's moved, as far as the frame's edge.
+        let half = crop_box(&h);
+        drag(&mut h, half.center(), half.center() + egui::vec2(whole.width(), 0.0), Modifiers::NONE);
+        let rect = h.settings().crop.geometry.rect;
+        assert!((rect.x0 - 0.5).abs() < 1e-6 && (rect.x1 - 1.0).abs() < 1e-6 && rect.y0 == 0.0, "{rect:?}");
+
+        // With the lock off (A), an edge moves alone and the shape is its own.
+        h.press(Modifiers::NONE, Key::A);
+        let moved = crop_box(&h);
+        drag(&mut h, moved.center_bottom(), moved.center_bottom() - egui::vec2(0.0, moved.height() / 2.0), Modifiers::NONE);
+        let rect = h.settings().crop.geometry.rect;
+        assert!((rect.y1 - 0.25).abs() < 0.01 && (rect.x0 - 0.5).abs() < 1e-6 && (rect.x1 - 1.0).abs() < 1e-6, "{rect:?}");
+        assert_eq!(crop::aspect(h.settings(), (w, h0)), None);
+        // Shift holds the shape for one drag.
+        let wide = crop_box(&h);
+        drag(&mut h, wide.left_top(), wide.left_top() + egui::vec2(wide.width() / 2.0, 0.0), Modifiers::SHIFT);
+        assert!((shape(&h) - 2.0 * w / h0).abs() < 0.05, "{:?}", h.settings().crop.geometry.rect);
+
+        // Each drag was a step.
+        for _ in 0..4 {
+            h.press(Modifiers::COMMAND, Key::Z);
+        }
+        assert!(h.settings().crop.geometry.is_identity());
+        assert_eq!(crop_box(&h), whole);
+    }
+
+    #[test]
+    fn a_drag_outside_the_crop_turns_the_frame_and_a_line_with_ctrl_levels_it() {
+        let (_folder, mut h) = cropping("crop-turn");
+        let (w, h0) = h.app.dims().unwrap();
+        h.app.edit(|history, _| history.set(|settings| crop::set_aspect(settings, (w, h0), crop::Aspect::Ratio(1, 1))));
+        h.frame(vec![]);
+        let (on, area) = (crop_box(&h), h.app.loupe.area());
+        // Right of the square crop, level with the middle of the frame,
+        // and 5° round it, clockwise.
+        let (centre, reach) = (area.center(), on.width() / 2.0 + 30.0);
+        let round = |degrees: f32| centre + reach * egui::Vec2::angled(degrees.to_radians());
+        drag(&mut h, round(0.0), round(5.0), Modifiers::NONE);
+        let geometry = h.settings().crop.geometry;
+        assert!((geometry.angle - 5.0).abs() < 0.05, "{}", geometry.angle);
+        assert!(geometry.is_within_image(w, h0));
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().crop.geometry.angle, 0.0, "one step");
+
+        // A line drawn with Ctrl, dropping 3° to the right, is made level.
+        let from = centre - egui::vec2(100.0, 0.0);
+        drag(&mut h, from, from + 200.0 * egui::Vec2::angled(3f32.to_radians()), Modifiers::COMMAND);
+        assert!((h.settings().crop.geometry.angle + 3.0).abs() < 0.05, "{}", h.settings().crop.geometry.angle);
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+
+        // A double-click inside the crop puts the tool away.
+        let on = crop_box(&h);
+        for _ in 0..2 {
+            h.pointer(on.center(), Some(true));
+            h.pointer(on.center(), Some(false));
+        }
+        assert!(h.app.crop.is_none());
+        assert!((h.settings().crop.geometry.angle + 3.0).abs() < 0.05, "with the crop as it was");
     }
 
     #[test]
