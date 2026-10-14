@@ -808,15 +808,21 @@ impl App {
     /// Set `what` on the current frame from the frame itself, as one step.
     fn auto(&mut self, what: Auto) {
         let Some(source) = self.shoot.as_ref().and_then(|shoot| self.renderer.source(&shoot.frame().path)) else { return };
-        let mut found = true;
-        self.edit(|history, info| history.set(|settings| found = auto::apply(settings, info, &source, what)));
-        if !found {
-            let text = match what {
-                Auto::Level => "Couldn't find a horizon or uprights to level by",
-                _ => "There's no automatic value for that slider",
-            };
-            self.message = Some((text.to_owned(), false));
-        }
+        let (mut found, mut changed, started) = (true, false, std::time::Instant::now());
+        self.edit(|history, info| {
+            changed = history.set(|settings| found = auto::apply(settings, info, &source, what));
+            changed
+        });
+        log::debug!("{what:?} in {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
+        // A press that changes nothing says why.
+        let text = match what {
+            _ if changed => return,
+            Auto::Level if !found => "Couldn't find a horizon or uprights to level by",
+            _ if !found => "There's no automatic value for that slider",
+            Auto::Tone => "Nothing clips that Whites or Blacks could bring in",
+            _ => "It's as Auto would set it already",
+        };
+        self.message = Some((text.to_owned(), false));
     }
 
     /// The current frame's size as it's shown uncropped, once its raw has
@@ -2106,13 +2112,19 @@ mod tests {
         let fresh = h.settings().clone();
 
         // The test's frame is one flat grey: nothing in it clips, so
-        // Whites and Blacks go as far as they go.
+        // there's nothing for Whites and Blacks to bring in.
         h.press(Modifiers::COMMAND, Key::U);
-        assert_eq!((h.settings().light.whites, h.settings().light.blacks), (100.0, -100.0));
+        assert_eq!(h.settings(), &fresh);
+        assert_eq!(h.said(), "Nothing clips that Whites or Blacks could bring in");
         assert_eq!(h.app.shoot.as_ref().unwrap().frame().rating, 1, "not unmarked");
+        // Auto sets them again where they've been moved.
+        h.app.edit(|history, _| history.set(|settings| (settings.light.whites, settings.light.blacks) = (30.0, -20.0)));
+        h.press(Modifiers::COMMAND, Key::U);
+        assert_eq!((h.settings().light.whites, h.settings().light.blacks), (0.0, 0.0));
         assert_eq!(h.saved().as_ref(), Some(h.settings()));
         h.press(Modifiers::COMMAND, Key::Z);
-        assert_eq!(h.settings(), &fresh, "one step");
+        assert_eq!((h.settings().light.whites, h.settings().light.blacks), (30.0, -20.0), "one step");
+        h.press(Modifiers::COMMAND, Key::Z);
 
         h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::U);
         assert_eq!(h.settings().wb.mode, WbMode::Auto);
