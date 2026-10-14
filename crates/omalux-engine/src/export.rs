@@ -158,6 +158,20 @@ mod tests {
         assert_eq!(samples, image.samples);
     }
 
+    #[test]
+    fn a_crop_and_a_quarter_turn_export_at_their_own_size() {
+        let src = Rgb32f::filled(60, 40, [0.2; 3]);
+        let info = SourceInfo::default();
+        let mut settings = DevelopSettings::default();
+        crate::crop::set_aspect(&mut settings, (60.0, 40.0), crate::crop::Aspect::Ratio(1, 1));
+        let square = render(&src, &info, &settings).unwrap();
+        assert_eq!((square.width, square.height), (40, 40));
+        crate::crop::reset(&mut settings);
+        crate::crop::turn(&mut settings, true);
+        let turned = render(&src, &info, &settings).unwrap();
+        assert_eq!((turned.width, turned.height), (40, 60));
+    }
+
     /// A folder of its own for a test, removed when dropped.
     struct Folder(PathBuf);
 
