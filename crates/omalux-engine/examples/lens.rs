@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::RenderRequest;
 use lightcraft_tiff::{Tiff, Value};
+use omalux_engine::look::Profile;
 use omalux_engine::{lens_profiles, raw};
 
 const SONY_DISTORTION: u16 = 0x7037;
@@ -59,7 +60,7 @@ fn lens(path: &Path, out: Option<&Path>) -> Result<(), String> {
         Some(table) => println!("  Sony's distortion table: {table:?}"),
         None => println!("  Sony's distortion table: none"),
     }
-    let (src, info) = raw::load(&bytes, EDGE)?;
+    let raw::Loaded { image: src, info, .. } = raw::load(&bytes, EDGE, Profile::Fitted)?;
     match &info.lens {
         Some(l) => println!("  correction the pipeline gets: warp {}, vignetting {}", l.warp.is_some() || l.has_stages(), l.vignette.is_some()),
         None => println!("  correction the pipeline gets: none"),

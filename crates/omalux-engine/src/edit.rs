@@ -10,6 +10,8 @@ use lightcraft_develop::{DevelopSettings, WbMode, controls};
 use lightcraft_pipeline::SourceInfo;
 use lightcraft_raster::Rgb32f;
 
+use crate::look;
+
 /// One frame's settings and how they got there.
 #[derive(Clone, Debug, PartialEq)]
 pub struct History {
@@ -50,7 +52,7 @@ impl History {
     /// raw), only the numbers shown.
     pub fn unseen(saved: Option<DevelopSettings>) -> Self {
         let wb = DevelopSettings::default().wb;
-        Self::new(DevelopSettings::for_raw(wb.temp, wb.tint), saved)
+        Self::new(look::fresh(wb.temp, wb.tint), saved)
     }
 
     /// The raw of a frame begun [`Self::unseen`] has been decoded: these
@@ -264,7 +266,7 @@ mod tests {
     }
 
     fn history() -> History {
-        History::new(DevelopSettings::for_raw(5200.0, 3.0), None)
+        History::new(look::fresh(5200.0, 3.0), None)
     }
 
     #[test]
@@ -304,9 +306,9 @@ mod tests {
 
     #[test]
     fn reset_goes_back_to_a_fresh_raw_and_can_be_undone() {
-        let mut saved = DevelopSettings::for_raw(5200.0, 3.0);
+        let mut saved = look::fresh(5200.0, 3.0);
         saved.light.exposure = 1.0;
-        let mut h = History::new(DevelopSettings::for_raw(5200.0, 3.0), Some(saved.clone()));
+        let mut h = History::new(look::fresh(5200.0, 3.0), Some(saved.clone()));
         assert!(h.edited() && !h.can_undo(), "the saved edit is where the session starts");
         assert!(h.reset());
         assert_eq!(h.settings(), h.fresh());
@@ -357,21 +359,21 @@ mod tests {
         let mut pasted = h.settings().clone();
         pasted.light.exposure = 1.0;
         assert!(h.paste(1, pasted));
-        h.decoded(DevelopSettings::for_raw(5200.0, 3.0));
+        h.decoded(look::fresh(5200.0, 3.0));
         assert_eq!((h.settings().wb.temp, h.settings().wb.tint, h.settings().light.exposure), (5200.0, 3.0, 1.0));
         assert!(h.undo());
         assert!(!h.edited(), "what it was before the paste is a fresh raw");
-        assert_eq!(h.settings(), &DevelopSettings::for_raw(5200.0, 3.0));
+        assert_eq!(h.settings(), &look::fresh(5200.0, 3.0));
 
         // A custom white balance is its own, and stays.
-        let mut custom = DevelopSettings::for_raw(0.0, 0.0);
+        let mut custom = look::fresh(0.0, 0.0);
         (custom.wb.mode, custom.wb.temp) = (WbMode::Custom, 4000.0);
         let mut h = History::unseen(Some(custom.clone()));
-        h.decoded(DevelopSettings::for_raw(5200.0, 3.0));
+        h.decoded(look::fresh(5200.0, 3.0));
         assert_eq!(h.settings(), &custom);
 
         // An edit saved as shot with another frame's numbers opens with its own.
-        let h = History::new(DevelopSettings::for_raw(5200.0, 3.0), Some(DevelopSettings::for_raw(6100.0, -2.0)));
+        let h = History::new(look::fresh(5200.0, 3.0), Some(look::fresh(6100.0, -2.0)));
         assert!(!h.edited());
     }
 }

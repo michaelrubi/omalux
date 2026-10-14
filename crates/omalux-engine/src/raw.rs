@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use crate::look::{Camera, Profile};
 use lightcraft_color::cct::xy_to_temp_tint;
 use lightcraft_geom::Orientation;
 use lightcraft_pipeline::SourceInfo;
@@ -219,21 +220,31 @@ pub struct Timings {
     pub finish: f64,
 }
 
-/// Decode a raw into a linear Rec.2020 image no larger than `max_edge`, oriented, and the facts the
-/// pipeline interprets settings against. A raw that can't be decoded yet shows its embedded JPEG.
+/// A raw as the pipeline takes it.
+#[derive(Clone, Debug)]
+pub struct Loaded {
+    /// Linear Rec.2020, no larger than asked, oriented.
+    pub image: Rgb32f,
+    /// The facts the pipeline interprets settings against.
+    pub info: SourceInfo,
+    /// What the camera did to its own JPEG ([`crate::look`]).
+    pub camera: Camera,
+    pub timings: Timings,
+}
+
+/// Decode a raw into a linear Rec.2020 image no larger than `max_edge`, oriented, with the look `profile` starts
+/// from: fitted to its own JPEG ([`Profile::Fitted`]), or its camera's fixed one (Camera match and Flat, which
+/// share a development). A raw that can't be decoded yet shows its embedded JPEG.
+///
+/// Whatever is rendered from it goes through [`crate::look::effective`] first.
 ///
 /// Runs on a rayon worker: its many short parallel loops then start on the worker's own queue
 /// instead of each one waking the pool from outside and waiting for it.
-pub fn load(bytes: &[u8], max_edge: usize) -> Result<(Rgb32f, SourceInfo), String> {
-    load_timed(bytes, max_edge).map(|(img, info, _)| (img, info))
+pub fn load(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, String> {
+    rayon::scope(|_| load_now(bytes, max_edge, profile))
 }
 
-/// [`load`], with how long it took.
-pub fn load_timed(bytes: &[u8], max_edge: usize) -> Result<(Rgb32f, SourceInfo, Timings), String> {
-    rayon::scope(|_| load_now(bytes, max_edge))
-}
-
-fn load_now(bytes: &[u8], max_edge: usize) -> Result<(Rgb32f, SourceInfo, Timings), String> {
+fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, String> {
     let ms = |t: web_time::Instant| t.elapsed().as_secs_f64() * 1e3;
     let mut timings = Timings::default();
     if lightcraft_raw::probe(bytes).is_none() {
@@ -245,7 +256,7 @@ fn load_now(bytes: &[u8], max_edge: usize) -> Result<(Rgb32f, SourceInfo, Timing
         Err(Ok(why)) => {
             // show the camera's embedded JPEG (rendered, not raw) until the variant is supported
             return load_embedded_preview(bytes, max_edge)
-                .map(|(img, info)| (img, info, timings))
+                .map(|(image, info)| Loaded { image, info, camera: Camera::default(), timings })
                 .ok_or(format!("unsupported raw ({why}) without an embedded preview"));
         }
         Err(Err(e)) => return Err(e),
@@ -322,7 +333,12 @@ fn load_now(bytes: &[u8], max_edge: usize) -> Result<(Rgb32f, SourceInfo, Timing
         mattes: None,
         local_tone: None,
     };
-    Ok((img, info, timings))
+    // What the camera did to its JPEG that the raw doesn't have. (The fixed profile and DRO's lift are M4's, on
+    // their way: until they're in, Camera match develops as `Profile::Fitted` does.)
+    let _ = profile;
+    let shot = crate::sony::settings(bytes);
+    let camera = Camera { style: shot.creative_style, dro: shot.dro, lift: 0.0, fixed: false };
+    Ok(Loaded { image: img, info, camera, timings })
 }
 
 /// Which white-balance scale a raw is edited on, decided from the file alone.
@@ -443,7 +459,7 @@ pub(crate) mod tests {
     #[test]
     fn corpus_a7m3_opens_with_a_camera_look_and_kelvin_white_balance() {
         for (name, bytes) in a7m3_corpus() {
-            let (img, info, timings) = load_timed(&bytes, 1200).unwrap();
+            let Loaded { image: img, info, timings, .. } = load(&bytes, 1200, Profile::Camera).unwrap();
             assert_eq!(img.width.max(img.height), 1200, "{name}");
             assert!(img.data.iter().flatten().all(|v| v.is_finite() && *v >= 0.0), "{name}");
             assert!(info.raw && info.camera_tone.is_some(), "{name}: a camera look");
@@ -457,11 +473,11 @@ pub(crate) mod tests {
 
     #[test]
     fn what_isnt_a_raw_is_an_error_not_a_panic() {
-        assert!(load(b"", 100).is_err());
-        assert!(load(b"not a raw at all", 100).is_err());
-        assert!(load(&[0xff, 0xd8, 0xff, 0xe0, 0, 0x10], 100).is_err());
+        assert!(load(b"", 100, Profile::Camera).is_err());
+        assert!(load(b"not a raw at all", 100, Profile::Camera).is_err());
+        assert!(load(&[0xff, 0xd8, 0xff, 0xe0, 0, 0x10], 100, Profile::Camera).is_err());
         // a TIFF header that goes nowhere
-        assert!(load(b"II*\0\x08\0\0\0\0\0", 100).is_err());
+        assert!(load(b"II*\0\x08\0\0\0\0\0", 100, Profile::Camera).is_err());
         assert!(embedded_preview_srgb(b"II*\0\x08\0\0\0\0\0", 100).is_none());
     }
 

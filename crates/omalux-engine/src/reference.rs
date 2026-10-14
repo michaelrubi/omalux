@@ -8,6 +8,11 @@
 //!
 //!     OMALUX_WRITE_REFERENCE=1 cargo test -p omalux-engine reference
 //!
+//! An edit made under an older process version keeps rendering as it did:
+//! the references of process version 1's looks (fitted to each frame's own
+//! JPEG) are the ones M1 wrote, checked against still, beside the ones of
+//! what a frame opens with now (Camera match, Flat, HDR).
+//!
 //! The CC0 ILCE-7M3 raws' references are in `testdata/reference/` (the test
 //! skips them without the raws: `scripts/fetch-corpus.sh`). Michael's own
 //! frames stay outside the repo: with `OMALUX_REFERENCE` naming a folder of
@@ -20,6 +25,7 @@ use lightcraft_pipeline::{RenderRequest, SourceInfo};
 use lightcraft_raster::Rgba8;
 
 use crate::edit::set_control;
+use crate::look::{self, Profile};
 
 /// The long edge the references are rendered at: enough to show a change
 /// in tone or colour, small enough to keep in the repo.
@@ -30,8 +36,9 @@ const EDGE: usize = 256;
 const MAX_DIFFERENCE: u8 = 2;
 const MEAN_DIFFERENCE: f64 = 0.25;
 
-/// The settings each raw is rendered with, by name: a fresh raw's, and
-/// edits that between them move every control M1 shows.
+/// The settings each raw is rendered with under process version 1's look,
+/// by name: a fresh raw's as it was then, and edits that between them move
+/// every control M1 shows.
 fn looks(info: &SourceInfo) -> Vec<(&'static str, DevelopSettings)> {
     let fresh = DevelopSettings::for_raw(info.as_shot_temp, info.as_shot_tint);
     let edit = |controls: &[(&str, f64)]| {
@@ -54,6 +61,17 @@ fn looks(info: &SourceInfo) -> Vec<(&'static str, DevelopSettings)> {
     ]
 }
 
+/// And with what a frame opens with now: Camera match, Flat, and HDR on
+/// each side of the Light sliders.
+fn looks_now(info: &SourceInfo) -> Vec<(&'static str, DevelopSettings)> {
+    let fresh = look::fresh(info.as_shot_temp, info.as_shot_tint);
+    let mut flat = fresh.clone();
+    Profile::Flat.set(&mut flat);
+    let mut hdr = fresh.clone();
+    (hdr.light.hdr, hdr.light.exposure, hdr.light.shadows) = (60.0, 0.3, -20.0);
+    vec![("camera", fresh), ("flat", flat), ("hdr", hdr)]
+}
+
 fn png(image: &Rgba8) -> Vec<u8> {
     lightcraft_codecs::encode::encode_png(&lightcraft_codecs::EncodeImage::rgba8(image), &Default::default()).expect("encode a PNG")
 }
@@ -74,10 +92,13 @@ fn difference(a: &Rgba8, b: &Rgba8) -> (u8, f64) {
 /// Render `raw` each way and compare with what's in `references` (or
 /// write it there). Returns what differs.
 fn check(name: &str, bytes: &[u8], references: &Path, write: bool) -> Vec<String> {
-    let (source, info) = crate::raw::load(bytes, EDGE * 4).expect("decode");
     let mut problems = Vec::new();
-    for (look, settings) in looks(&info) {
-        let render = lightcraft_pipeline::render(&source, &info, &settings, &RenderRequest::fit(EDGE, EDGE)).image;
+    let loaded = |profile| crate::raw::load(bytes, EDGE * 4, profile).expect("decode");
+    let (before, now) = (loaded(Profile::Fitted), loaded(Profile::Camera));
+    let renders = looks(&before.info).into_iter().map(|look| (look, &before)).chain(looks_now(&now.info).into_iter().map(|look| (look, &now)));
+    for ((look, settings), source) in renders {
+        let (settings, info) = look::effective(&settings, &source.info, &source.camera);
+        let render = lightcraft_pipeline::render(&source.image, &info, &settings, &RenderRequest::fit(EDGE, EDGE)).image;
         let path = references.join(format!("{name}-{look}.png"));
         if write {
             std::fs::create_dir_all(references).expect("make the folder");

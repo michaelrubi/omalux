@@ -17,6 +17,7 @@ use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::SourceInfo;
 use lightcraft_raster::Histogram;
 use omalux_engine::crop::Orientation;
+use omalux_engine::look::Camera;
 
 use crate::render::{Done, Key, ZoomKey};
 
@@ -70,7 +71,7 @@ pub enum Mouse {
 /// What the renderer finished that isn't a picture.
 pub enum News {
     /// A frame's raw is decoded.
-    Decoded(PathBuf, Arc<SourceInfo>),
+    Decoded(PathBuf, Arc<SourceInfo>, Arc<Camera>),
     /// A frame couldn't be developed, and why.
     Failed(PathBuf, String),
 }
@@ -248,9 +249,9 @@ impl Loupe {
                     let texture = ctx.load_texture(format!("render {}", path.display()), image, TextureOptions::LINEAR);
                     self.shown.entry(path).or_default().render = Some(Render { texture, key, histogram, settings });
                 }
-                Done::Decoded { path, info, full } => {
+                Done::Decoded { path, info, camera, full } => {
                     self.shown.entry(path.clone()).or_default().full = Some(full);
-                    news.push(News::Decoded(path, info));
+                    news.push(News::Decoded(path, info, camera));
                 }
                 Done::Zoomed { path, key, image } => {
                     let texture = ctx.load_texture(format!("100% {}", path.display()), image, TextureOptions::NEAREST);

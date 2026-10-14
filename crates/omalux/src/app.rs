@@ -17,6 +17,7 @@ use omalux_engine::copy::{Copied, Group};
 use omalux_engine::crop;
 use omalux_engine::disk::{Disk, Mark, Problem};
 use omalux_engine::edit::{self, History};
+use omalux_engine::look::{self, Camera};
 use omalux_engine::shoot::{Filter, Shoot, Step, stars};
 use omalux_engine::sidecar;
 
@@ -48,14 +49,17 @@ struct Editing {
     /// None for a frame pasted onto whose raw hasn't been decoded yet:
     /// only a paste and its undo reach it until it has.
     info: Option<Arc<SourceInfo>>,
+    /// What the camera did to its own JPEG, once its raw is decoded.
+    camera: Arc<Camera>,
     /// The history's settings, as the renderer is handed them.
     settings: Arc<DevelopSettings>,
 }
 
 impl Editing {
-    fn new(history: History, info: Option<Arc<SourceInfo>>) -> Self {
+    fn new(history: History, decoded: Option<(Arc<SourceInfo>, Arc<Camera>)>) -> Self {
         let settings = Arc::new(history.settings().clone());
-        Self { history, info, settings }
+        let (info, camera) = decoded.unzip();
+        Self { history, info, camera: camera.unwrap_or_default(), settings }
     }
 
     /// Change the edit with `change`, which says whether it did. Nothing
@@ -807,10 +811,12 @@ impl App {
 
     /// Set `what` on the current frame from the frame itself, as one step.
     fn auto(&mut self, what: Auto) {
-        let Some(source) = self.shoot.as_ref().and_then(|shoot| self.renderer.source(&shoot.frame().path)) else { return };
+        let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
+        let Some(source) = self.renderer.source(&path) else { return };
+        let camera = self.edits.get(&path).map(|editing| editing.camera.clone()).unwrap_or_default();
         let (mut found, mut changed, started) = (true, false, std::time::Instant::now());
         self.edit(|history, info| {
-            changed = history.set(|settings| found = auto::apply(settings, info, &source, what));
+            changed = history.set(|settings| found = auto::apply(settings, info, &camera, &source, what));
             changed
         });
         log::debug!("{what:?} in {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
@@ -1049,19 +1055,20 @@ impl App {
         self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom });
         for news in self.loupe.take(ctx, self.renderer.done()) {
             match news {
-                News::Decoded(path, info) => {
+                News::Decoded(path, info, camera) => {
                     // Its edit starts from what its sidecar held, or as a fresh raw.
-                    let fresh = DevelopSettings::for_raw(info.as_shot_temp, info.as_shot_tint);
+                    let fresh = look::fresh(info.as_shot_temp, info.as_shot_tint);
                     let saved = self.saved.remove(&path).flatten().map(|settings| (*settings).clone());
                     match self.edits.get_mut(&path) {
                         // Pasted onto before it was decoded.
                         Some(editing) if editing.info.is_none() => {
                             editing.history.decoded(fresh);
-                            editing.info = Some(info);
+                            (editing.info, editing.camera) = (Some(info), camera);
                             editing.stepped();
                         }
-                        Some(_) => {}
-                        None => _ = self.edits.insert(path, Editing::new(History::new(fresh, saved), Some(info))),
+                        // Decoded again, for another profile's look.
+                        Some(editing) => (editing.info, editing.camera) = (Some(info), camera),
+                        None => _ = self.edits.insert(path, Editing::new(History::new(fresh, saved), Some((info, camera)))),
                     }
                 }
                 News::Failed(path, error) => self.message = Some((format!("Couldn't develop {}: {error}", file_name(&path)), true)),
@@ -1493,7 +1500,7 @@ mod tests {
         /// A frame's settings as they stand, by its raw's name.
         fn settings_of(&mut self, name: &str) -> DevelopSettings {
             let path = self.app.shoot.as_ref().unwrap().dir().join(name);
-            self.app.settings_of(&path).map_or_else(|| DevelopSettings::for_raw(5200.0, 3.0), |settings| (*settings).clone())
+            self.app.settings_of(&path).map_or_else(|| look::fresh(5200.0, 3.0), |settings| (*settings).clone())
         }
 
         /// The edit in a frame's sidecar, by its raw's name.
@@ -1691,7 +1698,7 @@ mod tests {
         h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
         assert_eq!(h.settings().wb.tint, 1.0);
         h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::R);
-        assert_eq!(h.settings(), &DevelopSettings::for_raw(5200.0, 3.0), "reset");
+        assert_eq!(h.settings(), &look::fresh(5200.0, 3.0), "reset");
         h.press(Modifiers::COMMAND, Key::Z);
         assert_eq!(h.settings().wb.tint, 1.0, "and reset is a step like any other");
 
@@ -1699,7 +1706,7 @@ mod tests {
         h.press(Modifiers::NONE, Key::ArrowRight);
         h.settle();
         h.press(Modifiers::COMMAND, Key::Z);
-        assert_eq!((h.settings(), h.saved()), (&DevelopSettings::for_raw(5200.0, 3.0), None));
+        assert_eq!((h.settings(), h.saved()), (&look::fresh(5200.0, 3.0), None));
         h.press(Modifiers::NONE, Key::ArrowLeft);
         h.press(Modifiers::COMMAND, Key::Z);
         assert_eq!(h.settings().wb.mode, lightcraft_develop::WbMode::AsShot, "and the first one's are still there");
@@ -2146,7 +2153,7 @@ mod tests {
     fn an_edit_from_a_newer_omalux_is_shown_fresh_and_never_written_over() {
         let folder = Folder::new("newer", &[1]);
         let raw = folder.0.join("DSC00001.ARW");
-        let mut edited = DevelopSettings::for_raw(5200.0, 3.0);
+        let mut edited = look::fresh(5200.0, 3.0);
         edited.light.exposure = 0.7;
         sidecar::update(&raw, |xmp| {
             let with = sidecar::with_edit(xmp, &sidecar::Edit::new(edited.clone()))?;
@@ -2227,7 +2234,7 @@ mod tests {
         assert_eq!(h.said(), "Pasted onto DSC00002.ARW");
         assert_eq!((h.settings(), h.saved().as_ref()), (&first, Some(&first)));
         h.press(Modifiers::COMMAND, Key::Z);
-        assert_eq!(h.settings(), &DevelopSettings::for_raw(5200.0, 3.0), "one step");
+        assert_eq!(h.settings(), &look::fresh(5200.0, 3.0), "one step");
         assert_eq!(h.saved().as_ref(), Some(h.settings()));
         assert_eq!(h.said(), "Took the paste back from DSC00002.ARW");
         h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
@@ -2245,7 +2252,7 @@ mod tests {
     fn a_paste_onto_many_frames_is_one_step_to_undo_whatever_has_been_decoded() {
         let (folder, mut h) = copied("paste-many", 6);
         let first = h.settings().clone();
-        let fresh = DevelopSettings::for_raw(5200.0, 3.0);
+        let fresh = look::fresh(5200.0, 3.0);
         let names: Vec<String> = (1..=6).map(|i| format!("DSC{i:05}.ARW")).collect();
         let frames: Vec<PathBuf> = names.iter().map(|name| folder.0.join(name)).collect();
         // The frame they were copied from among them, as in its stack; the
@@ -2295,7 +2302,7 @@ mod tests {
 
         // A frame pasted onto before it was decoded shows its own as-shot
         // white balance once it is, and the sliders work on it.
-        let mut unseen = DevelopSettings::for_raw(4100.0, -7.0);
+        let mut unseen = look::fresh(4100.0, -7.0);
         unseen.light.exposure = -1.0;
         h.app.clipboard = Some(Copied::new(&unseen, &[Group::WhiteBalance, Group::Light]));
         h.app.paste(vec![frames[5].clone()]);
@@ -2314,7 +2321,7 @@ mod tests {
     fn ctrl_v_pastes_onto_the_selection_and_ctrl_z_takes_it_back_from_all_of_it() {
         let (_folder, mut h) = copied("paste-selection", 5);
         let first = h.settings().clone();
-        let fresh = DevelopSettings::for_raw(5200.0, 3.0);
+        let fresh = look::fresh(5200.0, 3.0);
         // The second to the fourth, the cursor on the fourth.
         h.press(Modifiers::NONE, Key::ArrowRight);
         h.press(Modifiers::SHIFT, Key::ArrowRight);
@@ -2338,7 +2345,7 @@ mod tests {
         let (folder, mut h) = copied("paste-newer", 4);
         let raw = folder.0.join("DSC00004.ARW");
         sidecar::update(&raw, |xmp| {
-            let with = sidecar::with_edit(xmp, &sidecar::Edit::new(DevelopSettings::for_raw(5200.0, 3.0)))?;
+            let with = sidecar::with_edit(xmp, &sidecar::Edit::new(look::fresh(5200.0, 3.0)))?;
             Ok(with.replace(">1</omalux:processVersion>", ">99</omalux:processVersion>"))
         })
         .unwrap();
@@ -2375,7 +2382,7 @@ mod tests {
         h.settle();
         h.press(Modifiers::NONE, Key::ArrowRight);
         paste(&mut h, Modifiers::COMMAND | Modifiers::ALT);
-        assert_eq!(h.settings(), &DevelopSettings::for_raw(5200.0, 3.0));
+        assert_eq!(h.settings(), &look::fresh(5200.0, 3.0));
         h.press(Modifiers::COMMAND, Key::Z);
         assert_eq!(h.settings(), &first);
 
@@ -2435,7 +2442,7 @@ mod tests {
     fn a_frame_opens_with_the_edit_in_its_sidecar() {
         let folder = Folder::new("saved", &[1, 1]);
         let raw = folder.0.join("DSC00002.ARW");
-        let mut edited = DevelopSettings::for_raw(5200.0, 3.0);
+        let mut edited = look::fresh(5200.0, 3.0);
         edited.light.exposure = 0.7;
         sidecar::update(&raw, |xmp| sidecar::with_edit(xmp, &sidecar::Edit::new(edited.clone()))).unwrap();
 

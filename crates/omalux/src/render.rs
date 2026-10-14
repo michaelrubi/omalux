@@ -27,6 +27,8 @@ use lightcraft_codecs::display::DisplayProfile;
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::{DisplaySpace, PixelWindow, Quality, RenderRequest, SourceInfo, StageCache};
 use lightcraft_raster::{Histogram, Rgb32f, Rgba8};
+use omalux_engine::look::{self, Camera, Profile};
+use omalux_engine::raw::Loaded;
 
 /// The long edge the loupe's source is decoded to: enough for the loupe on
 /// a 4K screen, and what M0's times were measured at. 100% zoom has its
@@ -35,9 +37,9 @@ pub const SOURCE_EDGE: usize = 2560;
 /// The box a draft is rendered into while a slider is dragged.
 const DRAFT: (usize, usize) = (1152, 768);
 
-/// A decoded raw: the pipeline's source, and what settings are read
-/// against.
-type Decoded = Result<(Rgb32f, SourceInfo), String>;
+/// A decoded raw: the pipeline's source, what settings are read against,
+/// and what the camera did to its own JPEG.
+type Decoded = Result<Loaded, String>;
 
 /// How a raw's bytes become pictures: the app's is [`Decoder::raw`], a
 /// test's whatever it needs.
@@ -45,10 +47,11 @@ type Decoded = Result<(Rgb32f, SourceInfo), String>;
 pub struct Decoder {
     /// The camera's embedded JPEG, for display.
     pub preview: fn(&[u8]) -> Option<Rgba8>,
-    /// The raw itself, as the pipeline's source.
-    pub source: fn(&[u8]) -> Decoded,
+    /// The raw itself, as the pipeline's source, with the look its
+    /// profile starts from.
+    pub source: fn(&[u8], Profile) -> Decoded,
     /// The raw at full size, for 100% zoom.
-    pub full: fn(&[u8]) -> Decoded,
+    pub full: fn(&[u8], Profile) -> Decoded,
     /// The long edge of the raw at full size, in pixels, without decoding
     /// it: how large 100% will be, before the full size is there.
     pub long_edge: fn(&[u8]) -> Option<usize>,
@@ -58,8 +61,8 @@ impl Decoder {
     pub fn raw() -> Self {
         Self {
             preview: |bytes| omalux_engine::raw::embedded_preview_srgb(bytes, SOURCE_EDGE),
-            source: |bytes| omalux_engine::raw::load(bytes, SOURCE_EDGE),
-            full: |bytes| omalux_engine::raw::load(bytes, usize::MAX),
+            source: |bytes, profile| omalux_engine::raw::load(bytes, SOURCE_EDGE, profile),
+            full: |bytes, profile| omalux_engine::raw::load(bytes, usize::MAX, profile),
             long_edge: |bytes| {
                 let (w, h) = lightcraft_raw::probe_info(bytes).ok()?.developed_size();
                 Some(w.max(h))
@@ -75,6 +78,14 @@ pub struct Wanted {
     /// Its edit, or `None` for a frame with none yet: a fresh raw's
     /// settings, white balance as shot.
     pub settings: Option<Arc<DevelopSettings>>,
+}
+
+impl Wanted {
+    /// The profile its raw is developed for: its edit's, or a fresh
+    /// raw's.
+    fn profile(&self) -> Profile {
+        self.settings.as_deref().map_or(Profile::Camera, Profile::of)
+    }
 }
 
 /// What the loupe has room for, in pixels, and whether a slider is being
@@ -120,7 +131,7 @@ pub enum Done {
     /// A frame's raw is decoded: what its settings are read against, and
     /// how large the frame is at 100% (near enough, until it's rendered
     /// there).
-    Decoded { path: PathBuf, info: Arc<SourceInfo>, full: (usize, usize) },
+    Decoded { path: PathBuf, info: Arc<SourceInfo>, camera: Arc<Camera>, full: (usize, usize) },
     /// The window of the current frame that's on screen at 100%.
     Zoomed { path: PathBuf, key: ZoomKey, image: egui::ColorImage },
     Rendered {
@@ -177,6 +188,26 @@ type ZoomJob = (PathBuf, Arc<Source>, Arc<StageCache>, Arc<DevelopSettings>, Zoo
 struct Source {
     image: Arc<Rgb32f>,
     info: Arc<SourceInfo>,
+    camera: Arc<Camera>,
+    /// Developed with the look fitted to its own JPEG, as an edit from
+    /// before M4 wants it, and not with its camera's
+    /// ([`Profile::fitted`]).
+    fitted: bool,
+}
+
+impl Source {
+    fn new(loaded: Loaded, profile: Profile) -> Self {
+        Self { image: Arc::new(loaded.image), info: Arc::new(loaded.info), camera: Arc::new(loaded.camera), fitted: profile.fitted() }
+    }
+
+    /// Whether this is the development `frame`'s profile wants.
+    fn suits(&self, frame: &Wanted) -> bool {
+        self.fitted == frame.profile().fitted()
+    }
+
+    fn fresh(&self) -> Arc<DevelopSettings> {
+        Arc::new(look::fresh(self.info.as_shot_temp, self.info.as_shot_tint))
+    }
 }
 
 #[derive(Default)]
@@ -327,20 +358,26 @@ impl Drop for Renderer {
 }
 
 impl State {
-    /// The most wanted frame that's yet to be decoded.
-    fn next_decode(&self) -> Option<PathBuf> {
-        let waiting = |path: &PathBuf| !self.sources.contains_key(path) && !self.decoding.contains(path) && !self.failed.contains(path);
-        self.wanted.iter().map(|f| &f.path).find(|path| waiting(path)).cloned()
+    /// The most wanted frame that's yet to be decoded, or was for
+    /// another profile's look than it wants now.
+    fn next_decode(&self) -> Option<(PathBuf, Profile)> {
+        let waiting = |frame: &&Wanted| {
+            let decoded = self.sources.get(&frame.path).is_some_and(|source| source.suits(frame));
+            !decoded && !self.decoding.contains(&frame.path) && !self.failed.contains(&frame.path)
+        };
+        self.wanted.iter().find(waiting).map(|frame| (frame.path.clone(), frame.profile()))
     }
 
     /// The current frame, if it's to be decoded at full size: the loupe is
     /// at 100% and its source is in, so its fit render comes first.
-    fn next_full(&self) -> Option<PathBuf> {
+    fn next_full(&self) -> Option<(PathBuf, Profile)> {
         self.view.zoom?;
-        let path = &self.wanted.first()?.path;
-        let have = self.full.as_ref().is_some_and(|(full, ..)| full == path);
+        let frame = self.wanted.first()?;
+        let path = &frame.path;
+        let have = self.full.as_ref().is_some_and(|(full, source, _)| full == path && source.suits(frame));
         let tried = self.full_decoding.as_ref() == Some(path) || self.full_failed.as_ref() == Some(path);
-        (!have && !tried && self.sources.contains_key(path)).then(|| path.clone())
+        let ready = self.sources.get(path).is_some_and(|source| source.suits(frame));
+        (!have && !tried && ready).then(|| (path.clone(), frame.profile()))
     }
 
     /// The window of the current frame on screen at 100%, if it isn't
@@ -348,9 +385,8 @@ impl State {
     fn next_zoom(&self) -> Option<ZoomJob> {
         let centre = self.view.zoom?;
         let frame = self.wanted.first()?;
-        let (path, full, stages) = self.full.as_ref().filter(|(path, ..)| *path == frame.path)?;
-        let fresh = || Arc::new(DevelopSettings::for_raw(full.info.as_shot_temp, full.info.as_shot_tint));
-        let settings = frame.settings.clone().unwrap_or_else(fresh);
+        let (path, full, stages) = self.full.as_ref().filter(|(path, full, _)| *path == frame.path && full.suits(frame))?;
+        let settings = frame.settings.clone().unwrap_or_else(|| full.fresh());
         let (frame_w, frame_h) = omalux_engine::export::full_size(&full.image, &settings);
         let (w, h) = (self.view.size.0.min(frame_w), self.view.size.1.min(frame_h));
         if w == 0 || h == 0 {
@@ -380,9 +416,8 @@ impl State {
             return None;
         }
         self.wanted.iter().enumerate().find_map(|(index, frame)| {
-            let source = self.sources.get(&frame.path)?;
-            let fresh = || Arc::new(DevelopSettings::for_raw(source.info.as_shot_temp, source.info.as_shot_tint));
-            let settings = frame.settings.clone().unwrap_or_else(fresh);
+            let source = self.sources.get(&frame.path).filter(|source| source.suits(frame))?;
+            let settings = frame.settings.clone().unwrap_or_else(|| source.fresh());
             let key = self.key(index, source, &settings);
             (self.rendered.get(&frame.path) != Some(&key)).then(|| (frame.clone(), source.clone(), settings, key))
         })
@@ -420,36 +455,37 @@ impl Shared {
     fn decode(&self) {
         /// A raw to decode: for the loupe, or at full size for 100%.
         enum Job {
-            Source(PathBuf),
-            Full(PathBuf),
+            Source(PathBuf, Profile),
+            Full(PathBuf, Profile),
         }
         let claim = |state: &mut State| {
             // The current frame's source, then its full size, then the neighbours.
             let current = state.wanted.first().map(|f| f.path.clone());
             let next = state.next_decode();
-            if next.is_some() && next == current {
-                state.decoding.insert(next.clone()?);
-                return next.map(Job::Source);
+            if let Some((path, profile)) = next.clone().filter(|(path, _)| Some(path) == current.as_ref()) {
+                state.decoding.insert(path.clone());
+                return Some(Job::Source(path, profile));
             }
-            if let Some(path) = state.next_full() {
+            if let Some((path, profile)) = state.next_full() {
                 state.full_decoding = Some(path.clone());
-                return Some(Job::Full(path));
+                return Some(Job::Full(path, profile));
             }
-            state.decoding.insert(next.clone()?);
-            next.map(Job::Source)
+            let (path, profile) = next?;
+            state.decoding.insert(path.clone());
+            Some(Job::Source(path, profile))
         };
         while let Some(job) = self.next(claim) {
-            let path = match job {
-                Job::Source(path) => path,
-                Job::Full(path) => {
-                    let full = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| (self.decoder.full)(&bytes));
+            let (path, profile) = match job {
+                Job::Source(path, profile) => (path, profile),
+                Job::Full(path, profile) => {
+                    let full = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| (self.decoder.full)(&bytes, profile));
                     self.finish(&path, |state, _| {
                         state.full_decoding = None;
                         // Still the current frame, and still zoomed?
                         let wanted = state.view.zoom.is_some() && state.wanted.first().is_some_and(|f| f.path == path);
                         match full {
-                            Ok((image, info)) if wanted => {
-                                let source = Arc::new(Source { image: Arc::new(image), info: Arc::new(info) });
+                            Ok(loaded) if wanted => {
+                                let source = Arc::new(Source::new(loaded, profile));
                                 state.full = Some((path.clone(), source, Arc::new(StageCache::default())));
                             }
                             Ok(_) => {}
@@ -478,18 +514,18 @@ impl Shared {
                 });
             }
             let long_edge = bytes.as_ref().ok().and_then(|bytes| (self.decoder.long_edge)(bytes));
-            let source = bytes.and_then(|bytes| (self.decoder.source)(&bytes));
+            let source = bytes.and_then(|bytes| (self.decoder.source)(&bytes, profile));
             self.finish(&path, |state, wanted| {
                 state.decoding.remove(&path);
                 match source {
-                    Ok((image, info)) if wanted => {
+                    Ok(loaded) if wanted => {
                         // The frame at 100%: the source's shape, as long as the raw's long edge.
-                        let (w, h) = (image.width, image.height);
+                        let (w, h) = (loaded.image.width, loaded.image.height);
                         let scale = long_edge.map_or(1.0, |edge| edge as f64 / w.max(h).max(1) as f64);
                         let full = ((w as f64 * scale).round() as usize, (h as f64 * scale).round() as usize);
-                        let info = Arc::new(info);
-                        state.sources.insert(path.clone(), Arc::new(Source { image: Arc::new(image), info: info.clone() }));
-                        state.done.push(Done::Decoded { path: path.clone(), info, full });
+                        let source = Arc::new(Source::new(loaded, profile));
+                        state.done.push(Done::Decoded { path: path.clone(), info: source.info.clone(), camera: source.camera.clone(), full });
+                        state.sources.insert(path.clone(), source);
                     }
                     Ok(_) => {}
                     Err(error) if wanted => {
@@ -551,11 +587,14 @@ impl Shared {
             let quality = if draft { Quality::Draft } else { Quality::Full };
             let request = RenderRequest { quality, display: display.as_ref().map(|d| d.space), ..request };
             let started = Instant::now();
-            let on_gpu = self.gpu.then(|| lightcraft_gpu::try_render(&source.image, &source.info, &settings, &request, stages.as_deref()).ok()).flatten();
+            // What the profile and HDR put under the sliders is folded in here.
+            let (folded, info) = look::effective(&settings, &source.info, &source.camera);
+            let on_gpu = self.gpu.then(|| lightcraft_gpu::try_render(&source.image, &info, &folded, &request, stages.as_deref()).ok()).flatten();
             let mut rendered = on_gpu.unwrap_or_else(|| match &stages {
-                Some(stages) => lightcraft_pipeline::render_cached(&source.image, &source.info, &settings, &request, stages),
-                None => lightcraft_pipeline::render(&source.image, &source.info, &settings, &request),
+                Some(stages) => lightcraft_pipeline::render_cached(&source.image, &info, &folded, &request, stages),
+                None => lightcraft_pipeline::render(&source.image, &info, &folded, &request),
             });
+            drop((folded, info));
             let ms = started.elapsed().as_secs_f64() * 1e3;
             if clipping {
                 crate::histogram::clipping_overlay(&mut rendered.image);
@@ -588,6 +627,13 @@ pub(crate) mod tests {
 
     use std::time::Duration;
 
+    /// A raw as decoded, shot in Standard with DRO off.
+    fn loaded(image: Rgb32f) -> Loaded {
+        let info = SourceInfo { raw: true, as_shot_temp: 5200.0, as_shot_tint: 3.0, ..SourceInfo::default() };
+        let camera = Camera { style: Some("Standard".into()), ..Camera::default() };
+        Loaded { image, info, camera, timings: Default::default() }
+    }
+
     /// A decoder that makes a small picture of any file, with its embedded
     /// JPEG a quarter the size.
     pub(crate) fn decoder() -> Decoder {
@@ -597,19 +643,19 @@ pub(crate) mod tests {
                 image.data.fill([10, 20, 30, 255]);
                 (bytes != b"no preview").then_some(image)
             },
-            source: |bytes| match bytes {
+            source: |bytes, _| match bytes {
                 b"broken" => Err("not a raw".into()),
                 _ => {
                     let mut image = Rgb32f::new(48, 32);
                     image.data.fill([0.18; 3]);
-                    Ok((image, SourceInfo { raw: true, as_shot_temp: 5200.0, as_shot_tint: 3.0, ..SourceInfo::default() }))
+                    Ok(loaded(image))
                 }
             },
             // Four times the source's size.
-            full: |_| {
+            full: |_, _| {
                 let mut image = Rgb32f::new(192, 128);
                 image.data.fill([0.18; 3]);
-                Ok((image, SourceInfo { raw: true, as_shot_temp: 5200.0, as_shot_tint: 3.0, ..SourceInfo::default() }))
+                Ok(loaded(image))
             },
             long_edge: |_| Some(192),
         }
@@ -690,7 +736,7 @@ pub(crate) mod tests {
         let folder = Folder::new("drag", &[("a.ARW", ""), ("b.ARW", "")]);
         let renderer = Renderer::new(decoder(), false, || {});
         let frames = |exposure: f64| {
-            let mut settings = DevelopSettings::for_raw(5200.0, 3.0);
+            let mut settings = look::fresh(5200.0, 3.0);
             settings.light.exposure = exposure;
             vec![Wanted { path: folder.0.join("a.ARW"), settings: Some(Arc::new(settings)) }, wanted(&folder.0, "b.ARW")]
         };
@@ -711,7 +757,7 @@ pub(crate) mod tests {
 
     #[test]
     fn drafts_are_small_and_nothing_is_larger_than_its_source() {
-        let source = Source { image: Arc::new(Rgb32f::new(2560, 1707)), info: Arc::default() };
+        let source = Source::new(loaded(Rgb32f::new(2560, 1707)), Profile::Camera);
         let settings = DevelopSettings::default();
         let mut state = State { view: View { size: (3000, 1500), ..View::default() }, ..State::default() };
         assert_eq!(state.key(0, &source, &settings).size, (2560, 1500));
@@ -757,7 +803,7 @@ pub(crate) mod tests {
         let folder = Folder::new("display", &[("a.ARW", "")]);
         let renderer = Renderer::new(decoder(), false, || {});
         let view = View { size: (24, 16), ..View::default() };
-        let mut settings = DevelopSettings::for_raw(5200.0, 3.0);
+        let mut settings = look::fresh(5200.0, 3.0);
         settings.wb.temp = 9000.0;
         settings.wb.mode = lightcraft_develop::WbMode::Custom;
         let frames = || vec![Wanted { path: folder.0.join("a.ARW"), settings: Some(Arc::new(settings.clone())) }];

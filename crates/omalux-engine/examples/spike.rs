@@ -26,6 +26,7 @@ use lightcraft_pipeline::{PixelWindow, Quality, RenderRequest, SourceInfo, Stage
 use lightcraft_raster::resample::{Filter, resize};
 use lightcraft_raster::{Rgb32f, Rgba8};
 use omalux_engine::compare::{self, Region};
+use omalux_engine::look::{self, Camera, Profile};
 use omalux_engine::{export, raw, sony};
 
 /// The loupe: about 2.5 MP, as DESIGN.md's budget has it.
@@ -123,10 +124,10 @@ fn spike(path: &Path, out: Option<&Path>, gpu: bool, totals: &mut Totals) -> Res
     *totals.styles.entry(format!("{style}, DRO {dro}")).or_default() += 1;
 
     // Decoding: the loupe's source, binned, and the full-size one for export and 100%.
-    let (preview, t_preview) = timed(|| raw::load_timed(&bytes, PREVIEW_EDGE));
-    let (preview_img, info, steps) = preview?;
-    let (full, t_full) = timed(|| raw::load(&bytes, usize::MAX));
-    let (full, _) = full?;
+    let (preview, t_preview) = timed(|| raw::load(&bytes, PREVIEW_EDGE, Profile::Camera));
+    let raw::Loaded { image: preview_img, info, camera: shot, timings: steps } = preview?;
+    let (full, t_full) = timed(|| raw::load(&bytes, usize::MAX, Profile::Camera));
+    let full = full?.image;
     println!(
         "  decode: {t_preview:.0} ms for the {PREVIEW_EDGE} px source (raw {:.0}, camera match {:.0}, bin {:.0}, finish {:.0}), {t_full:.0} ms full size ({}×{})",
         steps.decode, steps.look, steps.demosaic, steps.finish, full.width, full.height
@@ -135,7 +136,11 @@ fn spike(path: &Path, out: Option<&Path>, gpu: bool, totals: &mut Totals) -> Res
     let wb = if info.relative_wb { "relative".to_owned() } else { format!("{:.0} K / {:+.0}", info.as_shot_temp, info.as_shot_tint) };
     println!("  camera match: {look}; white balance as shot {wb}; lens data {}", if info.lens.is_some() { "found" } else { "none" });
 
-    let settings = DevelopSettings::for_raw(info.as_shot_temp, info.as_shot_tint);
+    // What a frame opens with: Camera match, with what it puts under the sliders folded in.
+    let fresh = look::fresh(info.as_shot_temp, info.as_shot_tint);
+    let (settings, info) = look::effective(&fresh, &info, &shot);
+    let (settings, info) = (settings.into_owned(), info.into_owned());
+    println!("  profile: {}, DRO's lift {:+.0} under Shadows", Profile::of(&fresh).label(&shot), shot.lift);
     let preview = Arc::new(preview_img);
 
     // The camera match against the camera's JPEG, at the JPEG's size.
@@ -191,7 +196,7 @@ fn spike(path: &Path, out: Option<&Path>, gpu: bool, totals: &mut Totals) -> Res
     totals.drag.push((cpu_drag, gpu_times.map(|t| t.1)));
 
     // The export: full size, 16-bit Linear ProPhoto, on the CPU (Lightcraft's GPU renders 8-bit only).
-    let (image, t_render) = timed(|| export::render(&full, &info, &settings));
+    let (image, t_render) = timed(|| export::render(&full, &info, &Camera::default(), &settings));
     let image = image?;
     let (tiff, t_encode) = timed(|| export::tiff(&image));
     let tiff = tiff?;

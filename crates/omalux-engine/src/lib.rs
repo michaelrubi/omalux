@@ -14,10 +14,13 @@ pub mod color;
 pub mod compare;
 pub mod copy;
 pub mod crop;
+pub mod dcp;
 pub mod disk;
 pub mod edit;
 pub mod export;
+pub mod fusion;
 pub mod lens_profiles;
+pub mod look;
 pub mod raw;
 #[cfg(test)]
 mod reference;

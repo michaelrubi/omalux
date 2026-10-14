@@ -17,6 +17,8 @@ use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::{DeepSamples, OutputDepth, OutputSpace, RenderRequest, SourceInfo};
 use lightcraft_raster::Rgb32f;
 
+use crate::look::{self, Camera, Profile};
+
 /// A frame rendered for export: linear ProPhoto RGB, 16 bits a channel,
 /// interleaved.
 #[derive(Clone, Debug, PartialEq)]
@@ -34,10 +36,11 @@ pub fn full_size(src: &Rgb32f, settings: &DevelopSettings) -> (usize, usize) {
 }
 
 /// Render `src` at full size for export, on the CPU pipeline.
-pub fn render(src: &Rgb32f, info: &SourceInfo, settings: &DevelopSettings) -> Result<Linear16, String> {
+pub fn render(src: &Rgb32f, info: &SourceInfo, camera: &Camera, settings: &DevelopSettings) -> Result<Linear16, String> {
     let (w, h) = full_size(src, settings);
     let request = RenderRequest { space: OutputSpace::ProPhoto, depth: OutputDepth::F32Linear, ..RenderRequest::fit(w, h) };
-    let rendered = lightcraft_pipeline::render(src, info, settings, &request);
+    let (settings, info) = look::effective(settings, info, camera);
+    let rendered = lightcraft_pipeline::render(src, &info, &settings, &request);
     let deep = rendered.deep.ok_or("the pipeline made no linear render")?;
     let DeepSamples::F32(linear) = deep.samples else { return Err("the pipeline's linear render isn't float".into()) };
     Ok(Linear16 { width: deep.width, height: deep.height, samples: linear.iter().map(|&v| to_u16(v)).collect() })
@@ -78,23 +81,19 @@ pub fn export(raw: &Path, to: &Path, settings: Option<&DevelopSettings>) -> Resu
         return Ok(false);
     }
 
-    let bytes = fs::read(raw).map_err(|e| format!("{}: {e}", raw.display()))?;
-    let (full, info) = crate::raw::load(&bytes, usize::MAX)?;
-
-    let dev_settings = match settings {
-        Some(s) => s.clone(),
-        None => match crate::sidecar::read(raw) {
-            Ok(Some(xmp)) => match crate::sidecar::edit(&xmp) {
-                Ok(Some(edit)) => edit.settings,
-                Ok(None) => DevelopSettings::for_raw(info.as_shot_temp, info.as_shot_tint),
-                Err(e) => return Err(format!("{}: {e}", raw.display())),
-            },
-            Ok(None) => DevelopSettings::for_raw(info.as_shot_temp, info.as_shot_tint),
-            Err(e) => return Err(format!("{}: {e}", raw.display())),
-        },
+    let saved = match settings {
+        Some(s) => Some(s.clone()),
+        None => {
+            let xmp = crate::sidecar::read(raw).map_err(|e| format!("{}: {e}", raw.display()))?;
+            xmp.as_deref().map(crate::sidecar::edit).transpose().map_err(|e| format!("{}: {e}", raw.display()))?.flatten().map(|edit| edit.settings)
+        }
     };
+    let bytes = fs::read(raw).map_err(|e| format!("{}: {e}", raw.display()))?;
+    let profile = saved.as_ref().map_or(Profile::Camera, Profile::of);
+    let crate::raw::Loaded { image: full, info, camera, .. } = crate::raw::load(&bytes, usize::MAX, profile)?;
+    let dev_settings = saved.unwrap_or_else(|| look::fresh(info.as_shot_temp, info.as_shot_tint));
 
-    let image = render(&full, &info, &dev_settings)?;
+    let image = render(&full, &info, &camera, &dev_settings)?;
     let tiff_bytes = tiff(&image)?;
 
     fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
@@ -141,7 +140,7 @@ mod tests {
             *p = [x * 1.5, x * 1.2, x];
         }
         let info = SourceInfo { raw: true, ..Default::default() };
-        let image = render(&src, &info, &DevelopSettings::default()).unwrap();
+        let image = render(&src, &info, &Camera::default(), &DevelopSettings::default()).unwrap();
         assert_eq!((image.width, image.height, image.samples.len()), (64, 48, 64 * 48 * 3));
         // dark to bright along each row, the whole range used
         let row: Vec<u16> = image.samples[..64 * 3].chunks(3).map(|p| p[1]).collect();
@@ -164,11 +163,11 @@ mod tests {
         let info = SourceInfo::default();
         let mut settings = DevelopSettings::default();
         crate::crop::set_aspect(&mut settings, (60.0, 40.0), crate::crop::Aspect::Ratio(1, 1));
-        let square = render(&src, &info, &settings).unwrap();
+        let square = render(&src, &info, &Camera::default(), &settings).unwrap();
         assert_eq!((square.width, square.height), (40, 40));
         crate::crop::reset(&mut settings);
         crate::crop::turn(&mut settings, true);
-        let turned = render(&src, &info, &settings).unwrap();
+        let turned = render(&src, &info, &Camera::default(), &settings).unwrap();
         assert_eq!((turned.width, turned.height), (40, 60));
     }
 
@@ -219,7 +218,7 @@ mod tests {
             assert_eq!(fs::read(&target).unwrap(), dummy);
 
             // 3. The sidecar's edit is what's rendered.
-            let mut edited_settings = DevelopSettings::for_raw(6500.0, 0.0);
+            let mut edited_settings = look::fresh(6500.0, 0.0);
             edited_settings.light.exposure = -2.0;
             crate::sidecar::update(&raw_path, |xmp| crate::sidecar::with_edit(xmp, &crate::sidecar::Edit::new(edited_settings.clone()))).unwrap();
 
@@ -230,8 +229,8 @@ mod tests {
             let tiff::decoder::DecodingResult::U16(edit_samples) = decoder.read_image().unwrap() else { panic!("not 16-bit") };
             assert_ne!(edit_samples, default_samples);
 
-            let (full, info) = crate::raw::load(&bytes, usize::MAX).unwrap();
-            let expected_image = render(&full, &info, &edited_settings).unwrap();
+            let crate::raw::Loaded { image: full, info, camera, .. } = crate::raw::load(&bytes, usize::MAX, Profile::Camera).unwrap();
+            let expected_image = render(&full, &info, &camera, &edited_settings).unwrap();
             assert_eq!(edit_samples, expected_image.samples);
 
             // 4. A newer process version is refused.
