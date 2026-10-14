@@ -1022,7 +1022,7 @@ impl App {
         self.disk_problems();
         if !ctx.egui_wants_keyboard_input() && self.choosing.is_none() {
             // The crop tool's own keys first: its X isn't a reject.
-            if self.crop.is_some() {
+            if self.crop.is_some() && !self.legend {
                 self.crop_keys(ctx);
             }
             // Under the legend, only its own key, to put it away.
