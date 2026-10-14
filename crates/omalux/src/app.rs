@@ -1591,6 +1591,14 @@ mod tests {
                 self.frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
             }
         }
+
+        /// A right-click: what opens a menu.
+        fn right_click(&mut self, at: egui::Pos2) {
+            let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Modifiers::NONE };
+            self.frame(vec![Event::PointerMoved(at), button(true)]);
+            self.frame(vec![button(false)]);
+            self.frame(vec![]);
+        }
     }
 
     fn texts(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
@@ -3261,6 +3269,22 @@ mod tests {
         let mut h = Harness::new(&[]);
         h.frame(vec![]);
         assert!(h.app.display.is_none());
+    }
+
+    #[test]
+    fn a_right_click_in_the_filmstrip_goes_to_the_frame_and_keeps_a_selection_its_in() {
+        let folder = Folder::new("right clicks", &[1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.frame(vec![]);
+        let cell = |h: &Harness, index: usize| h.app.filmstrip.cells.iter().find(|(i, _)| *i == index).map(|(_, r)| r.center()).expect("filmstrip cell");
+        h.right_click(cell(&h, 1));
+        assert_eq!(h.app.shoot.as_ref().unwrap().current(), 1);
+        h.click_with(cell(&h, 2), Modifiers::COMMAND);
+        h.right_click(cell(&h, 1));
+        assert_eq!((h.app.shoot.as_ref().unwrap().current(), h.app.shoot.as_ref().unwrap().selection()), (1, vec![1, 2]));
+        h.right_click(cell(&h, 0));
+        assert_eq!((h.app.shoot.as_ref().unwrap().current(), h.app.shoot.as_ref().unwrap().selection()), (0, vec![]));
     }
 
     #[test]
