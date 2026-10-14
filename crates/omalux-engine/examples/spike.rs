@@ -132,7 +132,11 @@ fn spike(path: &Path, out: Option<&Path>, gpu: bool, totals: &mut Totals) -> Res
         "  decode: {t_preview:.0} ms for the {PREVIEW_EDGE} px source (raw {:.0}, camera match {:.0}, bin {:.0}, finish {:.0}), {t_full:.0} ms full size ({}×{})",
         steps.decode, steps.look, steps.demosaic, steps.finish, full.width, full.height
     );
-    let look = if info.camera_tone.is_some() { "fitted to the camera's JPEG" } else { "none fitted (neutral fallback)" };
+    let look = match (shot.fixed, info.camera_tone.is_some()) {
+        (true, _) => "its camera's profile",
+        (false, true) => "fitted to the camera's JPEG",
+        (false, false) => "none fitted (neutral fallback)",
+    };
     let wb = if info.relative_wb { "relative".to_owned() } else { format!("{:.0} K / {:+.0}", info.as_shot_temp, info.as_shot_tint) };
     println!("  camera match: {look}; white balance as shot {wb}; lens data {}", if info.lens.is_some() { "found" } else { "none" });
 

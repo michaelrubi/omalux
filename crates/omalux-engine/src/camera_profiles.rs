@@ -34,7 +34,11 @@ const VERSION: u32 = 1;
 const MAX_FILE: u64 = 4 << 20;
 
 /// Profiles built into OmaLux: `(model, style, JSON)`.
-pub const BUNDLED: &[(&str, &str, &str)] = &[];
+///
+/// The ILCE-7M3's Standard is fitted over Michael's four shoots of 2026 (1376 photos on the FE 35 and 85 mm f/1.8,
+/// all with DRO Auto, so its tone curve is Sony's own without DRO). There's none for Vivid yet: he has shot nothing
+/// in it, and a frame in a style without a profile gets the look fitted to its own JPEG.
+pub const BUNDLED: &[(&str, &str, &str)] = &[("ILCE-7M3", "Standard", include_str!("../assets/camera-profiles/ILCE-7M3-Standard.json"))];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CameraProfile {
