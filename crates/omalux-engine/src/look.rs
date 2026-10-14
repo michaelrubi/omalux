@@ -12,7 +12,8 @@
 //!   puts it back under the Shadows slider, which stays at 0.
 //! - **HDR** is Highlights down and Shadows up together, by one amount, on
 //!   the pipeline's local tone mapping. Its own Highlights and Shadows give
-//!   either end more of it, or less, than the amount.
+//!   either end more of it, or less, than the amount, darker to the left
+//!   and brighter to the right as Light's are.
 //!
 //! None of it is a stage of its own: [`effective`] gives the settings and
 //! the source facts the pipeline is handed, as Lightcraft's own profiles
@@ -143,7 +144,10 @@ pub fn effective<'a>(settings: &'a DevelopSettings, info: &'a SourceInfo, camera
     let profile = Profile::of(settings);
     let lift = if profile == Profile::Camera { camera.lift } else { 0.0 };
     let hdr = |side: f64| (settings.light.hdr + side).clamp(0.0, 100.0);
-    let (highlights, shadows) = (hdr(settings.light.hdr_highlights), hdr(settings.light.hdr_shadows));
+    // Both read as brightness, as Light's sliders do: HDR's Highlights to
+    // the left holds the highlights back more, its Shadows to the right
+    // lifts the shadows more.
+    let (highlights, shadows) = (hdr(-settings.light.hdr_highlights), hdr(settings.light.hdr_shadows));
     let ca = settings.optics.remove_ca && profile_corrects_ca(settings, info);
     let settings = if lift == 0.0 && highlights == 0.0 && shadows == 0.0 && !ca {
         Cow::Borrowed(settings)
@@ -236,14 +240,17 @@ mod tests {
             let folded = effective(settings, &info, &Camera::default()).0;
             (folded.light.highlights, folded.light.shadows, folded.light.hdr_highlights, folded.light.hdr_shadows)
         };
-        (settings.light.hdr, settings.light.hdr_highlights, settings.light.hdr_shadows) = (50.0, 30.0, -20.0);
+        // Left darkens and right brightens, as Light's Highlights and Shadows.
+        (settings.light.hdr, settings.light.hdr_highlights, settings.light.hdr_shadows) = (50.0, -30.0, -20.0);
         assert_eq!(folded(&settings), (-80.0, 30.0, 0.0, 0.0));
-        (settings.light.hdr_highlights, settings.light.hdr_shadows) = (80.0, -90.0);
+        settings.light.hdr_highlights = 30.0;
+        assert_eq!(folded(&settings).0, -20.0);
+        (settings.light.hdr_highlights, settings.light.hdr_shadows) = (-80.0, -90.0);
         assert_eq!(folded(&settings), (-100.0, 0.0, 0.0, 0.0), "each end between none and all of it");
         // Either end on its own, with no amount.
-        (settings.light.hdr, settings.light.hdr_highlights, settings.light.hdr_shadows) = (0.0, 0.0, 40.0);
-        assert_eq!(folded(&settings), (0.0, 40.0, 0.0, 0.0));
-        settings.light.hdr_shadows = -40.0;
+        (settings.light.hdr, settings.light.hdr_highlights, settings.light.hdr_shadows) = (0.0, -25.0, 40.0);
+        assert_eq!(folded(&settings), (-25.0, 40.0, 0.0, 0.0));
+        (settings.light.hdr_highlights, settings.light.hdr_shadows) = (25.0, -40.0);
         assert!(matches!(effective(&settings, &info, &Camera::default()).0, Cow::Borrowed(_)), "nothing below none");
     }
 

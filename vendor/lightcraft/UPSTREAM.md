@@ -68,7 +68,8 @@ upstream.
   go there.
 - **`light.hdrHighlights`, `light.hdrShadows`** (2026-10-14): two more
   amounts beside `light.hdr` (-100 to 100, not written while they're 0),
-  each moving how much of HDR goes to its end of the range, with their
+  each moving how much of HDR goes to its end of the range (darker to
+  the left and brighter to the right, as Light's sliders), with their
   rows in the control table. Same files, same reasons; `look::effective`
   folds them in with HDR.
 

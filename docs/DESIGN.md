@@ -547,7 +547,8 @@ change to the vendored crates (`UPSTREAM.md`). Fusion is ported
 renders, not in the pipeline.
 
 HDR's Highlights and Shadows (2026-10-14, Michael's ask for more control)
-move either end off the Amount: Highlights +30 at an Amount of 50 holds
+move either end off the Amount, darker to the left and brighter to the
+right as Light's sliders are: Highlights −30 at an Amount of 50 holds
 the highlights back as HDR 80 would and lifts the shadows as 50, each
 end between none and all of it. At 0 they're not written, so an edit
 from before renders as it did. They're shown, not behind an "advanced"
