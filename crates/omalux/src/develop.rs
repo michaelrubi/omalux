@@ -37,7 +37,8 @@ pub struct PanelOut {
     pub remove_ca: Option<bool>,
 }
 
-fn heading(ui: &mut Ui, theme: &Theme, title: &str) -> egui::Rect {
+/// A panel's title, and the row it's in, for what goes at its right.
+pub fn heading(ui: &mut Ui, theme: &Theme, title: &str) -> egui::Rect {
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
     ui.painter().text(row.left_center() + vec2(4.0, 2.0), Align2::LEFT_CENTER, title, FontId::proportional(13.5), theme.dark_foreground);
     row
