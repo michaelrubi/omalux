@@ -3,8 +3,10 @@
 //! of one frame, each developed from the same raw, mixed so that every
 //! part comes from the exposure that shows it best.
 //!
-//! Ported from `crates/omapix-engine/src/fusion.rs` (Mertens, Kautz and Van
-//! Reeth).
+//! Exposure fusion is Mertens, Kautz and Van Reeth's. Ported from Omapix's
+//! Merge to HDR (`crates/omapix-engine/src/fusion.rs`, GPL-3.0-or-later):
+//! its fusing only, on float images, with pixels that aren't finite where
+//! it had clear ones.
 
 use rayon::prelude::*;
 

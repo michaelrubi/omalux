@@ -14,11 +14,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use lightcraft_color::Mat3;
-use lightcraft_raw::profile::{HsvTable, ProfileLook, ToneCurve};
 use lightcraft_raw::ColorData;
-use lightcraft_tiff::{tags, Tiff};
+use lightcraft_raw::profile::{HsvTable, ProfileLook, ToneCurve};
+use lightcraft_tiff::{Tiff, tags};
 
-/// Largest profile file read (Adobe DCP files are rarely over 1 MB; limits memory use on corrupt files).
+/// Largest profile file read (Adobe's are rarely over 1 MB).
 const MAX_FILE: usize = 8 << 20;
 
 /// A camera profile read from a `.dcp` file.
@@ -119,6 +119,10 @@ pub fn parse(bytes: &[u8]) -> Result<Dcp, String> {
 
 /// Read a profile from a `.dcp` file.
 pub fn load(path: &Path) -> Result<Dcp, String> {
+    let size = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?.len();
+    if size > MAX_FILE as u64 {
+        return Err(format!("{}: {size} bytes is too large for a DCP profile", path.display()));
+    }
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -159,8 +163,7 @@ fn find_in(dir: &Path, model: &str, style: &str) -> Option<Dcp> {
     if model.is_empty() || style.is_empty() {
         return None;
     }
-    let style_clean = style.strip_prefix("Camera ").or_else(|| style.strip_prefix("camera ")).unwrap_or(style);
-    let target_name = format!("camera {style_clean}").to_lowercase();
+    let target_name = format!("camera {style}").to_lowercase();
     let target_model = model.to_lowercase();
 
     let mut paths = Vec::new();
