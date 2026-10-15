@@ -267,6 +267,9 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
     // (removed before the camera look's binned sensor proxy too, which needs an empty `OpcodeList3`).
     let info = raw.info();
     let lens = crate::lens_profiles::for_raw(&info, bytes, crate::lens_profiles::DEFAULT);
+    // The full-size frame's long edge: noise reduction's radii are in its pixels, so a smaller
+    // development looks like the full-size one scaled down (Lightcraft's catalogue gives it the same).
+    let native_long = Some(info.developed_size()).map(|(w, h)| w.max(h)).filter(|&n| n > 0);
     raw.opcodes.list3.retain(|op| !op.is_lens_correction());
     // Which scale white balance is edited on, and the as-shot white on it, from the file's own colour tags or
     // the camera's measured matrices
@@ -342,7 +345,7 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
         camera_tone,
         mattes: None,
         local_tone: None,
-        native_long: None,
+        native_long,
     };
     Ok(Loaded { image: img, info, camera, timings })
 }
@@ -488,6 +491,10 @@ pub(crate) mod tests {
             // Its spectral matrices put white balance on a Kelvin scale (as shot, not 6500 / 0).
             assert!(!info.relative_wb && (2500.0..10000.0).contains(&info.as_shot_temp), "{name}: {info:?}");
             assert!(timings.decode > 0.0 && timings.demosaic > 0.0, "{name}: {timings:?}");
+            // Noise reduction is sized to the full frame, which is what a full-size load is.
+            let full = load(&bytes, usize::MAX, Profile::Camera).unwrap();
+            assert_eq!(info.native_long, Some(full.image.width.max(full.image.height)), "{name}");
+            assert_eq!(full.info.native_long, info.native_long, "{name}");
             let preview = embedded_preview_srgb(&bytes, 512).unwrap();
             assert_eq!(preview.width.max(preview.height), 512, "{name}");
         }
