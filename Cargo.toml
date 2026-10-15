@@ -5,7 +5,7 @@ members = ["crates/*", "vendor/lightcraft/crates/*"]
 # Lightcraft's, which its vendored crates inherit. OmaLux's own crates set
 # theirs (GPL-3.0-or-later) in their own manifests.
 [workspace.package]
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
@@ -29,6 +29,8 @@ lightcraft-heif = { path = "vendor/lightcraft/crates/heif" }
 lightcraft-denoise-core = { path = "vendor/lightcraft/crates/denoise-core" }
 lightcraft-denoise = { path = "vendor/lightcraft/crates/denoise", default-features = false }
 lightcraft-lensdb = { path = "vendor/lightcraft/crates/lensdb" }
+lightcraft-faces = { path = "vendor/lightcraft/crates/faces" }
+lightcraft-testkit = { path = "vendor/lightcraft/crates/testkit" }
 
 # What the vendored crates use, as Lightcraft's workspace has it at the
 # pinned commit.
@@ -61,6 +63,7 @@ avif-serialize = "0.8.6"
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
 pollster = "1"
 web-time = "1"
+dhat = "0.3"
 
 # Lightcraft's, for its crates; OmaLux's own crates don't opt in.
 [workspace.lints.rust]

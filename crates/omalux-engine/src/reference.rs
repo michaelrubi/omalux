@@ -8,6 +8,11 @@
 //!
 //!     OMALUX_WRITE_REFERENCE=1 cargo test -p omalux-engine reference
 //!
+//! Except for a change that only reaches renders smaller than the frame,
+//! since what the process version keeps is the export: noise reduction
+//! sized to the full frame (2026-10-15) moved every reference here and no
+//! export, and the references were written again without a bump.
+//!
 //! An edit made under an older process version keeps rendering as it did:
 //! the references of process version 1's looks (fitted to each frame's own
 //! JPEG) are the ones M1 wrote, checked against still, beside the ones of
