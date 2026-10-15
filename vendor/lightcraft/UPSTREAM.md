@@ -6,9 +6,11 @@ taken whole. See "Built on Lightcraft" in `docs/DESIGN.md` for why and how
 they're kept.
 
 - **Upstream:** https://github.com/storytold/lightcraft
-- **Pinned at:** `701f78ea` ("Release 0.7.1: fix the macOS build"),
-  2026-10-12. Workspace version 0.7.1.
-- **Vendored on:** 2026-10-12.
+- **Pinned at:** `0da998f2` ("Merge pull request #1867 from
+  storytold/claude/integrate-batch-40"), 2026-10-15. Workspace version
+  0.8.0.
+- **Vendored on:** 2026-10-12 at `701f78ea` (0.7.1), re-synced on
+  2026-10-15 (see "Re-syncs" below).
 
 ## What's here
 
@@ -23,10 +25,15 @@ they're kept.
 | `crates/heif` | L1 | Not in DESIGN.md's list: `codecs` names it, as an optional dependency and in its tests. OmaLux's build leaves the feature off |
 | `crates/denoise`, `denoise-core` | | Raw AI denoise; kept or dropped by M0's denoise spike |
 | `crates/lensdb` | | lensfun's database; kept or dropped by M0's lens spike |
+| `crates/faces` | L1 | Not in DESIGN.md's list: `gpu` depends on it (face networks on the GPU) since the re-sync. OmaLux never runs it |
+| `crates/testkit` | | Not in DESIGN.md's list: a dev-dependency of `raw`, `codecs`, `gpu` and `faces` since the re-sync (a test that skips says why) |
 
 Also `LICENSE-MIT`, `LICENSE-APACHE` and `NOTICE` from upstream's root,
 `clippy.toml` and `rustfmt.toml` (so clippy and rustfmt treat these crates
-as upstream does), and `docs/raf-corpus.sha256` (a test in `raw` reads it).
+as upstream does), and three files `raw`'s tests read from upstream's
+tree, kept at their paths: `docs/raf-corpus.sha256`,
+`docs/raw/coverage-sweep.tsv`, and `xtask/src/main.rs` (only as the
+corpus manifest a test checks the Sony pins against; it isn't built).
 
 Not vendored: everything else (`catalog`, `engine`, `ui-egui`, `mcp`, the
 apps, `xtask`, `assets`). Single functions lifted from `engine` into
@@ -72,6 +79,25 @@ upstream.
   the left and brighter to the right, as Light's sliders), with their
   rows in the control table. Same files, same reasons; `look::effective`
   folds them in with HDR.
+
+## Re-syncs
+
+- **2026-10-15, `701f78ea` to `0da998f2`** (955 commits, 126 of them in
+  the vendored crates; looked through for the ILCE-7M3 above all, the rest
+  taken whole). What bears on OmaLux: never-crash fixes in raw decoding,
+  TIFF reading, the demosaic, the blur and defringe; AHD 1.7× faster with
+  the same pixels (upstream's measure, on a 64 MP raw); Sony's lens tables
+  (shading, CA, distortion) decoded into `RawImage::lens_metadata` but
+  applied only for the ILCE-7RM4A, so OmaLux's own correction
+  (`omalux_engine::sony_lens`) is still the only one on an ILCE-7M3;
+  `ControlSpec::position` and `value_at`, Lightroom's measured Temp track;
+  and `SourceInfo::native_long`, which sizes noise reduction to the full
+  frame. The local changes went back on as they were. OmaLux's reference
+  renders came out unchanged (with `native_long` unset). Also new and not
+  used: ARW6 (newer bodies' format) decoding faster, Nikon, Canon, Pentax,
+  Olympus and Fujifilm coverage, Kelvin from Sony's presets for bodies
+  without measured matrices (the ILCE-7M3 has them), DNG writing, print
+  and face code.
 
 ## Re-syncing
 

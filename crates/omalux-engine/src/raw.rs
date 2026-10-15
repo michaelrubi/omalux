@@ -342,6 +342,7 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
         camera_tone,
         mattes: None,
         local_tone: None,
+        native_long: None,
     };
     Ok(Loaded { image: img, info, camera, timings })
 }
