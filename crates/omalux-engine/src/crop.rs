@@ -5,7 +5,7 @@
 //! width and height, never reaching outside the picture (Lightroom's
 //! Constrain to Image). What each gesture does to it is ported from
 //! Lightcraft's `crop.*` commands (`engine/src/cmd/develop.rs` at
-//! `701f78e`), with one difference: a 90° turn takes the crop round with
+//! `0da998f2`), with one difference: a 90° turn takes the crop round with
 //! the picture, as Lightroom's does, where Lightcraft's leaves the
 //! rectangle where it was on screen.
 //!
@@ -86,8 +86,11 @@ pub fn swap_aspect(settings: &mut DevelopSettings, (w, h): (f64, f64)) {
 }
 
 /// Straighten by `angle` degrees, clockwise: the crop is kept if it still
-/// fits inside the turned picture, else it's the largest of its shape that
-/// does.
+/// fits inside the turned picture, else it's shrunk about its centre,
+/// keeping its shape, until it does. The whole frame (or a crop a turn
+/// shrank to the largest of its shape) stays the largest that fits, and
+/// grows back as the angle returns to 0; a crop of the user's own never
+/// grows (`CropGeometry::with_angle`).
 pub fn straighten(settings: &mut DevelopSettings, (w, h): (f64, f64), angle: f64) {
     let angle = if angle.is_finite() { angle.clamp(-45.0, 45.0) } else { 0.0 };
     settings.crop.geometry = settings.crop.geometry.with_angle((angle * 100.0).round() / 100.0, w, h);
@@ -197,6 +200,36 @@ mod tests {
         assert_eq!(s.crop.geometry.angle, 45.0, "no further than Lightroom's 45°");
         straighten(&mut s, LANDSCAPE, f64::NAN);
         assert_eq!(s.crop.geometry.angle, 0.0);
+    }
+
+    #[test]
+    fn turning_a_crop_dragged_in_from_a_corner_shrinks_it_about_its_centre() {
+        // Lightcraft's #1794: such a crop still touches two edges, and
+        // turning it swapped it for the largest crop of its shape.
+        let mut s = DevelopSettings::default();
+        let start = s.crop.geometry;
+        drag(&mut s, LANDSCAPE, start, CropHandle::BottomRight, Point::new(1.0, 1.0), Point::new(0.6, 0.6), true);
+        let made = s.crop.geometry.rect_px(6000.0, 4000.0);
+        assert!(made.width() < 0.7 * 6000.0, "the drag cropped: {made:?}");
+        let mut turned = s.clone();
+        for angle in [0.25, 1.0, 2.5, 5.0, -3.0] {
+            straighten(&mut turned, LANDSCAPE, angle);
+            let r = turned.crop.geometry.rect_px(6000.0, 4000.0);
+            assert!(turned.crop.geometry.is_within_image(6000.0, 4000.0), "{angle}°: inside the picture");
+            assert!(r.width() <= made.width() + 1e-6, "{angle}°: no larger than the crop made, {r:?} from {made:?}");
+            assert!(near(r.aspect(), made.aspect()), "{angle}°: its shape");
+        }
+        // The first small turn only trims it, about its own centre.
+        straighten(&mut s, LANDSCAPE, 0.25);
+        let r = s.crop.geometry.rect_px(6000.0, 4000.0);
+        assert!(r.width() > 0.97 * made.width(), "0.25° keeps nearly all of it: {r:?} from {made:?}");
+        assert!((r.center().x - made.center().x).abs() < 1e-6 && (r.center().y - made.center().y).abs() < 1e-6);
+
+        // The whole frame still follows the largest crop, back to all of it at 0°.
+        let mut s = DevelopSettings::default();
+        straighten(&mut s, LANDSCAPE, 5.0);
+        straighten(&mut s, LANDSCAPE, 0.0);
+        assert!(s.crop.geometry.is_identity(), "{:?}", s.crop.geometry);
     }
 
     #[test]

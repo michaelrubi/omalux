@@ -37,7 +37,8 @@ corpus manifest a test checks the Sony pins against; it isn't built).
 
 Not vendored: everything else (`catalog`, `engine`, `ui-egui`, `mcp`, the
 apps, `xtask`, `assets`). Single functions lifted from `engine` into
-OmaLux's own crates say where they came from.
+OmaLux's own crates say where they came from, and the commit they were
+brought up to (`0da998f2`, see "Re-syncs").
 
 ## How OmaLux builds them
 
@@ -97,7 +98,12 @@ upstream.
   used: ARW6 (newer bodies' format) decoding faster, Nikon, Canon, Pentax,
   Olympus and Fujifilm coverage, Kelvin from Sony's presets for bodies
   without measured matrices (the ILCE-7M3 has them), DNG writing, print
-  and face code.
+  and face code. The modules OmaLux lifted from `engine` (`raw.rs` from
+  `files.rs`, `camera_preview.rs`, `camera_profiles.rs`,
+  `lens_profiles.rs`, and `crop.rs` from `cmd/develop.rs`) were brought
+  up to the same commit afterwards, on `lightcraft-engine`, for what
+  bears on the ILCE-7M3 (ROADMAP.md, "Ongoing: keeping up with
+  Lightcraft").
 
 ## Re-syncing
 

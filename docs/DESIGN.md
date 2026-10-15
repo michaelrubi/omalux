@@ -311,6 +311,11 @@ decide whether they stay:
 
 ### What's lifted in part (copied from `engine` and `ui-egui`)
 
+Lifted at `701f78e`. The modules from `engine` were brought up to
+`0da998f2` with the re-sync (2026-10-15), for what bears on the
+ILCE-7M3; each module's header says what it was lifted at and what was
+taken.
+
 - **Camera colour from the camera's JPEG** (`engine/camera_preview.rs`,
   `camera_profiles.rs`): a guarded fit of a matrix, a hue/saturation
   table, a tone curve and a chroma curve to the embedded JPEG, and pooled

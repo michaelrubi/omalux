@@ -18,8 +18,10 @@
 //! hostile file is ignored with a warning. They hold aggregate colour statistics only, never image content.
 //! The `calibrate` example fits them.
 //!
-//! Lifted from Lightcraft (MIT OR Apache-2.0) at `701f78e`, `crates/engine/src/camera_profiles.rs`, with OmaLux's
-//! folder; the Creative Style, the tone curve and the chroma curve are OmaLux's.
+//! Lifted from Lightcraft (MIT OR Apache-2.0) at `701f78e`, `crates/engine/src/camera_profiles.rs`, and brought up
+//! to `0da998f2` (the pairs follow the lens warp the camera applied to its JPEG, `c854e172`; the rest is other
+//! cameras' bundled profiles), with OmaLux's folder; the Creative Style, the tone curve and the chroma curve are
+//! OmaLux's.
 use lightcraft_color::Mat3;
 use lightcraft_pipeline::tone::CameraTone;
 use lightcraft_raw::profile::HsvTable;
@@ -202,10 +204,12 @@ impl Pool {
     /// NEF or RAF without colour matrices, no usable camera JPEG, too little colour); else its model and style.
     pub fn add(&mut self, bytes: &[u8]) -> Result<Option<(String, String)>, String> {
         let mut raw = lightcraft_raw::decode(bytes).map_err(|e| e.to_string())?;
-        // colour only: geometric lens corrections would stop the sensor proxy from binning
+        // colour only: geometric lens corrections would stop the sensor proxy from binning (the pairs still follow
+        // the warp the camera applied to its JPEG)
+        let lens = crate::camera_preview::camera_lens_geometry(&raw, bytes);
         raw.opcodes.list3.retain(|op| !op.is_lens_correction());
         let Some(model) = raw.metadata.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) else { return Ok(None) };
-        let Some(pairs) = crate::camera_preview::profile_pairs(&raw, bytes) else { return Ok(None) };
+        let Some(pairs) = crate::camera_preview::profile_pairs(&raw, bytes, lens.as_ref()) else { return Ok(None) };
         let shot = crate::sony::settings(bytes);
         let key = (model.to_owned(), shot.creative_style.unwrap_or_default());
         let step = pairs.len().div_ceil(PAIRS_PER_FILE).max(1);
