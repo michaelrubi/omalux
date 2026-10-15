@@ -7,9 +7,9 @@
 //! Lifted from Lightcraft's `slider` (`ui-egui/src/widgets.rs` at
 //! `701f78e`, MIT OR Apache-2.0) and restyled to Omarchy's theme, with
 //! its typed values (click the number to type one) and without its
-//! automation ids. One difference from it, for Lightroom's sake: Temp's
-//! track is spaced by ratio, not by Kelvin, so daylight isn't squeezed
-//! into the track's first tenth.
+//! automation ids. Temp's track is Lightroom's, as Lightcraft measured it
+//! (`ControlSpec::position`): 2000 to 7000 K evenly over the left half,
+//! and the rest to 50000 K drawn out logarithmically over the right.
 
 use egui::{
     Align2, Color32, CursorIcon, FontId, Key, Layout, Rect, Sense, Stroke, Ui, UiBuilder, pos2,
@@ -60,24 +60,15 @@ fn track_stops(track: &Track) -> Option<Vec<Color32>> {
     }
 }
 
-/// Where along the track (0 to 1) a value sits. Temp by ratio: each
-/// doubling of the Kelvin takes the same length of track.
+/// Where along the track (0 to 1) a value sits: evenly, but for Temp's
+/// Lightroom scale.
 fn position(spec: &ControlSpec, value: f64) -> f64 {
-    let at = match spec.track {
-        Track::Temp => (value / spec.min).ln() / (spec.max / spec.min).ln(),
-        _ => (value - spec.min) / (spec.max - spec.min).max(1e-9),
-    };
-    at.clamp(0.0, 1.0)
+    spec.position(value)
 }
 
 /// The value at a place along the track, on the control's steps.
 fn value_at(spec: &ControlSpec, at: f64) -> f64 {
-    let at = at.clamp(0.0, 1.0);
-    let value = match spec.track {
-        Track::Temp => spec.min * (spec.max / spec.min).powf(at),
-        _ => spec.min + at * (spec.max - spec.min),
-    };
-    stepped(spec, value)
+    stepped(spec, spec.value_at(at))
 }
 
 fn stepped(spec: &ControlSpec, value: f64) -> f64 {
@@ -300,11 +291,14 @@ mod tests {
     }
 
     #[test]
-    fn temps_track_is_spaced_by_ratio_and_the_rest_evenly() {
+    fn temps_track_is_lightrooms_and_the_rest_even() {
         let temp = find("wb.temp").unwrap();
         assert_eq!((position(temp, 2000.0), position(temp, 50000.0)), (0.0, 1.0));
-        assert!((position(temp, 10000.0) - 0.5).abs() < 1e-9, "the middle of 2000 and 50000 by ratio");
-        assert_eq!(value_at(temp, 0.5), 10000.0);
+        // 7000 K in the middle, and daylight a third of the way along, as in Lightroom
+        assert!((position(temp, 7000.0) - 0.5).abs() < 1e-9);
+        assert!((position(temp, 5400.0) - 0.34).abs() < 0.01);
+        assert_eq!(value_at(temp, 0.5), 7000.0);
+        assert_eq!(value_at(temp, 0.25), 4500.0);
         assert_eq!(value_at(temp, position(temp, 5200.0)), 5200.0);
         let contrast = find("light.contrast").unwrap();
         assert_eq!((position(contrast, 0.0), value_at(contrast, 0.75), value_at(contrast, 2.0)), (0.5, 50.0, 100.0));

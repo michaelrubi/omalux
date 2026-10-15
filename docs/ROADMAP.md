@@ -227,8 +227,10 @@ binary.
   pooled profile. *Done.*
 - **White balance:** As Shot, Temp, Tint (Kelvin, through Lightcraft's
   spectral matrices for the ILCE-7M3), the eyedropper (W). *Done.* Temp's
-  track is spaced by ratio, as Lightroom's is, not by Kelvin as
-  Lightcraft's.
+  track is Lightroom's, as Lightcraft measured it since (2026-10-15):
+  7000 K in the middle, 2000 to 7000 K evenly to its left, logarithmic to
+  50000 K on the right. Spacing it by ratio, as M1 first did, put 7000 K
+  at 0.39 and 20000 K at 0.72 where Lightroom has 0.5 and 0.85.
 - **Light:** Exposure, Contrast, Highlights, Shadows, Whites, Blacks.
   *Done.*
 - **Presence:** Vibrance, Saturation. *Done.*
