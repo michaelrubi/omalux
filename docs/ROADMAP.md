@@ -635,6 +635,44 @@ Lightcraft moves fast. Every so often, and before each milestone:
   they'd help Lightcraft (they're kept clean-room and MIT/Apache so they
   can be).
 
+craft-watch (`~/dev/craft-watch/lightcraft-omalux.md`) lists what
+upstream's new commits might bring, for going through here.
+
+**Re-synced before M6** (2026-10-15, on `lightcraft-sync`): `701f78e` to
+`0da998f2`, 955 commits (see UPSTREAM.md). The vendored crates' fixes are
+in: never-crash hardening in raw decoding, TIFF reading, the demosaic,
+the blur and defringe, and a faster AHD. Taken with them, from
+craft-watch's notes:
+
+- *Done:* Temp's track is Lightroom's, measured by Lightcraft (see M1's
+  white balance).
+- *Done:* noise reduction is sized to the full frame, so the loupe and
+  the filmstrip look like the export scaled down. Exports are unchanged,
+  so the process version stays at 2; the reference renders were written
+  again. *Open:* Michael's own references (`OMALUX_REFERENCE`) will fail
+  until they're written again on the laptop:
+  `OMALUX_WRITE_REFERENCE=1 OMALUX_REFERENCE=path/to/raws cargo test -p omalux-engine reference`.
+- *Next:* lift again what changed upstream in the modules OmaLux lifted
+  from `engine`. Upstream's camera-look colour step is 1.5 to 1.9× faster
+  on full-size raws with the same pixels (`6467d543`), and a full-size
+  source is no longer copied after the colour model (`0d13a7d5`): both
+  are the export and 100% zoom. Its camera look is matched against
+  lens-corrected JPEGs now (`c854e172`), and the ILCE-7M3's JPEGs are
+  lens-compensated, so this bears on the camera match and `calibrate`
+  (re-run `match` after). Turning a crop shrinks it about its centre
+  instead of swapping it for the largest crop (`053b7420`), which
+  `omalux_engine::crop` should be checked against. Raw thumbnails decode
+  the smallest embedded JPEG that covers them (`14e0d128`). And M4's toe
+  fit (`c11764a1`), when there are DRO Off frames.
+- *Later, maybe:* Lightcraft now decodes Sony's lens tables itself
+  (`RawImage::lens_metadata`) but applies them only on the ILCE-7RM4A.
+  OmaLux's own reader stays. M5's measurements of Sony's correction on
+  the ILCE-7M3 against its JPEGs could go upstream with an offer to open
+  its gate for this body.
+- *Not taken:* Dehaze's zoomed proxy (OmaLux has no Dehaze), DNG and
+  HDR-merge writing, spot healing, mask overlays, and export and command
+  fixes in `engine`, whose OmaLux equivalents are its own.
+
 ## Later
 
 From the scoping interview, roughly in the order they were wanted. Most
