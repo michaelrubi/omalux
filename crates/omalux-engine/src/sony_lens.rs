@@ -281,6 +281,30 @@ fn build_vignette(ifd: &Ifd, active: Rect, crop: Rect) -> Option<Opcode> {
 /// [`crate::raw::embedded_lens`] does. `None` for another camera, a raw
 /// without the tables, or tables that can't be trusted.
 pub fn corrections(bytes: &[u8], raw: &lightcraft_raw::RawInfo) -> Option<EmbeddedLens> {
+    let (warp, vignette) = opcodes(bytes, raw)?;
+    // The opcodes are centred and normalised on the DNG default crop, in active-area coordinates, as Lightcraft's
+    // are; the image keeps the decoder's own crop, which `embedded_lens` re-expresses them for.
+    let mut raw_clone = raw.clone();
+    raw_clone.opcodes.list3.clear();
+    if let Some(w) = warp {
+        raw_clone.opcodes.list3.push(w);
+    }
+    if let Some(v) = vignette {
+        raw_clone.opcodes.list3.push(v);
+    }
+    crate::raw::embedded_lens(&raw_clone)
+}
+
+/// The distortion Sony's tables describe, as the camera applies it to its JPEG when its Distortion Comp. is on:
+/// what the camera match pairs the sensor with that JPEG through ([`crate::camera_preview::proxies`]). `None` as
+/// for [`corrections`], or without a distortion table.
+pub(crate) fn geometry(bytes: &[u8], raw: &lightcraft_raw::RawInfo) -> Option<crate::camera_preview::LensGeometry> {
+    let (warp, _) = opcodes(bytes, raw)?;
+    crate::camera_preview::lens_geometry(&[warp?])
+}
+
+/// Sony's tables as DNG opcodes, `(WarpRectilinear, FixVignetteRadial)`: at least one of them.
+fn opcodes(bytes: &[u8], raw: &lightcraft_raw::RawInfo) -> Option<(Option<Opcode>, Option<Opcode>)> {
     let tiff = Tiff::parse(bytes).ok()?;
     let ifd0 = tiff.ifds.first()?;
     let model = raw.metadata.model.clone().or_else(|| ifd0.string(lightcraft_tiff::tags::MODEL))?;
@@ -300,21 +324,7 @@ pub fn corrections(bytes: &[u8], raw: &lightcraft_raw::RawInfo) -> Option<Embedd
 
     let warp = build_warp(ifd, active, crop);
     let vignette = build_vignette(ifd, active, crop);
-    if warp.is_none() && vignette.is_none() {
-        return None;
-    }
-
-    // The opcodes are centred and normalised on the DNG default crop, in active-area coordinates, as Lightcraft's
-    // are; the image keeps the decoder's own crop, which `embedded_lens` re-expresses them for.
-    let mut raw_clone = raw.clone();
-    raw_clone.opcodes.list3.clear();
-    if let Some(w) = warp {
-        raw_clone.opcodes.list3.push(w);
-    }
-    if let Some(v) = vignette {
-        raw_clone.opcodes.list3.push(v);
-    }
-    crate::raw::embedded_lens(&raw_clone)
+    (warp.is_some() || vignette.is_some()).then_some((warp, vignette))
 }
 
 #[cfg(test)]
@@ -460,6 +470,7 @@ mod tests {
         let lens = corrections(&bytes, &info).expect("vignette still found");
         assert!(lens.warp.is_none(), "warp should be None for all-zero distortion");
         assert!(lens.vignette.is_some(), "vignette should still be Some");
+        assert!(geometry(&bytes, &info).is_none(), "no geometry without a warp");
 
         // All zero vignette table: vignette is None, warp is Some
         let zero_vig = std::iter::once(16).chain(std::iter::repeat_n(0, 16)).collect::<Vec<_>>();
@@ -467,6 +478,10 @@ mod tests {
         let lens = corrections(&bytes, &info).expect("warp still found");
         assert!(lens.warp.is_some(), "warp should still be Some");
         assert!(lens.vignette.is_none(), "vignette should be None for all-zero vignetting");
+        // the camera match's geometry is the warp's green plane, centred as the warp is
+        let geometry = geometry(&bytes, &info).expect("a geometry with a distortion table");
+        let Some((Some(Opcode::WarpRectilinear { planes, center }), _)) = opcodes(&bytes, &info) else { panic!("a warp") };
+        assert_eq!(Some(geometry), crate::camera_preview::lens_geometry(&[Opcode::WarpRectilinear { planes: vec![planes[1]], center }]));
 
         // Both all zero: corrections returns None
         let zero_dist = std::iter::once(16).chain(std::iter::repeat_n(0, 16)).collect::<Vec<_>>();

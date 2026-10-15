@@ -652,18 +652,59 @@ craft-watch's notes:
   again. *Open:* Michael's own references (`OMALUX_REFERENCE`) will fail
   until they're written again on the laptop:
   `OMALUX_WRITE_REFERENCE=1 OMALUX_REFERENCE=path/to/raws cargo test -p omalux-engine reference`.
-- *Next:* lift again what changed upstream in the modules OmaLux lifted
-  from `engine`. Upstream's camera-look colour step is 1.5 to 1.9× faster
-  on full-size raws with the same pixels (`6467d543`), and a full-size
-  source is no longer copied after the colour model (`0d13a7d5`): both
-  are the export and 100% zoom. Its camera look is matched against
-  lens-corrected JPEGs now (`c854e172`), and the ILCE-7M3's JPEGs are
-  lens-compensated, so this bears on the camera match and `calibrate`
-  (re-run `match` after). Turning a crop shrinks it about its centre
-  instead of swapping it for the largest crop (`053b7420`), which
-  `omalux_engine::crop` should be checked against. Raw thumbnails decode
-  the smallest embedded JPEG that covers them (`14e0d128`). And M4's toe
-  fit (`c11764a1`), when there are DRO Off frames.
+- *Done* (2026-10-15, on `lightcraft-engine`): the modules lifted from
+  `engine` (`raw`, `camera_preview`, `camera_profiles`, `lens_profiles`,
+  `crop`) brought up to `0da998f2`, for the ILCE-7M3; each one's header
+  says what was taken. The reference renders are unchanged, so the
+  process version stays at 2.
+  - The camera look's colour step runs sixteen pixels at a time
+    (`6467d543`), with the same bits (a test compares every kind of
+    pixel with the one-by-one path). On a full-size frame (24 MP, the
+    Standard profile's table), best of 27 runs: 1.79 s to 0.63 s on one
+    thread, 0.47–0.51 to 0.17–0.18 s on four, 137–161 to 67–100 ms on all twenty
+    (the machine busy with other builds). A full-size decode no longer
+    copies its picture to fit it (`0d13a7d5`): 288 MB and about 40 ms
+    less. The `spike` example's own times moved within their noise on
+    that machine (full-size decode, best of two runs: 540 to 515 ms and
+    673 to 557 ms; export 2.25 s to 2.48 s).
+  - The camera look matched through the lens warp the camera applied to
+    its JPEG (`c854e172`). An ILCE-7M3's raw carries no warp of its own,
+    so OmaLux's is built from Sony's tables (`sony_lens::geometry`); the
+    warped sensor proxy is taken where it lines up with the JPEG better.
+    On the corpus raws (Distortion Comp. Off) it never does. On copies
+    of 23 of Michael's frames (lens compensation Auto) it lines up much
+    better on the FE 35 (0.47–0.69 to 0.83–0.87 at the profile's 192 px)
+    and barely on the FE 85 (0.005 at most). It's used for `calibrate`'s
+    pairs only: through it the look fitted to a frame changed on 12 of
+    the 23 and DRO's lift by 2 to 5 on 7, which would change the export
+    of edits under both process versions. *Next:* process version 3,
+    with the per-frame fit and the lift through it, the Standard profile
+    fitted again through it, and `4ddbb5a3` (below).
+  - `match` on the corpus raws gives the same before and after: fitted
+    10.04, profile and camera 10.40 (mean ΔE2000). That's far from
+    M4's numbers because since M5 a fresh raw opens with profile
+    corrections on and these JPEGs have none: with them off it's 3.76
+    and 4.33. *Open:* `match` should develop a frame whose JPEG isn't
+    corrected without them.
+  - Turning a crop shrinks it about its centre, keeping its shape,
+    instead of swapping it for the largest crop of that shape
+    (`053b7420`, in the vendored `geom` since the re-sync; a test now
+    has it). The whole frame still follows the largest crop and grows
+    back towards 0°; a crop of the user's own never grows. That's
+    Lightroom's Constrain to Image as far as known. *Open, for Michael
+    by hand:* a crop dragged in from a corner and turned out and back in
+    one drag stays at its smaller size (Lightcraft's does too); whether
+    Lightroom's grows back.
+  - *Not taken:* the smallest embedded JPEG that covers a thumbnail
+    (`14e0d128`): an ILCE-7M3's ARW holds only its 1616 × 1080 preview
+    and a 160 × 120 thumbnail, so it's always the 1616. The frame's crop
+    factor for lensfun's profile in an in-camera crop mode (`4ddbb5a3`):
+    an APS-C frame's corners get the full frame's correction now, and
+    fixing it changes the export of such an edit, so it waits for
+    process version 3. Everything else in those files since `701f78e`
+    is other cameras, DNGs, merges, previews read from a catalogue, or
+    DNG writing.
+- *Waiting:* M4's toe fit (`c11764a1`), for when there are DRO Off frames.
 - *Later, maybe:* Lightcraft now decodes Sony's lens tables itself
   (`RawImage::lens_metadata`) but applies them only on the ILCE-7RM4A.
   OmaLux's own reader stays. M5's measurements of Sony's correction on
