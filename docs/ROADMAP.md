@@ -649,9 +649,8 @@ craft-watch's notes:
 - *Done:* noise reduction is sized to the full frame, so the loupe and
   the filmstrip look like the export scaled down. Exports are unchanged,
   so the process version stays at 2; the reference renders were written
-  again. *Open:* Michael's own references (`OMALUX_REFERENCE`) will fail
-  until they're written again on the laptop:
-  `OMALUX_WRITE_REFERENCE=1 OMALUX_REFERENCE=path/to/raws cargo test -p omalux-engine reference`.
+  again. No references of Michael's own frames (`OMALUX_REFERENCE`) had
+  been made yet, so none needed writing again.
 - *Done* (2026-10-15, on `lightcraft-engine`): the modules lifted from
   `engine` (`raw`, `camera_preview`, `camera_profiles`, `lens_profiles`,
   `crop`) brought up to `0da998f2`, for the ILCE-7M3; each one's header
