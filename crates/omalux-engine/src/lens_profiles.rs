@@ -8,7 +8,9 @@
 //! nothing changes. Sony's own corrections ([`crate::sony_lens`]) are the other [`Source`], and the default ([`DEFAULT`]).
 //!
 //! Lifted from Lightcraft (MIT OR Apache-2.0) at `701f78e`, `crates/engine/src/lens_profiles.rs`, with OmaLux's
-//! folder and the choice of source.
+//! folder and the choice of source; checked against `0da998f2`, with nothing taken: Nikon's non-square pixels
+//! (`2dad18d2`) are another camera's, and the frame's crop factor in an in-camera crop mode (`4ddbb5a3`) would
+//! change the export of an APS-C frame corrected from lensfun's, so it waits for a process version (see ROADMAP.md).
 use std::path::PathBuf;
 use std::sync::OnceLock;
 

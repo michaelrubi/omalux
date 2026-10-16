@@ -306,10 +306,15 @@ decide whether they stay:
 | `pipeline` | The CPU pipeline: scene-referred, linear Rec. 2020 float; white balance, Light with edge-aware local tone mapping, Presence, Detail (sharpening, noise reduction), Optics (distortion, vignetting, lateral CA auto and manual, defringe), crop, straighten and Upright, auto tone and white balance, output |
 | `gpu` | The same stages as wgpu compute shaders, checked against the CPU pipeline to within 1/255, with a CPU fallback and careful backend selection |
 | `scenes` | Procedural test photos, for tests that can't ship real raws |
-| `inpaint`, `heif` | Not wanted for themselves: `pipeline` needs `inpaint` (spot healing), and `codecs` names `heif` (its feature stays off) |
+| `inpaint`, `heif`, `faces`, `testkit` | Not wanted for themselves: `pipeline` needs `inpaint` (spot healing), `codecs` names `heif` (its feature stays off), `gpu` depends on `faces` (face networks on the GPU, never run here), and the crates' tests on `testkit` |
 | `denoise`, `denoise-core`, `lensdb` | Raw AI denoise and lensfun's database, while M0's spikes decide |
 
 ### What's lifted in part (copied from `engine` and `ui-egui`)
+
+Lifted at `701f78e`. The modules from `engine` were brought up to
+`0da998f2` with the re-sync (2026-10-15), for what bears on the
+ILCE-7M3; each module's header says what it was lifted at and what was
+taken.
 
 - **Camera colour from the camera's JPEG** (`engine/camera_preview.rs`,
   `camera_profiles.rs`): a guarded fit of a matrix, a hue/saturation
@@ -344,7 +349,10 @@ presets, localisation, and the UI as a whole.
   (hundreds of commits a month, camera colour among them), so it's
   re-synced on purpose, not followed: diff upstream since the pinned
   commit, take what helps, re-run the renders the process version
-  guards (below), bump the commit.
+  guards (below), bump the commit. Re-synced last on 2026-10-15, at
+  `0da998f2` (see UPSTREAM.md). Since then, craft-watch
+  (`~/dev/craft-watch/lightcraft-omalux.md`) lists what upstream's new
+  commits might bring; it's gone through before each milestone.
 - **Changes to the vendored crates stay clean-room and permissive**, so
   they can be offered back upstream: no code ported from GPL projects goes
   into them. What is GPL-derived (lensfun's models, anything ported from

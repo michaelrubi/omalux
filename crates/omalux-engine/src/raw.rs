@@ -5,7 +5,13 @@
 //! Lifted from Lightcraft (MIT OR Apache-2.0) at `701f78e`,
 //! `crates/engine/src/files.rs`: its raw path only, without what OmaLux
 //! doesn't read (DNG semantic masks and gain table maps, other images) or
-//! doesn't have yet (the denoised twin, which M6 brings back).
+//! doesn't have yet (the denoised twin, which M6 brings back). Brought up
+//! to `0da998f2`: the colour step in lanes (`6467d543`) and no copy of a
+//! full-size source to fit it (`0d13a7d5`). The smallest embedded JPEG
+//! that covers a preview (`14e0d128`) isn't taken: an ILCE-7M3's ARW holds
+//! only its 1616 px preview beside a 160 px thumbnail, so it's always the
+//! one. Nor is the camera look through the lens warp (`c854e172`), here:
+//! see [`load`].
 
 use std::sync::Arc;
 
@@ -142,19 +148,43 @@ impl CameraColourModel<'_> {
     /// White balance, matrix, tables and baseline exposure, in place.
     pub fn apply(&self, img: &mut Rgb32f) {
         let (wb, m, gain) = (self.wb, self.matrix.to_f32(), self.gain);
-        img.map_in_place(|p| {
-            let c = [p[0] * wb[0], p[1] * wb[1], p[2] * wb[2]];
-            let rgb = [
-                m[0][0] * c[0] + m[0][1] * c[1] + m[0][2] * c[2],
-                m[1][0] * c[0] + m[1][1] * c[1] + m[1][2] * c[2],
-                m[2][0] * c[0] + m[2][1] * c[1] + m[2][2] * c[2],
-            ];
-            let rgb = match self.tables {
-                Some(tables) => tables.apply(rgb, gain),
-                None => rgb.map(|v| v * gain),
-            };
-            self.hue_sat.map_or(rgb, |h| h.apply(rgb)).map(|v| v.max(0.0))
-        });
+        if let (None, Some(hue_sat)) = (self.tables, self.hue_sat) {
+            // a camera look with a table: `pixel`, `LANES` pixels at a time so the table step vectorises (same bits)
+            const LANES: usize = 16;
+            lightcraft_raster::par_rows(&mut img.data, img.width, |_, row| {
+                for chunk in row.chunks_mut(LANES) {
+                    let mut rgb = [[0.0f32; LANES]; 3];
+                    for (l, p) in chunk.iter().enumerate() {
+                        let c = [p[0] * wb[0], p[1] * wb[1], p[2] * wb[2]];
+                        for (i, rgb) in rgb.iter_mut().enumerate() {
+                            rgb[l] = (m[i][0] * c[0] + m[i][1] * c[1] + m[i][2] * c[2]) * gain;
+                        }
+                    }
+                    let out = hue_sat.apply_lanes(rgb);
+                    for (l, p) in chunk.iter_mut().enumerate() {
+                        *p = [out[0][l], out[1][l], out[2][l]].map(|v| v.max(0.0));
+                    }
+                }
+            });
+            return;
+        }
+        img.map_in_place(|p| self.pixel(&m, p));
+    }
+
+    /// [`Self::apply`] to one pixel; `m` is the matrix as `f32`.
+    fn pixel(&self, m: &[[f32; 3]; 3], p: [f32; 3]) -> [f32; 3] {
+        let (wb, gain) = (self.wb, self.gain);
+        let c = [p[0] * wb[0], p[1] * wb[1], p[2] * wb[2]];
+        let rgb = [
+            m[0][0] * c[0] + m[0][1] * c[1] + m[0][2] * c[2],
+            m[1][0] * c[0] + m[1][1] * c[1] + m[1][2] * c[2],
+            m[2][0] * c[0] + m[2][1] * c[1] + m[2][2] * c[2],
+        ];
+        let rgb = match self.tables {
+            Some(tables) => tables.apply(rgb, gain),
+            None => rgb.map(|v| v * gain),
+        };
+        self.hue_sat.map_or(rgb, |h| h.apply(rgb)).map(|v| v.max(0.0))
     }
 }
 
@@ -239,6 +269,10 @@ pub struct Loaded {
 ///
 /// Whatever is rendered from it goes through [`crate::look::effective`] first.
 ///
+/// The look fitted to a frame's JPEG and DRO's lift are measured on the raw as it is, not through the lens warp
+/// the camera applied to its JPEG ([`crate::camera_preview::camera_lens_geometry`]): through it they'd follow an
+/// FE 35 frame's JPEG better and come out different, and edits made under process versions 1 and 2 render as they did.
+///
 /// Runs on a rayon worker: its many short parallel loops then start on the worker's own queue
 /// instead of each one waking the pool from outside and waiting for it.
 pub fn load(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, String> {
@@ -267,6 +301,9 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
     // (removed before the camera look's binned sensor proxy too, which needs an empty `OpcodeList3`).
     let info = raw.info();
     let lens = crate::lens_profiles::for_raw(&info, bytes, crate::lens_profiles::DEFAULT);
+    // The full-size frame's long edge: noise reduction's radii are in its pixels, so a smaller
+    // development looks like the full-size one scaled down (Lightcraft's catalogue gives it the same).
+    let native_long = Some(info.developed_size()).map(|(w, h)| w.max(h)).filter(|&n| n > 0);
     raw.opcodes.list3.retain(|op| !op.is_lens_correction());
     // Which scale white balance is edited on, and the as-shot white on it, from the file's own colour tags or
     // the camera's measured matrices
@@ -277,7 +314,8 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
     let shot = crate::sony::settings(bytes);
     let fixed = if profile.fitted() { None } else { fixed_look(&raw, shot.creative_style.as_deref().unwrap_or_default()) };
     let camera = Camera { style: shot.creative_style, dro: shot.dro, lift: 0.0, fixed: fixed.is_some(), lens: lens.as_ref().map(|found| found.name.clone()) };
-    let (xy, transform, camera_look) = fixed.unwrap_or_else(|| crate::camera_preview::starting_colour(&mut raw, bytes));
+    // (without the lens warp: see above)
+    let (xy, transform, camera_look) = fixed.unwrap_or_else(|| crate::camera_preview::starting_colour(&mut raw, bytes, None));
     // What DRO did to the camera's JPEG that the raw doesn't have, for Camera match to put back.
     let lifted = !profile.fitted() && camera.dro.is_some_and(|dro| dro != crate::sony::Dro::Off);
     let lift = camera_look.as_ref().filter(|_| lifted).and_then(|look| crate::dro::measure(&raw, bytes, &transform, look));
@@ -320,7 +358,9 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
         None => colour.rebuild_highlights(&mut img),
     }
     colour.apply(&mut img);
-    let img = fit(&img, max_edge, max_edge, Filter::Box).into_oriented(raw.orientation);
+    // a full-size render keeps the picture (fitting it to its own size would copy it, 288 MB at 24 MP)
+    let img = if img.width.max(img.height) > max_edge { fit(&img, max_edge, max_edge, Filter::Box) } else { img };
+    let img = img.into_oriented(raw.orientation);
     timings.finish = ms(t);
     // White balance re-evaluates the file's own colour model (when it has one and no file-local look matrix sits
     // on top of it). A model's measured matrices never do: they only give the Kelvin scale its numbers, and the
@@ -342,6 +382,7 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
         camera_tone,
         mattes: None,
         local_tone: None,
+        native_long,
     };
     Ok(Loaded { image: img, info, camera, timings })
 }
@@ -487,6 +528,10 @@ pub(crate) mod tests {
             // Its spectral matrices put white balance on a Kelvin scale (as shot, not 6500 / 0).
             assert!(!info.relative_wb && (2500.0..10000.0).contains(&info.as_shot_temp), "{name}: {info:?}");
             assert!(timings.decode > 0.0 && timings.demosaic > 0.0, "{name}: {timings:?}");
+            // Noise reduction is sized to the full frame, which is what a full-size load is.
+            let full = load(&bytes, usize::MAX, Profile::Camera).unwrap();
+            assert_eq!(info.native_long, Some(full.image.width.max(full.image.height)), "{name}");
+            assert_eq!(full.info.native_long, info.native_long, "{name}");
             let preview = embedded_preview_srgb(&bytes, 512).unwrap();
             assert_eq!(preview.width.max(preview.height), 512, "{name}");
         }
@@ -528,6 +573,31 @@ pub(crate) mod tests {
 
     fn yellowing_look() -> lightcraft_color::Mat3 {
         lightcraft_color::Mat3([[0.42, 0.548, 0.04], [0.246, 0.728, 0.033], [-0.247, 0.679, 0.447]])
+    }
+
+    /// A camera look with a table applied in lanes, on rows that aren't a whole number of them, gives the bits of
+    /// the pixel-by-pixel path, awkward pixels (black, negative, huge, NaN, infinite) included.
+    #[test]
+    fn camera_look_in_lanes_matches_pixel_by_pixel() {
+        let data = (0..72 * 5 * 5).map(|i| [((i * 37) % 61) as f32 - 30.0, 0.6 + ((i * 11) % 13) as f32 / 13.0, 1.0]).collect();
+        let table = lightcraft_raw::profile::HsvTable { hue_divisions: 72, sat_divisions: 5, val_divisions: 5, data, srgb_value: true };
+        let hue_sat = crate::camera_preview::HueSat::new(&table).unwrap();
+        let colour = CameraColourModel { wb: [2.1, 1.0, 1.5], matrix: yellowing_look(), gain: 1.3, tables: None, hue_sat: Some(&hue_sat) };
+        let special = [0.0, -0.0, -0.01, 1e-30, 0.3, 1.0, 5.0, 1e30, f32::INFINITY, f32::NAN];
+        let img = Rgb32f::from_fn(37, 5, |x, y| {
+            let k = y * 37 + x;
+            if k % 5 == 0 {
+                [special[k % 10], special[k / 10 % 10], special[k / 100 % 10]]
+            } else {
+                [(x as f32 * 0.37).sin().abs(), ((x + y) as f32 * 0.11).cos().abs(), y as f32 / 4.0 - 0.05]
+            }
+        });
+        let mut lanes = img.clone();
+        colour.apply(&mut lanes);
+        let m = colour.matrix.to_f32();
+        for (p, got) in img.data.iter().zip(&lanes.data) {
+            assert_eq!(got.map(f32::to_bits), colour.pixel(&m, *p).map(f32::to_bits), "{p:?}");
+        }
     }
 
     #[test]
