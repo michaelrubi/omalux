@@ -693,8 +693,9 @@ craft-watch's notes:
     10.04, profile and camera 10.40 (mean ΔE2000). That's far from
     M4's numbers because since M5 a fresh raw opens with profile
     corrections on and these JPEGs have none: with them off it's 3.76
-    and 4.33. *Open:* `match` should develop a frame whose JPEG isn't
-    corrected without them.
+    and 4.33. *Done* (2026-10-19): `match` develops each frame with the
+    lens compensations its JPEG got, read from the maker note (the
+    corpus raws: shading and CA on, distortion off): camera 4.40.
   - Turning a crop shrinks it about its centre, keeping its shape,
     instead of swapping it for the largest crop of that shape
     (`053b7420`, in the vendored `geom` since the re-sync; a test now
