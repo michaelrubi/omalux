@@ -72,7 +72,7 @@ fn png(path: &Path, image: &Rgba8) -> Result<(), String> {
 
 fn check(file: &Path, out: Option<&Path>) -> Result<(), String> {
     let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
-    let raw::Loaded { image: full, info, .. } = raw::load(&bytes, usize::MAX, Profile::Fitted)?;
+    let raw::Loaded { image: full, info, .. } = raw::load(&bytes, usize::MAX, Profile::Fitted, omalux_engine::sidecar::PROCESS_VERSION)?;
     let full = Arc::new(full);
     let fresh = DevelopSettings::for_raw(info.as_shot_temp, info.as_shot_tint);
     let mut remove_ca = fresh.clone();

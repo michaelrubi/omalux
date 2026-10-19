@@ -386,11 +386,15 @@ presets, localisation, and the UI as a whole.
   using darktable on a shoot, not something to build around.)
 - **The process version** is OmaLux's, not Lightcraft's schema version:
   it names how a frame was rendered (1: M1 to M3; 2: M4, with the
-  profile as a setting and HDR). Re-syncing Lightcraft can change a
-  rendering, so a set of reference frames (Michael's, and raw.pixls.us's
-  A7 III files) is rendered before and after each re-sync; if they
-  differ, the version is bumped and older edits keep the old behaviour
-  where it can be kept, or say they'll look different.
+  profile as a setting and HDR; 3: the camera look measured through the
+  lens warp the camera applied to its JPEG, and lensfun's profile at the
+  frame's crop factor in an in-camera crop mode). Re-syncing Lightcraft
+  can change a rendering, so a set of reference frames (Michael's, and
+  raw.pixls.us's A7 III files) is rendered before and after each
+  re-sync; if they differ, the version is bumped and older edits keep
+  the old behaviour where it can be kept, or say they'll look different.
+  As in Lightroom, an edit keeps its version when it's changed and saved
+  again; a fresh raw's edit is the newest.
 - **Undo** history lives in memory for the session, per frame; a paste
   onto several frames is a step on each, undone together.
 

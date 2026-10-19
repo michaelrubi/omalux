@@ -48,10 +48,10 @@ pub struct Decoder {
     /// The camera's embedded JPEG, for display.
     pub preview: fn(&[u8]) -> Option<Rgba8>,
     /// The raw itself, as the pipeline's source, with the look its
-    /// profile starts from.
-    pub source: fn(&[u8], Profile) -> Decoded,
+    /// profile starts from under its edit's process version.
+    pub source: fn(&[u8], Development) -> Decoded,
     /// The raw at full size, for 100% zoom.
-    pub full: fn(&[u8], Profile) -> Decoded,
+    pub full: fn(&[u8], Development) -> Decoded,
     /// The long edge of the raw at full size, in pixels, without decoding
     /// it: how large 100% will be, before the full size is there.
     pub long_edge: fn(&[u8]) -> Option<usize>,
@@ -61,8 +61,8 @@ impl Decoder {
     pub fn raw() -> Self {
         Self {
             preview: |bytes| omalux_engine::raw::embedded_preview_srgb(bytes, SOURCE_EDGE),
-            source: |bytes, profile| omalux_engine::raw::load(bytes, SOURCE_EDGE, profile),
-            full: |bytes, profile| omalux_engine::raw::load(bytes, usize::MAX, profile),
+            source: |bytes, (profile, process)| omalux_engine::raw::load(bytes, SOURCE_EDGE, profile, process),
+            full: |bytes, (profile, process)| omalux_engine::raw::load(bytes, usize::MAX, profile, process),
             long_edge: |bytes| {
                 let (w, h) = lightcraft_raw::probe_info(bytes).ok()?.developed_size();
                 Some(w.max(h))
@@ -78,13 +78,19 @@ pub struct Wanted {
     /// Its edit, or `None` for a frame with none yet: a fresh raw's
     /// settings, white balance as shot.
     pub settings: Option<Arc<DevelopSettings>>,
+    /// The process version its edit was made with (a fresh raw's is
+    /// this OmaLux's).
+    pub process: u32,
 }
 
+/// How a raw is developed: for a profile, under a process version.
+pub type Development = (Profile, u32);
+
 impl Wanted {
-    /// The profile its raw is developed for: its edit's, or a fresh
-    /// raw's.
-    fn profile(&self) -> Profile {
-        self.settings.as_deref().map_or(Profile::Camera, Profile::of)
+    /// How its raw is developed: for its edit's profile, or a fresh
+    /// raw's, under its process version.
+    fn development(&self) -> Development {
+        (self.settings.as_deref().map_or(Profile::Camera, Profile::of), self.process)
     }
 }
 
@@ -193,16 +199,20 @@ struct Source {
     /// before M4 wants it, and not with its camera's
     /// ([`Profile::fitted`]).
     fitted: bool,
+    /// The process version it was developed under.
+    process: u32,
 }
 
 impl Source {
-    fn new(loaded: Loaded, profile: Profile) -> Self {
-        Self { image: Arc::new(loaded.image), info: Arc::new(loaded.info), camera: Arc::new(loaded.camera), fitted: profile.fitted() }
+    fn new(loaded: Loaded, (profile, process): Development) -> Self {
+        Self { image: Arc::new(loaded.image), info: Arc::new(loaded.info), camera: Arc::new(loaded.camera), fitted: profile.fitted(), process }
     }
 
-    /// Whether this is the development `frame`'s profile wants.
+    /// Whether this is the development `frame`'s profile and process
+    /// version want.
     fn suits(&self, frame: &Wanted) -> bool {
-        self.fitted == frame.profile().fitted()
+        let (profile, process) = frame.development();
+        self.fitted == profile.fitted() && self.process == process
     }
 
     fn fresh(&self) -> Arc<DevelopSettings> {
@@ -359,25 +369,25 @@ impl Drop for Renderer {
 
 impl State {
     /// The most wanted frame that's yet to be decoded, or was for
-    /// another profile's look than it wants now.
-    fn next_decode(&self) -> Option<(PathBuf, Profile)> {
+    /// another development than it wants now.
+    fn next_decode(&self) -> Option<(PathBuf, Development)> {
         let waiting = |frame: &&Wanted| {
             let decoded = self.sources.get(&frame.path).is_some_and(|source| source.suits(frame));
             !decoded && !self.decoding.contains(&frame.path) && !self.failed.contains(&frame.path)
         };
-        self.wanted.iter().find(waiting).map(|frame| (frame.path.clone(), frame.profile()))
+        self.wanted.iter().find(waiting).map(|frame| (frame.path.clone(), frame.development()))
     }
 
     /// The current frame, if it's to be decoded at full size: the loupe is
     /// at 100% and its source is in, so its fit render comes first.
-    fn next_full(&self) -> Option<(PathBuf, Profile)> {
+    fn next_full(&self) -> Option<(PathBuf, Development)> {
         self.view.zoom?;
         let frame = self.wanted.first()?;
         let path = &frame.path;
         let have = self.full.as_ref().is_some_and(|(full, source, _)| full == path && source.suits(frame));
         let tried = self.full_decoding.as_ref() == Some(path) || self.full_failed.as_ref() == Some(path);
         let ready = self.sources.get(path).is_some_and(|source| source.suits(frame));
-        (!have && !tried && ready).then(|| (path.clone(), frame.profile()))
+        (!have && !tried && ready).then(|| (path.clone(), frame.development()))
     }
 
     /// The window of the current frame on screen at 100%, if it isn't
@@ -462,8 +472,8 @@ impl Shared {
     fn decode(&self) {
         /// A raw to decode: for the loupe, or at full size for 100%.
         enum Job {
-            Source(PathBuf, Profile),
-            Full(PathBuf, Profile),
+            Source(PathBuf, Development),
+            Full(PathBuf, Development),
         }
         let claim = |state: &mut State| {
             // The current frame's source, then its full size, then the neighbours.
@@ -701,7 +711,7 @@ pub(crate) mod tests {
     }
 
     fn wanted(dir: &Path, name: &str) -> Wanted {
-        Wanted { path: dir.join(name), settings: None }
+        Wanted { path: dir.join(name), settings: None, process: omalux_engine::sidecar::PROCESS_VERSION }
     }
 
     fn renders(done: &[Done]) -> Vec<(String, Key)> {
@@ -745,7 +755,7 @@ pub(crate) mod tests {
         let frames = |exposure: f64| {
             let mut settings = look::fresh(5200.0, 3.0);
             settings.light.exposure = exposure;
-            vec![Wanted { path: folder.0.join("a.ARW"), settings: Some(Arc::new(settings)) }, wanted(&folder.0, "b.ARW")]
+            vec![Wanted { path: folder.0.join("a.ARW"), settings: Some(Arc::new(settings)), process: omalux_engine::sidecar::PROCESS_VERSION }, wanted(&folder.0, "b.ARW")]
         };
         let size = (40, 30);
         renderer.want(frames(0.0), View { size, ..View::default() });
@@ -764,7 +774,7 @@ pub(crate) mod tests {
 
     #[test]
     fn drafts_are_small_and_nothing_is_larger_than_its_source() {
-        let source = Source::new(loaded(Rgb32f::new(2560, 1707)), Profile::Camera);
+        let source = Source::new(loaded(Rgb32f::new(2560, 1707)), (Profile::Camera, omalux_engine::sidecar::PROCESS_VERSION));
         let settings = DevelopSettings::default();
         let mut state = State { view: View { size: (3000, 1500), ..View::default() }, ..State::default() };
         assert_eq!(state.key(0, &source, &settings).size, (2560, 1500));
@@ -813,7 +823,7 @@ pub(crate) mod tests {
         let mut settings = look::fresh(5200.0, 3.0);
         settings.wb.temp = 9000.0;
         settings.wb.mode = lightcraft_develop::WbMode::Custom;
-        let frames = || vec![Wanted { path: folder.0.join("a.ARW"), settings: Some(Arc::new(settings.clone())) }];
+        let frames = || vec![Wanted { path: folder.0.join("a.ARW"), settings: Some(Arc::new(settings.clone())), process: omalux_engine::sidecar::PROCESS_VERSION }];
         let pixels = |done: &[Done]| {
             let preview = done.iter().find_map(|d| if let Done::Preview { image, .. } = d { Some(image.pixels[0]) } else { None });
             let render = done.iter().find_map(|d| if let Done::Rendered { image, histogram, .. } = d { Some((image.pixels[0], histogram.total)) } else { None });

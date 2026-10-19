@@ -230,11 +230,11 @@ fn process_raw(
 
     let raw_image = lightcraft_raw::decode(&bytes).map_err(|e| format!("{name}: {e}"))?;
     let raw_info = raw_image.info();
-    let loaded = raw::load(&bytes, usize::MAX, Profile::Camera)?;
+    let loaded = raw::load(&bytes, usize::MAX, Profile::Camera, omalux_engine::sidecar::PROCESS_VERSION)?;
 
-    let lensfun_found = lens_profiles::for_raw(&raw_info, &bytes, lens_profiles::Source::Lensfun)
+    let lensfun_found = lens_profiles::for_raw(&raw_info, &bytes, lens_profiles::Source::Lensfun, omalux_engine::sidecar::PROCESS_VERSION)
         .filter(|f| f.source == lens_profiles::Source::Lensfun);
-    let sony_found = lens_profiles::for_raw(&raw_info, &bytes, lens_profiles::Source::Sony)
+    let sony_found = lens_profiles::for_raw(&raw_info, &bytes, lens_profiles::Source::Sony, omalux_engine::sidecar::PROCESS_VERSION)
         .filter(|f| f.source == lens_profiles::Source::Sony);
 
     let mut found_str = Vec::new();

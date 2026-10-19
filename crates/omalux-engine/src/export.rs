@@ -66,31 +66,33 @@ pub fn tiff(image: &Linear16) -> Result<Vec<u8>, String> {
 
 /// Export `raw` to `to`: `<to>/<stem>.tif`.
 ///
-/// Decodes at full size, takes `settings` or the edit in its sidecar or a
-/// fresh raw's as-shot settings, renders to 16-bit Linear ProPhoto RGB, and
+/// Decodes at full size, takes `edit` or the edit in its sidecar or a
+/// fresh raw's as-shot settings, under the edit's process version, renders to 16-bit Linear ProPhoto RGB, and
 /// writes the TIFF in one step via a temporary file.
 ///
 /// Returns `Ok(true)` if exported, or `Ok(false)` if a TIFF of that name was
 /// already there (which is never overwritten). Returns an error if the raw
 /// cannot be read or decoded, if its sidecar has an edit with a newer process
 /// version, or if rendering/writing fails.
-pub fn export(raw: &Path, to: &Path, settings: Option<&DevelopSettings>) -> Result<bool, String> {
+pub fn export(raw: &Path, to: &Path, edit: Option<&crate::sidecar::Edit>) -> Result<bool, String> {
     let stem = raw.file_stem().ok_or_else(|| format!("{}: not a file", raw.display()))?.to_string_lossy();
     let target = to.join(format!("{stem}.tif"));
     if target.try_exists().map_err(|e| format!("{}: {e}", target.display()))? {
         return Ok(false);
     }
 
-    let saved = match settings {
-        Some(s) => Some(s.clone()),
+    let saved = match edit {
+        Some(edit) => Some(edit.clone()),
         None => {
             let xmp = crate::sidecar::read(raw).map_err(|e| format!("{}: {e}", raw.display()))?;
-            xmp.as_deref().map(crate::sidecar::edit).transpose().map_err(|e| format!("{}: {e}", raw.display()))?.flatten().map(|edit| edit.settings)
+            xmp.as_deref().map(crate::sidecar::edit).transpose().map_err(|e| format!("{}: {e}", raw.display()))?.flatten()
         }
     };
+    let process = saved.as_ref().map_or(crate::sidecar::PROCESS_VERSION, |edit| edit.process);
+    let saved = saved.map(|edit| edit.settings);
     let bytes = fs::read(raw).map_err(|e| format!("{}: {e}", raw.display()))?;
     let profile = saved.as_ref().map_or(Profile::Camera, Profile::of);
-    let crate::raw::Loaded { image: full, info, camera, .. } = crate::raw::load(&bytes, usize::MAX, profile)?;
+    let crate::raw::Loaded { image: full, info, camera, .. } = crate::raw::load(&bytes, usize::MAX, profile, process)?;
     let dev_settings = saved.unwrap_or_else(|| look::fresh(info.as_shot_temp, info.as_shot_tint));
 
     let image = render(&full, &info, &camera, &dev_settings)?;
@@ -229,7 +231,7 @@ mod tests {
             let tiff::decoder::DecodingResult::U16(edit_samples) = decoder.read_image().unwrap() else { panic!("not 16-bit") };
             assert_ne!(edit_samples, default_samples);
 
-            let crate::raw::Loaded { image: full, info, camera, .. } = crate::raw::load(&bytes, usize::MAX, Profile::Camera).unwrap();
+            let crate::raw::Loaded { image: full, info, camera, .. } = crate::raw::load(&bytes, usize::MAX, Profile::Camera, crate::sidecar::PROCESS_VERSION).unwrap();
             let expected_image = render(&full, &info, &camera, &edited_settings).unwrap();
             assert_eq!(edit_samples, expected_image.samples);
 
