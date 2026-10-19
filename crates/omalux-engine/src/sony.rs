@@ -106,11 +106,6 @@ pub fn settings(bytes: &[u8]) -> Settings {
     read(bytes).unwrap_or_default()
 }
 
-/// Which lens compensations a Sony raw (`bytes`, the whole file) had on.
-pub fn lens_comp(bytes: &[u8]) -> LensComp {
-    settings(bytes).lens_comp
-}
-
 fn read(bytes: &[u8]) -> Option<Settings> {
     let tiff = Tiff::parse(bytes).ok()?;
     let make = tiff.ifds.first()?.string(tags::MAKE)?;
@@ -222,19 +217,19 @@ mod tests {
     #[test]
     fn lens_compensation_is_read_from_the_maker_note() {
         for order in [ByteOrder::Little, ByteOrder::Big] {
-            let all_on = lens_comp(&sony_file_with_comp(order, "SONY", 2, 2, 2));
+            let all_on = settings(&sony_file_with_comp(order, "SONY", 2, 2, 2)).lens_comp;
             assert_eq!(all_on, LensComp { distortion: true, shading: true, ca: true }, "{order:?}");
             assert_eq!(all_on.label(), "distortion, shading, CA");
 
-            let dist_off = lens_comp(&sony_file_with_comp(order, "SONY", 0, 2, 2));
+            let dist_off = settings(&sony_file_with_comp(order, "SONY", 0, 2, 2)).lens_comp;
             assert_eq!(dist_off, LensComp { distortion: false, shading: true, ca: true }, "{order:?}");
             assert_eq!(dist_off.label(), "shading, CA");
 
-            let all_off = lens_comp(&sony_file_with_comp(order, "SONY", 0, 0, 0));
+            let all_off = settings(&sony_file_with_comp(order, "SONY", 0, 0, 0)).lens_comp;
             assert_eq!(all_off, LensComp { distortion: false, shading: false, ca: false }, "{order:?}");
             assert_eq!(all_off.label(), "none");
 
-            let na = lens_comp(&sony_file_with_comp(order, "SONY", u32::MAX, u32::MAX, u32::MAX));
+            let na = settings(&sony_file_with_comp(order, "SONY", u32::MAX, u32::MAX, u32::MAX)).lens_comp;
             assert_eq!(na, LensComp::default());
         }
         for (name, bytes) in crate::raw::tests::a7m3_corpus() {
