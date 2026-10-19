@@ -676,9 +676,19 @@ craft-watch's notes:
     and barely on the FE 85 (0.005 at most). It's used for `calibrate`'s
     pairs only: through it the look fitted to a frame changed on 12 of
     the 23 and DRO's lift by 2 to 5 on 7, which would change the export
-    of edits under both process versions. *Next:* process version 3,
-    with the per-frame fit and the lift through it, the Standard profile
-    fitted again through it, and `4ddbb5a3` (below).
+    of edits under both process versions. *Done* (2026-10-19, on `pv3`):
+    process version 3, with the per-frame fit and the lift through it,
+    the Standard profile fitted again through it, and `4ddbb5a3`
+    (below). An edit keeps the version it was made with when it's saved
+    again (six of the Run Dinah Barbie picks have edits from 2), and the
+    bundled profiles carry the version they're used from, so 2's
+    Standard stays. On the corpus raws 3 renders as 2 did; on a copy of
+    an FE 35 frame (MJR09822) Camera match's lift moves, up to 3 levels
+    at 256 px. The Standard profile fitted again (the same 1376 raws)
+    comes closer to the JPEGs by a little: on Run Dinah Barbie with `match`,
+    both under 3, Camera match 2.69 to 2.67 ΔE2000 (saturated 3.99 to 3.97,
+    skin 3.15 to 3.13, sky 3.95 to 3.86). *Open:* no way yet to bring an edit up to the newest
+    version (Lightroom's Update process version).
   - `match` on the corpus raws gives the same before and after: fitted
     10.04, profile and camera 10.40 (mean ΔE2000). That's far from
     M4's numbers because since M5 a fresh raw opens with profile
@@ -699,8 +709,8 @@ craft-watch's notes:
     and a 160 × 120 thumbnail, so it's always the 1616. The frame's crop
     factor for lensfun's profile in an in-camera crop mode (`4ddbb5a3`):
     an APS-C frame's corners get the full frame's correction now, and
-    fixing it changes the export of such an edit, so it waits for
-    process version 3. Everything else in those files since `701f78e`
+    fixing it changes the export of such an edit, so it's taken from
+    process version 3 on. Everything else in those files since `701f78e`
     is other cameras, DNGs, merges, previews read from a catalogue, or
     DNG writing.
 - *Waiting:* M4's toe fit (`c11764a1`), for when there are DRO Off frames.

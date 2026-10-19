@@ -90,7 +90,7 @@ fn png(path: &Path, image: &Rgba8) -> Result<(), String> {
 fn check(file: &Path, out: Option<&Path>) -> Result<[RenderStats; 4], String> {
     let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let bytes = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
-    let loaded = raw::load(&bytes, PREVIEW_EDGE, Profile::Camera)?;
+    let loaded = raw::load(&bytes, PREVIEW_EDGE, Profile::Camera, omalux_engine::sidecar::PROCESS_VERSION)?;
     let src = Arc::new(loaded.image);
     let info = loaded.info;
     let camera = loaded.camera;

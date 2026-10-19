@@ -16,7 +16,8 @@
 //! An edit made under an older process version keeps rendering as it did:
 //! the references of process version 1's looks (fitted to each frame's own
 //! JPEG) are the ones M1 wrote, checked against still, beside the ones of
-//! what a frame opens with now (Camera match, Flat, HDR).
+//! what a frame opened with under process version 2 (Camera match, Flat,
+//! HDR, the lens) and the same under 3 (named `…-3`).
 //!
 //! The CC0 ILCE-7M3 raws' references are in `testdata/reference/` (the test
 //! skips them without the raws: `scripts/fetch-corpus.sh`). Michael's own
@@ -103,13 +104,16 @@ fn difference(a: &Rgba8, b: &Rgba8) -> (u8, f64) {
 /// write it there). Returns what differs.
 fn check(name: &str, bytes: &[u8], references: &Path, write: bool) -> Vec<String> {
     let mut problems = Vec::new();
-    let loaded = |profile| crate::raw::load(bytes, EDGE * 4, profile).expect("decode");
-    let (before, now) = (loaded(Profile::Fitted), loaded(Profile::Camera));
-    let renders = looks(&before.info).into_iter().map(|look| (look, &before)).chain(looks_now(&now.info).into_iter().map(|look| (look, &now)));
-    for ((look, settings), source) in renders {
+    let loaded = |profile, process| crate::raw::load(bytes, EDGE * 4, profile, process).expect("decode");
+    let (before, two, now) = (loaded(Profile::Fitted, 1), loaded(Profile::Camera, 2), loaded(Profile::Camera, crate::sidecar::PROCESS_VERSION));
+    // (process version 2's keep their names from before there was a 3)
+    let renders = looks(&before.info).into_iter().map(|look| (look, "", &before));
+    let renders = renders.chain(looks_now(&two.info).into_iter().map(|look| (look, "", &two)));
+    let renders = renders.chain(looks_now(&now.info).into_iter().map(|look| (look, "-3", &now)));
+    for ((look, settings), version, source) in renders {
         let (settings, info) = look::effective(&settings, &source.info, &source.camera);
         let render = lightcraft_pipeline::render(&source.image, &info, &settings, &RenderRequest::fit(EDGE, EDGE)).image;
-        let path = references.join(format!("{name}-{look}.png"));
+        let path = references.join(format!("{name}-{look}{version}.png"));
         if write {
             std::fs::create_dir_all(references).expect("make the folder");
             std::fs::write(&path, png(&render)).expect("write a reference");

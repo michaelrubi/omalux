@@ -124,9 +124,9 @@ fn spike(path: &Path, out: Option<&Path>, gpu: bool, totals: &mut Totals) -> Res
     *totals.styles.entry(format!("{style}, DRO {dro}")).or_default() += 1;
 
     // Decoding: the loupe's source, binned, and the full-size one for export and 100%.
-    let (preview, t_preview) = timed(|| raw::load(&bytes, PREVIEW_EDGE, Profile::Camera));
+    let (preview, t_preview) = timed(|| raw::load(&bytes, PREVIEW_EDGE, Profile::Camera, omalux_engine::sidecar::PROCESS_VERSION));
     let raw::Loaded { image: preview_img, info, camera: shot, timings: steps } = preview?;
-    let (full, t_full) = timed(|| raw::load(&bytes, usize::MAX, Profile::Camera));
+    let (full, t_full) = timed(|| raw::load(&bytes, usize::MAX, Profile::Camera, omalux_engine::sidecar::PROCESS_VERSION));
     let full = full?.image;
     println!(
         "  decode: {t_preview:.0} ms for the {PREVIEW_EDGE} px source (raw {:.0}, camera match {:.0}, bin {:.0}, finish {:.0}), {t_full:.0} ms full size ({}×{})",

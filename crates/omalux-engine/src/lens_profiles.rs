@@ -8,9 +8,9 @@
 //! nothing changes. Sony's own corrections ([`crate::sony_lens`]) are the other [`Source`], and the default ([`DEFAULT`]).
 //!
 //! Lifted from Lightcraft (MIT OR Apache-2.0) at `701f78e`, `crates/engine/src/lens_profiles.rs`, with OmaLux's
-//! folder and the choice of source; checked against `0da998f2`, with nothing taken: Nikon's non-square pixels
-//! (`2dad18d2`) are another camera's, and the frame's crop factor in an in-camera crop mode (`4ddbb5a3`) would
-//! change the export of an APS-C frame corrected from lensfun's, so it waits for a process version (see ROADMAP.md).
+//! folder and the choice of source; checked against `0da998f2`: the frame's crop factor in an in-camera crop mode
+//! (`4ddbb5a3`) is taken from process version 3 on (it changes the export of an APS-C frame corrected from
+//! lensfun's); Nikon's non-square pixels (`2dad18d2`) are another camera's.
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -48,18 +48,30 @@ pub fn database() -> Option<&'static LensDb> {
 }
 
 /// The database profile for a photo with metadata `m`, for its `w × h` (unoriented, default-cropped) image,
-/// re-expressed after `orientation`. `None` without a database, lens name, focal length or matching profile.
-pub fn lookup(db: &LensDb, m: &lightcraft_meta::Metadata, w: f64, h: f64, orientation: lightcraft_geom::Orientation) -> Option<EmbeddedLens> {
+/// re-expressed after `orientation`, as process version `process` scales it. `None` without a database, lens name,
+/// focal length or matching profile.
+pub fn lookup(db: &LensDb, m: &lightcraft_meta::Metadata, w: f64, h: f64, orientation: lightcraft_geom::Orientation, process: u32) -> Option<EmbeddedLens> {
     let focal = m.focal_length.filter(|f| f.is_finite() && *f > 0.0)?;
     let camera = db.find_camera(m.make.as_deref().unwrap_or_default(), m.model.as_deref().unwrap_or_default());
     let lens = db.find_lens(m.lens_make.as_deref(), m.lens_model.as_deref()?, camera)?;
-    // the crop factor: the camera's, else what the 35 mm equivalent focal length implies
-    let crop =
-        camera.map(|c| c.crop_factor).or_else(|| m.focal_length_35mm.map(|f35| f35 / focal).filter(|c| c.is_finite() && (0.1..=20.0).contains(c)));
+    let crop = frame_crop_factor(camera.map(|c| c.crop_factor), focal, m.focal_length_35mm, process);
     let shot = Shot { focal, aperture: m.f_number, distance: None, crop_factor: crop, width: w, height: h };
     let mut corr = lens.correction(&shot)?;
     fill(&mut corr, w, h);
     Some(lightcraft_pipeline::optics::reorient_lens(&corr, orientation, w, h))
+}
+
+/// The crop factor of the recorded frame, which scales the profile's radii: the body's (`camera`), else what the
+/// 35 mm equivalent focal length implies. From process version 3 (Lightcraft's `4ddbb5a3`), a body shooting a crop
+/// of its sensor (APS-C / Super 35 mode, or switched there by an APS-C lens) records a larger 35 mm equivalent than
+/// its own crop factor gives, and that crop wins; within 10 % of the body's, the difference is the tag's
+/// whole-millimetre rounding and the body's value stands. Before 3 the body's always stood.
+fn frame_crop_factor(camera: Option<f64>, focal: f64, focal_35mm: Option<f64>, process: u32) -> Option<f64> {
+    let frame = focal_35mm.map(|f35| f35 / focal).filter(|c| c.is_finite() && (0.1..=20.0).contains(c));
+    match (camera, frame) {
+        (Some(body), Some(frame)) if process >= 3 && frame > body * 1.1 => Some(frame),
+        (body, frame) => body.or(frame),
+    }
 }
 
 /// Enlarge the picture under `lens`'s warp, for its `w × h` image, until it fills the frame, as Lightroom's profile
@@ -114,8 +126,8 @@ pub struct Found {
 }
 
 /// The profile correction for the raw `bytes`, whose header is `raw`: [`crate::raw::embedded_lens`] if the raw
-/// reader found one, else `source`'s, else the other source's.
-pub fn for_raw(raw: &lightcraft_raw::RawInfo, bytes: &[u8], source: Source) -> Option<Found> {
+/// reader found one, else `source`'s, else the other source's, as process version `process` has them.
+pub fn for_raw(raw: &lightcraft_raw::RawInfo, bytes: &[u8], source: Source, process: u32) -> Option<Found> {
     let meta = lightcraft_meta::extract(bytes);
     let named = meta.lens_model.clone().unwrap_or_default();
     if let Some(lens) = crate::raw::embedded_lens(raw) {
@@ -125,7 +137,7 @@ pub fn for_raw(raw: &lightcraft_raw::RawInfo, bytes: &[u8], source: Source) -> O
         let db = database()?;
         let c = raw.crop.clipped(raw.active_area.width, raw.active_area.height);
         let (w, h) = if c.width == 0 || c.height == 0 { (raw.active_area.width, raw.active_area.height) } else { (c.width, c.height) };
-        let lens = lookup(db, &meta, w as f64, h as f64, raw.orientation)?;
+        let lens = lookup(db, &meta, w as f64, h as f64, raw.orientation, process)?;
         let camera = db.find_camera(meta.make.as_deref().unwrap_or_default(), meta.model.as_deref().unwrap_or_default());
         let name = db.find_lens(meta.lens_make.as_deref(), meta.lens_model.as_deref()?, camera)?.models.first().cloned().unwrap_or_default();
         Some(Found { lens, source: Source::Lensfun, name })
@@ -141,6 +153,8 @@ pub fn for_raw(raw: &lightcraft_raw::RawInfo, bytes: &[u8], source: Source) -> O
 mod tests {
     use super::*;
     use lightcraft_geom::Orientation;
+
+    const PV: u32 = crate::sidecar::PROCESS_VERSION;
 
     const DB: &str = r#"<lensdatabase>
       <camera><maker>Testcam</maker><model>TC-1</model><mount>T</mount><cropfactor>1.5</cropfactor></camera>
@@ -165,15 +179,15 @@ mod tests {
     #[test]
     fn exif_lens_is_found_and_converted() {
         let db = LensDb::parse(DB).unwrap();
-        let lens = lookup(&db, &meta(), 6000.0, 4000.0, Orientation::Normal).unwrap();
+        let lens = lookup(&db, &meta(), 6000.0, 4000.0, Orientation::Normal, PV).unwrap();
         assert!(lens.warp.is_some() && lens.vignette.is_some());
-        let rotated = lookup(&db, &meta(), 6000.0, 4000.0, Orientation::Rotate90).unwrap();
+        let rotated = lookup(&db, &meta(), 6000.0, 4000.0, Orientation::Rotate90, PV).unwrap();
         assert_eq!(rotated.warp.unwrap().center, lightcraft_geom::Point::new(0.5, 0.5));
         // no lens name, no focal length, an unknown lens: nothing
-        assert!(lookup(&db, &lightcraft_meta::Metadata { lens_model: None, ..meta() }, 6000.0, 4000.0, Orientation::Normal).is_none());
-        assert!(lookup(&db, &lightcraft_meta::Metadata { focal_length: None, ..meta() }, 6000.0, 4000.0, Orientation::Normal).is_none());
+        assert!(lookup(&db, &lightcraft_meta::Metadata { lens_model: None, ..meta() }, 6000.0, 4000.0, Orientation::Normal, PV).is_none());
+        assert!(lookup(&db, &lightcraft_meta::Metadata { focal_length: None, ..meta() }, 6000.0, 4000.0, Orientation::Normal, PV).is_none());
         let other = lightcraft_meta::Metadata { lens_model: Some("70-200mm F4".into()), ..meta() };
-        assert!(lookup(&db, &other, 6000.0, 4000.0, Orientation::Normal).is_none());
+        assert!(lookup(&db, &other, 6000.0, 4000.0, Orientation::Normal, PV).is_none());
     }
 
     /// Correcting pincushion distortion pulls the edges in: the picture is enlarged until every output pixel
@@ -183,14 +197,14 @@ mod tests {
         let pincushion = DB.replace("k1=\"-0.03\"", "k1=\"0.03\"");
         let (w, h) = (6000.0, 4000.0);
         let corner = |db: &str| {
-            let lens = lookup(&LensDb::parse(db).unwrap(), &meta(), w, h, Orientation::Normal).unwrap();
+            let lens = lookup(&LensDb::parse(db).unwrap(), &meta(), w, h, Orientation::Normal, PV).unwrap();
             (0..3).map(|ch| lightcraft_pipeline::optics::embedded_warp(&lens.warp.unwrap(), lightcraft_geom::Point::new(0.0, 0.0), ch, w, h)).collect::<Vec<_>>()
         };
         for s in corner(&pincushion) {
             assert!(s.x >= 0.5 && s.y >= 0.5 && (s.x < 3.0 || s.y < 3.0), "the corner samples the picture's corner: {s:?}");
         }
         let unscaled = LensDb::parse(DB).unwrap().lenses[0].correction(&Shot { focal: 18.0, aperture: Some(3.5), distance: None, crop_factor: Some(1.5), width: w, height: h }).unwrap();
-        let scaled = lookup(&LensDb::parse(DB).unwrap(), &meta(), w, h, Orientation::Normal).unwrap().warp.unwrap().planes[1][0];
+        let scaled = lookup(&LensDb::parse(DB).unwrap(), &meta(), w, h, Orientation::Normal, PV).unwrap().warp.unwrap().planes[1][0];
         let zoom = scaled / unscaled.warp.unwrap().planes[1][0];
         assert!((0.999..=1.0).contains(&zoom), "barrel: as it was, but for the half pixel kept in: {zoom}");
     }
@@ -202,7 +216,7 @@ mod tests {
         let db = LensDb::parse(DB).unwrap();
         let profile = &db.lenses[0];
         let (w, h) = (600usize, 400usize);
-        let lens = lookup(&db, &meta(), w as f64, h as f64, Orientation::Normal).unwrap();
+        let lens = lookup(&db, &meta(), w as f64, h as f64, Orientation::Normal, PV).unwrap();
         // record the grid: each sensor pixel sees the scene point whose distorted position it is
         let n = h as f64 / 2.0;
         let undistort = |x: f64, y: f64| {
@@ -253,5 +267,47 @@ mod tests {
         assert!(before > 2.0, "the recorded line is curved: {before} px");
         // 8-bit output and a 2 px line: the centroid measurement itself is good to about a pixel
         assert!(after < 1.0 && after < before / 8.0, "corrected line bent by {after} px (uncorrected {before})");
+    }
+
+    /// A full-frame body in APS-C / Super 35 mode (an ILCE-1M2 at 70 mm records 105 mm equivalent) frames only the
+    /// middle of the image circle: from process version 3 the profile is applied at the frame's crop factor, not
+    /// the body's, so the crop's corners don't get the full frame's corner correction. (Lightcraft's `4ddbb5a3`.)
+    #[test]
+    fn in_camera_crop_mode_uses_the_frames_crop_factor() {
+        let db = LensDb::parse(
+            r#"<lensdatabase>
+              <camera><maker>Sony</maker><model>ILCE-1M2</model><mount>Sony E</mount><cropfactor>1</cropfactor></camera>
+              <lens><maker>Sigma</maker><model>24-70mm F2.8 DG DN | Art 019</model><mount>Sony E</mount><cropfactor>1.0</cropfactor>
+                <calibration>
+                  <distortion model="ptlens" focal="70" a="0.0019947" b="0.0035263" c="0.0005016" />
+                  <vignetting model="pa" focal="70" aperture="2.8" distance="1000" k1="-0.4" k2="0" k3="0" />
+                </calibration>
+              </lens></lensdatabase>"#,
+        )
+        .unwrap();
+        let m = |f35: Option<f64>| lightcraft_meta::Metadata {
+            make: Some("SONY".into()),
+            model: Some("ILCE-1M2".into()),
+            lens_model: Some("24-70mm F2.8 DG DN | Art 019".into()),
+            focal_length: Some(70.0),
+            focal_length_35mm: f35,
+            f_number: Some(2.8),
+            ..Default::default()
+        };
+        let at = |crop: f64, w: f64, h: f64| {
+            let shot = Shot { focal: 70.0, aperture: Some(2.8), distance: None, crop_factor: Some(crop), width: w, height: h };
+            let mut corr = db.lenses[0].correction(&shot).unwrap();
+            fill(&mut corr, w, h);
+            corr
+        };
+        let aps_c = lookup(&db, &m(Some(105.0)), 5616.0, 3744.0, Orientation::Normal, 3).unwrap();
+        assert_eq!(aps_c, at(1.5, 5616.0, 3744.0));
+        assert_eq!(lookup(&db, &m(Some(105.0)), 5616.0, 3744.0, Orientation::Normal, 2).unwrap(), at(1.0, 5616.0, 3744.0), "process version 2 keeps the body's");
+        // full frame, a 35 mm equivalent rounded off by a millimetre, or none at all: the body's crop factor
+        for f35 in [Some(70.0), Some(71.0), None] {
+            assert_eq!(lookup(&db, &m(f35), 8640.0, 5760.0, Orientation::Normal, 3).unwrap(), at(1.0, 8640.0, 5760.0), "{f35:?}");
+        }
+        assert_eq!(frame_crop_factor(None, 70.0, Some(105.0), 3), Some(1.5), "no body in the database: the 35 mm equivalent's");
+        assert_eq!(frame_crop_factor(Some(1.0), 0.0, Some(105.0), 3), Some(1.0), "a hostile focal length is ignored");
     }
 }

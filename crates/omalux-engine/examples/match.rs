@@ -63,8 +63,8 @@ fn measure(path: &Path) -> Result<Frame, String> {
         }
         compare::compare(&middle(&rendered), &middle(&reference))
     };
-    let fitted = raw::load(&bytes, EDGE, Profile::Fitted)?;
-    let camera = raw::load(&bytes, EDGE, Profile::Camera)?;
+    let fitted = raw::load(&bytes, EDGE, Profile::Fitted, omalux_engine::sidecar::PROCESS_VERSION)?;
+    let camera = raw::load(&bytes, EDGE, Profile::Camera, omalux_engine::sidecar::PROCESS_VERSION)?;
     let unlifted = Camera { lift: 0.0, ..camera.camera.clone() };
     let dro = camera.camera.dro.map_or("?".to_owned(), |dro| dro.label());
     let shot = format!(

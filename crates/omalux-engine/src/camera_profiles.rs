@@ -35,12 +35,17 @@ const VERSION: u32 = 1;
 /// Largest profile file read (a 5 × 72 × 5 table is ~60 KB of JSON).
 const MAX_FILE: u64 = 4 << 20;
 
-/// Profiles built into OmaLux: `(model, style, JSON)`.
+/// Profiles built into OmaLux: `(model, style, the process version it's used from, JSON)`. An edit is developed
+/// with the latest one its process version has, so a profile fitted again doesn't change an edit made before.
 ///
 /// The ILCE-7M3's Standard is fitted over Michael's four shoots of 2026 (1376 photos on the FE 35 and 85 mm f/1.8,
-/// all with DRO Auto, so its tone curve is Sony's own without DRO). There's none for Vivid yet: he has shot nothing
-/// in it, and a frame in a style without a profile gets the look fitted to its own JPEG.
-pub const BUNDLED: &[(&str, &str, &str)] = &[("ILCE-7M3", "Standard", include_str!("../assets/camera-profiles/ILCE-7M3-Standard.json"))];
+/// all with DRO Auto, so its tone curve is Sony's own without DRO); from process version 3, through the lens warp the
+/// camera applied to its JPEG. There's none for Vivid yet: he has shot nothing in it, and a frame in a style without
+/// a profile gets the look fitted to its own JPEG.
+pub const BUNDLED: &[(&str, &str, u32, &str)] = &[
+    ("ILCE-7M3", "Standard", 2, include_str!("../assets/camera-profiles/ILCE-7M3-Standard.json")),
+    ("ILCE-7M3", "Standard", 3, include_str!("../assets/camera-profiles/ILCE-7M3-Standard-3.json")),
+];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CameraProfile {
@@ -122,9 +127,10 @@ fn parse(json: &[u8], origin: &str) -> Result<CameraProfile, String> {
     Ok(profile)
 }
 
-/// The built-in profile for `model` in `style`, if any.
-fn bundled(model: &str, style: &str) -> Option<CameraProfile> {
-    let (_, _, json) = BUNDLED.iter().find(|(m, s, _)| *m == model && *s == style)?;
+/// The built-in profile for `model` in `style` under process version `process`, if any.
+fn bundled(model: &str, style: &str, process: u32) -> Option<CameraProfile> {
+    let ours = BUNDLED.iter().filter(|(m, s, from, _)| *m == model && *s == style && *from <= process);
+    let (_, _, _, json) = ours.max_by_key(|(_, _, from, _)| *from)?;
     parse(json.as_bytes(), &format!("built-in profile {model} {style}")).inspect_err(|e| log::warn!("ignoring camera profile {e}")).ok()
 }
 
@@ -139,25 +145,26 @@ pub fn save(profile: &CameraProfile, dir: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-type Cache = Mutex<HashMap<(String, String), Option<Arc<CameraProfile>>>>;
+type Cache = Mutex<HashMap<(String, String, u32), Option<Arc<CameraProfile>>>>;
 
 fn cache() -> &'static Cache {
     static CACHE: OnceLock<Cache> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
-/// The profile for camera `model` in Creative Style `style`: from [`dir`], else built in; read once per process.
-pub fn get(model: &str, style: &str) -> Option<Arc<CameraProfile>> {
+/// The profile for camera `model` in Creative Style `style` under process version `process`: from [`dir`] (for this
+/// OmaLux's process version only: one's own is fitted with today's `calibrate`), else built in; read once per process.
+pub fn get(model: &str, style: &str, process: u32) -> Option<Arc<CameraProfile>> {
     let (model, style) = (model.trim(), style.trim());
     if model.is_empty() {
         return None;
     }
     let mut cache = cache().lock().unwrap_or_else(PoisonError::into_inner);
-    let key = (model.to_owned(), style.to_owned());
+    let key = (model.to_owned(), style.to_owned(), process);
     if let Some(hit) = cache.get(&key) {
         return hit.clone();
     }
-    let path = dir().map(|d| d.join(file_name(model, style)));
+    let path = dir().filter(|_| process == crate::sidecar::PROCESS_VERSION).map(|d| d.join(file_name(model, style)));
     let profile = match path {
         Some(path) if path.is_file() => match load(&path) {
             Ok(p) if p.model.trim() == model && p.style.trim() == style => Some(Arc::new(p)),
@@ -172,7 +179,7 @@ pub fn get(model: &str, style: &str) -> Option<Arc<CameraProfile>> {
         },
         _ => None,
     };
-    let profile = profile.or_else(|| bundled(model, style).map(Arc::new));
+    let profile = profile.or_else(|| bundled(model, style, process).map(Arc::new));
     cache.insert(key, profile.clone());
     profile
 }
@@ -329,13 +336,14 @@ mod tests {
 
     #[test]
     fn bundled_profiles_are_valid_and_named_after_their_model() {
-        for (model, style, json) in BUNDLED {
+        for (model, style, from, json) in BUNDLED {
             let p = parse(json.as_bytes(), model).unwrap();
             assert_eq!((p.model.as_str(), p.style.as_str()), (*model, *style));
             assert!(p.files >= 5 && p.hue_sat.is_some() && p.tone.is_some(), "{model} {style}: {} photos", p.files);
-            assert_eq!(bundled(model, style), Some(p));
+            assert_eq!(bundled(model, style, *from), Some(p));
         }
-        assert!(bundled("No Such Camera", "Standard").is_none());
+        assert!(bundled("No Such Camera", "Standard", crate::sidecar::PROCESS_VERSION).is_none());
+        assert!(bundled("ILCE-7M3", "Standard", 1).is_none(), "process version 1 had no profiles");
     }
 
     #[test]

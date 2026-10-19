@@ -41,11 +41,12 @@ const WORTH: f64 = 0.03;
 
 /// DRO's lift on a frame, in the Shadows slider's units, from its raw
 /// and the JPEG in it. `transform` and `look` are the colour the frame is
-/// developed with. `None` if the two can't be compared (no usable JPEG).
-pub(crate) fn measure(raw: &RawImage, bytes: &[u8], transform: &CameraTransform, look: &CameraLook) -> Option<f64> {
-    // Without the lens warp the camera applied to its JPEG (`camera_preview::camera_lens_geometry`), as process
-    // version 2 measures it: through it, the lift on an FE 35 frame moves by up to 5.
-    let (mut scene, reference, clipped) = crate::camera_preview::proxies(raw, bytes, transform, PROFILE_PROXY, None)?;
+/// developed with; `lens` the warp the camera applied to its JPEG
+/// (`camera_preview::camera_lens_geometry`), which process version 3
+/// measures through and 2 doesn't (on an FE 35 frame the lift moves by up
+/// to 5). `None` if the two can't be compared (no usable JPEG).
+pub(crate) fn measure(raw: &RawImage, bytes: &[u8], transform: &CameraTransform, look: &CameraLook, lens: Option<&crate::camera_preview::LensGeometry>) -> Option<f64> {
+    let (mut scene, reference, clipped) = crate::camera_preview::proxies(raw, bytes, transform, PROFILE_PROXY, lens)?;
     // The proxy is through the camera's generic colour: the look goes on top, as the decode applies it.
     let (matrix, hue_sat) = (look.matrix.to_f32(), look.hue_sat.as_ref().and_then(HueSat::new));
     scene.map_in_place(|p| {

@@ -189,7 +189,7 @@ impl Totals {
 
 /// Renders `bytes` with OmaLux as a fresh raw at full size in sRGB.
 fn render_omalux(bytes: &[u8]) -> Result<Rgba8, String> {
-    let loaded = raw::load(bytes, usize::MAX, Profile::Camera)?;
+    let loaded = raw::load(bytes, usize::MAX, Profile::Camera, omalux_engine::sidecar::PROCESS_VERSION)?;
     let fresh = look::fresh(loaded.info.as_shot_temp, loaded.info.as_shot_tint);
     let (settings, info) = look::effective(&fresh, &loaded.info, &loaded.camera);
     let (w, h) = export::full_size(&loaded.image, &settings);
