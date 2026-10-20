@@ -199,6 +199,25 @@ fn spike(path: &Path, out: Option<&Path>, gpu: bool, totals: &mut Totals) -> Res
     totals.loupe.push((cpu_loupe, gpu_times.map(|t| t.0)));
     totals.drag.push((cpu_drag, gpu_times.map(|t| t.1)));
 
+    // M8's Upright: finding the transform on the loupe's source and at full size (each the first time:
+    // Lightcraft keeps the analysis per source), and a drag of Vertical on top of it.
+    let (_, t_loupe) = timed(|| lightcraft_pipeline::upright::auto_transform(&preview, &info, &settings, lightcraft_develop::Upright::Auto));
+    let (_, t_full) = timed(|| lightcraft_pipeline::upright::auto_transform(&full, &info, &settings, lightcraft_develop::Upright::Auto));
+    let mut upright = settings.clone();
+    omalux_engine::edit::upright(&mut upright, &info, &preview, lightcraft_develop::Upright::Auto);
+    let cache = StageCache::default();
+    drop(render(&preview, &info, &upright, &draft, Some(&cache), gpu));
+    let vertical = best(9, || {
+        let mut s = upright.clone();
+        k += 1.0;
+        s.geometry.vertical = -20.0 + k;
+        drop(render(&preview, &info, &s, &draft, Some(&cache), gpu));
+    });
+    println!(
+        "  Upright Auto: found in {t_loupe:.0} ms on the loupe's source, {t_full:.0} ms at full size; a drag of Vertical {vertical:.1} ms on the {}",
+        if gpu { "GPU" } else { "CPU" }
+    );
+
     // The export: full size, 16-bit Linear ProPhoto, on the CPU (Lightcraft's GPU renders 8-bit only).
     let (image, t_render) = timed(|| export::render(&full, &info, &Camera::default(), &settings));
     let image = image?;
