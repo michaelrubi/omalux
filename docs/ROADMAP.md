@@ -727,8 +727,12 @@ tried by hand yet.
 ## M9. Sets, exporting again and dust
 
 The rest of the 2026-10-20 list, about working a set rather than a
-frame. Exporting again and dust each start with a decision of
-Michael's.
+frame. Exporting again and dust each started with a decision of
+Michael's; asked to carry the plan out, Claude took the suggestion for
+the first and built the second, so both are Michael's to confirm by
+hand. Built on `m9` (after `m8`) on 2026-10-20 and tested headlessly;
+not tried by hand yet. `m9-pv3` is `m9` with `pv3` merged in, which is
+what was installed, so edits made at process version 3 stay readable.
 
 - **Auto Sync.** In Lightroom, with more than one frame selected, the
   Sync button switches to Auto Sync (Ctrl+Alt+Shift+A; check this
@@ -749,7 +753,9 @@ Michael's.
     redone and their sidecars written once, when the drag ends.
   - Headless tests: a drag over a selection of three writes the value
     to each, once; as-shot white balance stays per frame; one Ctrl+Z
-    takes the drag back from all three.
+    takes the drag back from all three. *Done*, with a selection of
+    five, two of them not decoded: an Auto on those is set once they
+    are. The key is from memory, not checked against Lightroom's list.
 - **Edited and exported marks** in the filmstrip: one mark for a frame
   whose edit isn't a fresh raw's, one for a frame that's been exported,
   and the exported mark in the warning colour when the edit has changed
@@ -757,7 +763,11 @@ Michael's.
   `omalux:exported` holds the TIFF's name and the `hash64` of the
   effective settings it was rendered with. Tests: each mark from a
   sidecar, and a sidecar Omacull wrote (it has none of OmaLux's part)
-  that stays byte for byte except for what's added.
+  that stays byte for byte except for what's added. *Done:* the edit
+  is `±`, the export `TIFF` (red once the frame's been edited since).
+  An edit that's a fresh raw's is named `fresh` in the record, so
+  resetting a frame to as it opened marks its first export current
+  again.
 - **Exporting again** (M1's open question). A TIFF is never written
   over, because Omapix saves its retouching into it. *Decide first,*
   with Michael, between:
@@ -771,7 +781,9 @@ Michael's.
 
   2 is the suggestion, since it's what's wanted almost every time. Both
   ways, Ctrl+Shift+E on a frame marked out of date exports it again, and
-  on a frame that's up to date does nothing.
+  on a frame that's up to date does nothing. *Done, as 2:* the TIFF's
+  mtime is checked against `omalux:exportedModified`; Ctrl+E opens
+  what was written. Tested on the corpus raws.
 - **Dust spots.** Healing is Omapix's, but sensor dust is in the same
   place on every frame of a shoot. A raw developer fixes it once for the
   set; Omapix would fix it frame by frame. *Decide first:* only if the
@@ -791,6 +803,16 @@ Michael's.
     and a landscape one.
   - The GPU against the CPU for spots, within 1/255, including a 100%
     window, which spots grow (see `gpu/render.rs`).
+
+  *Built*, ahead of the dust check: Lightcraft's equivalence tests
+  cover spots, a window's included, and pass on the RTX 4070. While
+  the tool is open the frame is shown before its lens corrections,
+  crop and transform, where spots are kept; `[` and `]` size a spot,
+  and the held spot's Size, Feather and Opacity are in the tool's
+  panel. A spot's source is left to the pipeline, as Lightroom's Heal
+  finds its own. How the camera was held is now read from the raw's
+  Exif orientation when the shoot opens. If the sensor turns out
+  clean, the tool costs nothing to leave in.
 
 ## Ongoing: keeping up with Lightcraft
 
