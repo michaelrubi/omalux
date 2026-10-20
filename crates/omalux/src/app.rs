@@ -42,6 +42,15 @@ const PANEL_WIDTH: f32 = 300.0;
 const AHEAD: usize = 2;
 const BEHIND: usize = 1;
 
+/// Lightroom's loupe info overlays: what each shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Info {
+    /// The file name, when it was shot, and its size cropped.
+    One,
+    /// The file name, the exposure, and the lens.
+    Two,
+}
+
 /// A frame whose raw has been decoded this session, or that's been pasted
 /// onto: its edit, and what its settings are read against.
 struct Editing {
@@ -164,6 +173,10 @@ pub struct App {
     before: bool,
     /// The keyboard shortcuts legend is open.
     legend: bool,
+    /// The info overlay shown over the loupe, if one is (I), and the one
+    /// Ctrl+I shows again.
+    info: Option<Info>,
+    info_last: Info,
     /// The groups of settings whose panels are switched off: the loupe
     /// shows every frame without them, until they're on again or another
     /// shoot is opened. Never saved.
@@ -285,6 +298,8 @@ impl App {
             selector: false,
             before: false,
             legend: false,
+            info: None,
+            info_last: Info::One,
             off: Vec::new(),
             picking: None,
             exporting: None,
@@ -538,6 +553,16 @@ impl App {
             Command::BeforeAfter => self.before = !self.before && self.shoot.is_some(),
             Command::Clipping => self.clipping = !self.clipping,
             Command::Shortcuts => self.legend = !self.legend,
+            // Lightroom's I: Info 1, Info 2, none, and round again.
+            Command::InfoCycle => {
+                self.info = match self.info {
+                    None => Some(Info::One),
+                    Some(Info::One) => Some(Info::Two),
+                    Some(Info::Two) => None,
+                };
+                self.info_last = self.info.unwrap_or(self.info_last);
+            }
+            Command::InfoShow => self.info = if self.info.is_some() { None } else { Some(self.info_last) },
             // The crop tool shows the frame whole.
             Command::Zoom if self.crop.is_some() => {}
             Command::Zoom => {
@@ -1183,8 +1208,13 @@ impl App {
                     let frame = crate::crop::Frame { area: self.loupe.area(), whole: self.loupe.whole(path, settings.orientation), dims };
                     cropped = Some(tool.show(ui, &self.theme, frame, settings, self.crop_locked));
                 }
+                let mut corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);
+                if let Some(info) = self.info {
+                    let editing = self.edits.get(path);
+                    let lines = info_lines(info, &shoot.frame().name(), editing.map(|e| (&e.camera.capture, e.history.settings())));
+                    corner = info_overlay(ui, &self.theme, corner, &lines);
+                }
                 // What the loupe leaves out, so it isn't forgotten.
-                let corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);
                 if self.before {
                     ui.painter().text(corner, Align2::LEFT_TOP, "Before", FontId::proportional(13.0), self.theme.foreground);
                 } else if !self.off.is_empty() {
@@ -1383,6 +1413,43 @@ fn status(shoot: &Shoot) -> String {
         n => format!("   {n} selected"),
     };
     format!("{}   {mark}{place} / {of}{selected}", shoot.frame().name())
+}
+
+/// What an info overlay says of a frame: its name first, then what's
+/// known of the rest. `shot` is how it was shot and its settings, once its
+/// raw has been decoded.
+fn info_lines(info: Info, name: &str, shot: Option<(&look::Capture, &DevelopSettings)>) -> Vec<String> {
+    let rest = shot.map_or_else(Vec::new, |(capture, settings)| match info {
+        Info::One => [capture.time.clone(), capture.cropped(settings)].into_iter().flatten().collect(),
+        Info::Two => [capture.exposure(), capture.optics()].into_iter().flatten().collect(),
+    });
+    std::iter::once(name.to_owned()).chain(rest).collect()
+}
+
+/// The info overlay's lines at the loupe's corner, the first larger, on a
+/// plate so they read over any frame. Where what goes under it starts.
+fn info_overlay(ui: &Ui, theme: &Theme, corner: egui::Pos2, lines: &[String]) -> egui::Pos2 {
+    let painter = ui.painter();
+    let galleys: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let size = if i == 0 { 15.0 } else { 12.5 };
+            let colour = if i == 0 { theme.foreground } else { theme.dark_foreground };
+            painter.layout_no_wrap(line.clone(), FontId::proportional(size), colour)
+        })
+        .collect();
+    let width = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max);
+    let height: f32 = galleys.iter().map(|g| g.size().y + 2.0).sum();
+    let plate = egui::Rect::from_min_size(corner - egui::vec2(6.0, 4.0), egui::vec2(width + 12.0, height + 6.0));
+    painter.rect_filled(plate, 4.0, theme.dark_background.gamma_multiply(0.8));
+    let mut at = corner;
+    for galley in galleys {
+        let h = galley.size().y;
+        painter.galley(at, galley, theme.foreground);
+        at.y += h + 2.0;
+    }
+    egui::pos2(corner.x, plate.bottom() + 6.0)
 }
 
 /// How a paste went.
@@ -3043,37 +3110,37 @@ mod tests {
         h.press(Modifiers::NONE, Key::Comma);
         assert_eq!(h.app.selected, 0);
 
-        // Step forward through Light (2..7), HDR (8..10), Presence (11..12), to Amount in Detail (13).
-        for _ in 0..13 {
+        // Step forward through Light (2..7), HDR (8..10), Presence (11..15), to Amount in Detail (16).
+        for _ in 0..16 {
             h.press(Modifiers::NONE, Key::Period);
         }
-        assert_eq!(h.app.selected, 13);
+        assert_eq!(h.app.selected, 16);
         assert_eq!(h.settings().detail.sharpen_amount, 40.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().detail.sharpen_amount, 41.0, "nudged Amount");
 
-        // Step forward to Luminance (index 17).
+        // Step forward to Luminance (index 20).
         for _ in 0..4 {
             h.press(Modifiers::NONE, Key::Period);
         }
-        assert_eq!(h.app.selected, 17);
+        assert_eq!(h.app.selected, 20);
         assert_eq!(h.settings().detail.nr_luminance, 0.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().detail.nr_luminance, 1.0, "nudged Luminance");
 
         // Step forward past the profile's Distortion and Vignetting to
-        // Purple Amount in Lens Corrections (index 21).
+        // Purple Amount in Lens Corrections (index 24).
         for _ in 0..4 {
             h.press(Modifiers::NONE, Key::Period);
         }
-        assert_eq!(h.app.selected, 21);
+        assert_eq!(h.app.selected, 24);
         assert_eq!(h.settings().optics.defringe_purple_amount, 0.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().optics.defringe_purple_amount, 1.0, "nudged Purple Amount");
 
         // Step back with comma.
         h.press(Modifiers::NONE, Key::Comma);
-        assert_eq!(h.app.selected, 20);
+        assert_eq!(h.app.selected, 23);
     }
 
     #[test]
@@ -3208,7 +3275,7 @@ mod tests {
         let specs: Vec<_> = develop::sliders().collect();
         let at = specs.iter().position(|spec| spec.id == "light.hdr").unwrap();
         let ids = |range: std::ops::RangeInclusive<usize>| specs[range].iter().map(|spec| spec.id).collect::<Vec<_>>();
-        assert_eq!(ids(at - 1..=at + 3), ["light.blacks", "light.hdr", "light.hdrHighlights", "light.hdrShadows", "color.vibrance"]);
+        assert_eq!(ids(at - 1..=at + 3), ["light.blacks", "light.hdr", "light.hdrHighlights", "light.hdrShadows", "effects.texture"]);
         h.app.selected = at;
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().light.hdr, 1.0);
@@ -3216,6 +3283,45 @@ mod tests {
         h.press(Modifiers::NONE, Key::Minus);
         h.press(Modifiers::NONE, Key::Minus);
         assert_eq!(h.settings().light.hdr, 0.0, "it stops at 0");
+    }
+
+    #[test]
+    fn i_cycles_lightrooms_info_overlays_and_ctrl_i_shows_or_hides_the_last() {
+        let folder = Folder::new("info", &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let path = h.app.shoot.as_ref().unwrap().frame().path.clone();
+        let capture = look::Capture {
+            time: Some("2026-10-04 15:43:16".into()),
+            iso: Some(100),
+            shutter: Some(1.0 / 250.0),
+            aperture: Some(1.8),
+            focal: Some(85.0),
+            lens: Some("FE 85mm F1.8".into()),
+            size: Some((6000, 4000)),
+        };
+        h.app.edits.get_mut(&path).unwrap().camera = Arc::new(Camera { capture, ..Camera::default() });
+        let shown = |output: &egui::FullOutput| texts(output).into_iter().map(|(text, _)| text).collect::<Vec<_>>();
+        let has = |output: &egui::FullOutput, text: &str| shown(output).iter().any(|t| t == text);
+        let output = h.frame(vec![]);
+        assert!(!has(&output, "2026-10-04 15:43:16"), "none to begin with");
+        let output = h.press(Modifiers::NONE, Key::I);
+        let output = if has(&output, "6000 × 4000") { output } else { h.frame(vec![]) };
+        assert!(has(&output, "2026-10-04 15:43:16") && has(&output, "6000 × 4000"), "Info 1: {:?}", shown(&output));
+        h.press(Modifiers::NONE, Key::I);
+        let output = h.frame(vec![]);
+        assert!(has(&output, "1/250 sec at f/1.8, ISO 100") && has(&output, "FE 85mm F1.8 at 85 mm"), "Info 2: {:?}", shown(&output));
+        assert!(!has(&output, "6000 × 4000"));
+        h.press(Modifiers::NONE, Key::I);
+        let output = h.frame(vec![]);
+        assert!(!has(&output, "1/250 sec at f/1.8, ISO 100"), "and none");
+        h.press(Modifiers::COMMAND, Key::I);
+        let output = h.frame(vec![]);
+        assert!(has(&output, "1/250 sec at f/1.8, ISO 100"), "Ctrl+I shows the last one again");
+        h.press(Modifiers::COMMAND, Key::I);
+        let output = h.frame(vec![]);
+        assert!(!has(&output, "1/250 sec at f/1.8, ISO 100"), "and hides it");
     }
 
     #[test]

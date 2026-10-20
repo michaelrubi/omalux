@@ -78,6 +78,10 @@ pub enum Command {
     Flat,
     /// The legend of every command and its key, or put it away.
     Shortcuts,
+    /// The loupe's info overlay: Info 1, Info 2, none.
+    InfoCycle,
+    /// The loupe's info overlay shown, or hidden.
+    InfoShow,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -137,6 +141,8 @@ impl Command {
         Command::AutoLevel,
         Command::Flat,
         Command::Shortcuts,
+        Command::InfoCycle,
+        Command::InfoShow,
     ];
 
     /// Look a command up by its name in code, e.g. "Open".
@@ -197,6 +203,8 @@ impl Command {
         Command::AutoTone,
         Command::Flat,
         Command::Shortcuts,
+        Command::InfoShow,
+        Command::InfoCycle,
     ];
 
     pub fn label(self) -> &'static str {
@@ -252,6 +260,8 @@ impl Command {
             Command::AutoLevel => "Auto Level",
             Command::Flat => "Flat Profile, or Camera Match",
             Command::Shortcuts => "Keyboard Shortcuts",
+            Command::InfoCycle => "Cycle the Info Overlay",
+            Command::InfoShow => "Show or Hide the Info Overlay",
         }
     }
 
@@ -318,6 +328,9 @@ impl Command {
             Command::Flat => s(Modifiers::NONE, Key::F),
             // Lightroom's Develop Shortcuts.
             Command::Shortcuts => s(CMD, Key::Slash),
+            // Lightroom's loupe info.
+            Command::InfoCycle => s(Modifiers::NONE, Key::I),
+            Command::InfoShow => s(CMD, Key::I),
         }
     }
 
@@ -453,6 +466,8 @@ mod tests {
         assert_eq!(press(&ctx, Modifiers::NONE, Key::W), [Command::WhiteBalance]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::Backslash), [Command::BeforeAfter]);
         assert_eq!(press(&ctx, CMD, Key::Slash), [Command::Shortcuts]);
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::I), [Command::InfoCycle]);
+        assert_eq!(press(&ctx, CMD, Key::I), [Command::InfoShow], "not mistaken for a cycle");
     }
 
     #[test]
