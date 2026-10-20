@@ -909,8 +909,11 @@ impl App {
         if let Some(profile) = out.profile {
             self.edit(|history, _| history.set(|settings| profile.set(settings)));
         }
-        if out.as_shot {
-            self.edit(|history, info| history.set(|settings| edit::as_shot(settings, info)));
+        match out.wb {
+            Some(lightcraft_develop::WbMode::AsShot) => self.edit(|history, info| history.set(|settings| edit::as_shot(settings, info))),
+            Some(lightcraft_develop::WbMode::Auto) => self.auto(Auto::WhiteBalance),
+            Some(preset) => self.edit(|history, info| history.set(|settings| _ = edit::preset_white_balance(settings, info, preset))),
+            None => {}
         }
         if let Some(what) = out.auto {
             self.auto(what);
@@ -3230,10 +3233,40 @@ mod tests {
         h.click(auto_btn.center());
         assert_eq!(h.settings().wb.mode, WbMode::Auto);
 
-        // State word is now "Auto", clicking it goes back to As Shot.
-        let auto_state = h.text("Auto");
+        // State word is now "Auto", a click on it is the WB menu, and As
+        // Shot in it goes back.
+        let auto_state = h.text("Auto ▾");
         h.click(auto_state.center());
+        let as_shot = h.text("As Shot");
+        h.click(as_shot.center());
         assert_eq!(h.settings().wb.mode, WbMode::AsShot);
+    }
+
+    #[test]
+    fn the_wb_menu_sets_a_preset_as_one_step_and_a_paste_keeps_it() {
+        use lightcraft_develop::WbMode;
+        let folder = Folder::new("wb-preset", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().clone();
+        let menu = h.text("As Shot ▾");
+        h.click(menu.center());
+        let tungsten = h.text("Tungsten");
+        h.click(tungsten.center());
+        assert_eq!((h.settings().wb.mode, h.settings().wb.temp, h.settings().wb.tint), (WbMode::Tungsten, 2850.0, 0.0));
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        // Pasted as the preset, not as the frame's own as-shot white balance.
+        copy(&mut h);
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.settle();
+        paste(&mut h, Modifiers::COMMAND);
+        assert_eq!((h.settings().wb.mode, h.settings().wb.temp), (WbMode::Tungsten, 2850.0));
+        h.press(Modifiers::NONE, Key::ArrowLeft);
+        h.settle();
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh, "one step to undo");
     }
 
     #[test]

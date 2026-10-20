@@ -199,6 +199,17 @@ pub fn as_shot(settings: &mut DevelopSettings, info: &SourceInfo) {
     (settings.wb.mode, settings.wb.temp, settings.wb.tint) = (WbMode::AsShot, info.as_shot_temp, info.as_shot_tint);
 }
 
+/// One of Lightroom's white balance presets (Daylight, Cloudy, Shade,
+/// Tungsten, Fluorescent, Flash): its Kelvin and tint, as Lightcraft's
+/// `WbMode::preset` has them, which is what the pipeline renders a preset
+/// with. False for a mode that isn't a preset.
+pub fn preset_white_balance(settings: &mut DevelopSettings, info: &SourceInfo, mode: WbMode) -> bool {
+    let Some((temp, tint)) = mode.preset() else { return false };
+    lightcraft_pipeline::local::normalize_wb(settings, info);
+    (settings.wb.mode, settings.wb.temp, settings.wb.tint) = (mode, temp, tint);
+    true
+}
+
 /// The white balance that makes the source's pixels round a point
 /// neutral: Lightroom's White Balance Selector. `at` is the point as a
 /// share of the frame's width and height. As Lightcraft's `develop.wbPick`
@@ -251,6 +262,20 @@ mod tests {
         assert_eq!(neutral.wb.mode, WbMode::Custom);
         assert!((neutral.wb.temp - 6500.0).abs() < 100.0 && neutral.wb.tint.abs() < 2.0, "grey is neutral already: {:?}", neutral.wb);
         assert!(warm.wb.temp < neutral.wb.temp - 500.0, "a warm cast is cooled: {:?}", warm.wb);
+    }
+
+    #[test]
+    fn a_preset_is_its_kelvin_and_tint_and_as_shot_isnt_one() {
+        let info = SourceInfo { raw: true, as_shot_temp: 5200.0, as_shot_tint: 3.0, ..SourceInfo::default() };
+        let mut s = DevelopSettings::default();
+        assert!(preset_white_balance(&mut s, &info, WbMode::Tungsten));
+        assert_eq!((s.wb.mode, s.wb.temp, s.wb.tint), (WbMode::Tungsten, 2850.0, 0.0));
+        assert!(preset_white_balance(&mut s, &info, WbMode::Shade));
+        assert_eq!((s.wb.mode, s.wb.temp, s.wb.tint), (WbMode::Shade, 7500.0, 10.0));
+        let was = s.clone();
+        assert!(!preset_white_balance(&mut s, &info, WbMode::AsShot));
+        assert!(!preset_white_balance(&mut s, &info, WbMode::Custom));
+        assert_eq!(s, was, "and changes nothing");
     }
 
     #[test]

@@ -140,8 +140,9 @@ pub struct PanelOut {
     pub slider: Option<(usize, SliderOut)>,
     /// The profile was clicked: the one to go to.
     pub profile: Option<Profile>,
-    /// As Shot was clicked.
-    pub as_shot: bool,
+    /// A white balance was chosen from the WB menu: As Shot, Auto or a
+    /// preset.
+    pub wb: Option<WbMode>,
     /// An Auto button was clicked.
     pub auto: Option<Auto>,
     /// Remove Chromatic Aberration was ticked, or unticked.
@@ -200,6 +201,26 @@ fn word(ui: &mut Ui, right: &mut egui::Pos2, text: &str, colour: egui::Color32, 
     ui.interact(rect.expand(3.0), ui.id().with(text), Sense::click()).on_hover_text(hover).clicked()
 }
 
+/// Lightroom's WB menu, on the word naming the white balance: As Shot,
+/// Auto and the presets. Custom is what Temp and Tint make, so it's only
+/// ever shown, not chosen. The mode chosen, if one was.
+fn wb_menu(ui: &mut Ui, theme: &Theme, right: &mut egui::Pos2, mode: WbMode) -> Option<WbMode> {
+    let galley = ui.painter().layout_no_wrap(format!("{} ▾", mode.label()), FontId::proportional(12.5), theme.foreground);
+    let rect = Align2::RIGHT_CENTER.anchor_size(*right, galley.size());
+    right.x = rect.left() - 10.0;
+    ui.painter().galley(rect.min, galley, theme.foreground);
+    let response = ui.interact(rect.expand(3.0), ui.id().with("wb.menu"), Sense::click()).on_hover_text("White balance");
+    let mut chosen = None;
+    egui::Popup::menu(&response).show(|ui| {
+        for choice in WbMode::ALL.into_iter().filter(|choice| *choice != WbMode::Custom) {
+            if ui.selectable_label(choice == mode, choice.label()).clicked() {
+                chosen = Some(choice);
+            }
+        }
+    });
+    chosen.filter(|chosen| *chosen != mode)
+}
+
 /// The sliders showing `settings`. `fresh` is what a double-click resets
 /// each to; `selected` is the slider the keys act on; `camera` is what
 /// the frame's camera did, which names its profile; `off` is the groups
@@ -231,13 +252,9 @@ pub fn show(ui: &mut Ui, theme: &Theme, settings: &DevelopSettings, fresh: &Deve
                 }
             }
             "White Balance" => {
-                // Lightroom's "WB: As Shot": what the white balance is, and
-                // a click to put it back; and Auto beside it.
-                out.as_shot = match settings.wb.mode {
-                    WbMode::AsShot => word(ui, &mut right, "As Shot", theme.dark_foreground, None),
-                    WbMode::Auto => word(ui, &mut right, "Auto", theme.foreground, Some("Back to As Shot")),
-                    _ => word(ui, &mut right, "Custom", theme.foreground, Some("Back to As Shot")),
-                };
+                // Lightroom's "WB: As Shot": what the white balance is, a
+                // click on it for its menu; and Auto beside it.
+                out.wb = wb_menu(ui, theme, &mut right, settings.wb.mode);
                 if settings.wb.mode != WbMode::Auto && word(ui, &mut right, "Auto", theme.foreground, Some(&tip(Command::AutoWhiteBalance))) {
                     out.auto = Some(Auto::WhiteBalance);
                 }
