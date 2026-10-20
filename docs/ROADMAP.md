@@ -23,7 +23,9 @@ mostly OmaLux's own parts (the folder, the sidecar, the UI, the handoff)
 around controls that already work; M4 to M6 were what Lightcraft didn't
 have, though since the plan it has added lens profiles and raw denoise
 (see "Built on Lightcraft" in DESIGN.md), which makes M5 and M6 smaller.
-The order of M3 to M6 can change once M1 is in daily use.
+The order of M3 to M6 can change once M1 is in daily use. M8 and M9 were
+added on 2026-10-20, from a pass over what Lightroom's Develop module
+and Lightcraft have that OmaLux didn't.
 
 ## M0. Vendor, spikes and scaffold
 
@@ -622,6 +624,152 @@ its own. None of it tried by hand yet.
 - README, CONTRIBUTING, screenshots; Lightcraft credited.
 - `config.toml` with every setting explained.
 - Omacull's README and `config.toml` mention `developer = "omalux"`.
+
+## M8. Presence, Transform and the loupe
+
+What Lightroom's Develop module has that a prep still wants. Found on
+2026-10-20 by going through Lightcraft's `DevelopSettings` against
+DESIGN.md. Lightcraft already renders every one of these controls on the
+CPU and the GPU, so the work is OmaLux's panels, keys, copy groups and
+views. Every new setting's default is what's rendered today, so an edit
+that doesn't use one renders as before and the process version stays.
+Smallest first.
+
+- **White balance presets.** Lightroom's menu in the White Balance
+  panel: As Shot, Auto, Daylight, Cloudy, Shade, Tungsten, Fluorescent,
+  Flash, and Custom once Temp or Tint is moved. Lightcraft's `WbMode`
+  has them all, at the Kelvin and tint Lightroom's panel shows. A preset
+  is pasted as that preset (a fixed Kelvin), unlike As Shot, which each
+  frame gets its own of. Tests: each preset's Temp and Tint, and a
+  paste.
+- **Texture, Clarity and Dehaze** in Presence, above Vibrance and
+  Saturation, as in Lightroom (Lightcraft's `effects.texture`,
+  `effects.clarity` and `effects.dehaze`). The Presence copy group and
+  the panel's switch take `effects` along with `color`.
+  Shift+double-click gives whatever Lightcraft's Auto has for each, or
+  says it has nothing. Checks:
+  - How they stack with HDR. Dehaze, Clarity and HDR all work on local
+    contrast, on top of Light's local tone mapping. Try HDR at 50 with
+    Dehaze at +30 and Clarity at +30 on backlit frames, at 100%, and
+    look for halos.
+  - That `look::effective` puts DRO's lift and Flat's curve where
+    Lightroom's profile sits relative to them.
+  - The GPU against the CPU for each, within 1/255, at fit and in a
+    100% window. Dehaze takes its airlight from the whole frame, so a
+    window has to match the fit view. Upstream's "Dehaze's zoomed proxy"
+    was left out of the re-sync because OmaLux had no Dehaze (see
+    "Keeping up with Lightcraft"); take it now.
+- **Info overlay** (I): Lightroom's loupe info. I cycles Info 1, Info 2
+  and off, and Ctrl+I shows or hides it. Info 1 shows the file name, the
+  capture date and time, and the cropped size. Info 2 shows ISO,
+  shutter, aperture, focal length and lens. The data comes from the Exif
+  `meta` already reads. The fields are fixed: Lightroom lets you choose
+  them, but nobody here needs that setting.
+- **Before/after views** (Y, Alt+Y, Shift+Y): Lightroom's left/right,
+  top/bottom, and the one frame split down the middle. Y again goes back
+  to the loupe, and `\` stays the toggle it is. "Before" is the frame
+  with no edit through `look::effective`, as `\` shows it. Zoom and pan
+  are locked between the two halves, including at 100%. "Before" is
+  rendered once per frame and kept, since it doesn't change while you
+  edit, so a drag still costs one render. The histogram and the clipping
+  warnings stay the edit's. Opening the crop tool or the Guided Upright
+  tool goes back to the loupe, as Lightroom does. Headless tests: each
+  view's layout, the locked pan, and that the before render is kept
+  across a drag.
+- **Transform:** Lightroom's panel, below Lens Corrections. Upright
+  (Off, Auto, Guided, Level, Vertical, Full), Vertical, Horizontal,
+  Rotate, Aspect, Scale, Offset X and Y, and Constrain Crop. This is
+  Lightcraft's `Geometry`, and its `upright` analysis of the
+  lens-corrected frame. The analysis runs once, when a mode is chosen,
+  off the UI thread, and its result is stored in the edit
+  (`upright_transform`) so the loupe and the export use the same
+  transform.
+  - Upright works best with the lens profile on, as Lightroom says. The
+    panel says so when Enable Profile Corrections is off.
+  - Guided (Shift+T, Lightroom's Guided Upright tool): draw up to four
+    lines along verticals or horizontals on the loupe. It's a tool like
+    the crop's: Return or Esc puts it away.
+  - The crop tool shows the transformed frame. Constrain Crop keeps the
+    crop inside the picture, and is off by default, as Lightroom's is.
+    Check what Lightcraft draws outside the picture when it's off.
+  - Auto level stays in the crop panel. Lightroom has both: the crop's
+    straighten turns the frame, and Upright's Level is a perspective
+    transform.
+  - A Transform copy group (Lightroom has one), and the panel's switch.
+    A pasted automatic mode is analysed again on each frame it reaches,
+    since the transform belongs to the frame it was found on. Guided
+    pastes its lines. Quarter turns stay in no group, as now.
+  - Checks: the GPU's `sample_warp` with a homography against the CPU;
+    a drag of Vertical still shows in the next frame; how long Auto's
+    analysis takes on a full 24 MP frame.
+
+## M9. Sets, exporting again and dust
+
+The rest of the 2026-10-20 list, about working a set rather than a
+frame. Exporting again and dust each start with a decision of
+Michael's.
+
+- **Auto Sync.** In Lightroom, with more than one frame selected, the
+  Sync button switches to Auto Sync (Ctrl+Alt+Shift+A; check this
+  against Lightroom's shortcut list when it's built), and from then on a
+  change to the frame in front is made on every selected frame as it's
+  made. Here it's the same switch, shown on the panel while it's on, and
+  it acts only while there's a selection. The selection rule stays: a
+  plain step clears the selection, so Auto Sync never reaches a frame
+  you've moved away from.
+  - What's synced is the setting touched, as an absolute value, as
+    Lightroom does: Exposure moved to +0.7 is +0.7 on each frame, not
+    the same nudge. White balance as shot stays each frame's own, as in
+    a paste. Auto tone, Auto white balance and an automatic Upright run
+    on each frame for itself. A crop is brought inside each frame's
+    shape.
+  - A drag is one undo step across all of the frames, as a paste is.
+    Only the frame in front renders live; the others' thumbnails are
+    redone and their sidecars written once, when the drag ends.
+  - Headless tests: a drag over a selection of three writes the value
+    to each, once; as-shot white balance stays per frame; one Ctrl+Z
+    takes the drag back from all three.
+- **Edited and exported marks** in the filmstrip: one mark for a frame
+  whose edit isn't a fresh raw's, one for a frame that's been exported,
+  and the exported mark in the warning colour when the edit has changed
+  since. An export records itself in the sidecar, in OmaLux's namespace:
+  `omalux:exported` holds the TIFF's name and the `hash64` of the
+  effective settings it was rendered with. Tests: each mark from a
+  sidecar, and a sidecar Omacull wrote (it has none of OmaLux's part)
+  that stays byte for byte except for what's added.
+- **Exporting again** (M1's open question). A TIFF is never written
+  over, because Omapix saves its retouching into it. *Decide first,*
+  with Michael, between:
+  1. Lightroom's way: a new file beside the old one (`DSC01234-2.tif`),
+     with the old one and its retouching left alone. Ctrl+E opens the
+     newest.
+  2. Writing over the TIFF when Omapix hasn't saved into it since the
+     export, and doing 1 when it has. This needs a way to tell: the
+     TIFF's mtime against the time in `omalux:exported`, or Omapix's
+     files beside it.
+
+  2 is the suggestion, since it's what's wanted almost every time. Both
+  ways, Ctrl+Shift+E on a frame marked out of date exports it again, and
+  on a frame that's up to date does nothing.
+- **Dust spots.** Healing is Omapix's, but sensor dust is in the same
+  place on every frame of a shoot. A raw developer fixes it once for the
+  set; Omapix would fix it frame by frame. *Decide first:* only if the
+  A7 III's sensor has dust. Check with a frame at f/16 against a clear
+  sky. If it does:
+  - Spot Removal (Q), heal circles only: no brush and no clone, which
+    stay Omapix's. Size, Feather and Opacity, as Lightroom's. Lightroom
+    has the same tool, so the rule against healing is narrowed to this
+    rather than dropped.
+  - Visualize Spots (A in the tool, as Lightroom's), and a Find Dust
+    button that runs Lightcraft's `dust::detect` and adds what it finds
+    for you to keep or delete (Auto is a button).
+  - A Spot Removal copy group, so a set's dust is fixed once. Lightcraft
+    keeps spots in the oriented frame's coordinates, but dust is fixed
+    to the sensor. A paste onto a frame turned another way has to carry
+    the spots through the quarter turns. Test that with a portrait frame
+    and a landscape one.
+  - The GPU against the CPU for spots, within 1/255, including a 100%
+    window, which spots grow (see `gpu/render.rs`).
 
 ## Ongoing: keeping up with Lightcraft
 
