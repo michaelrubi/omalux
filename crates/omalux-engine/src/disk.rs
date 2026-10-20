@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
 use crate::shoot::Rating;
-use crate::sidecar::{self, Edit};
+use crate::sidecar::{self, Edit, Exported};
 
 /// A mark made, to be written.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +33,8 @@ enum Work {
     Mark(Box<Mark>),
     /// A raw's edit, as it stands.
     Edit(PathBuf, Box<Edit>),
+    /// A raw's last export.
+    Exported(PathBuf, Box<Exported>),
     /// Say when everything before has been written.
     Flush(Sender<()>),
 }
@@ -60,6 +62,10 @@ impl Disk {
                         }),
                         Work::Edit(path, edit) => {
                             let written = sidecar::update(&path, |xmp| sidecar::with_edit(xmp, &edit));
+                            written.err().map(|e| Problem::Edit { path, error: e.to_string() })
+                        }
+                        Work::Exported(path, exported) => {
+                            let written = sidecar::update(&path, |xmp| sidecar::with_exported(xmp, &exported));
                             written.err().map(|e| Problem::Edit { path, error: e.to_string() })
                         }
                         Work::Flush(done) => {
@@ -90,6 +96,14 @@ impl Disk {
     pub fn save(&self, path: PathBuf, edit: Edit) {
         if let Some(marks) = &self.marks {
             let _ = marks.send(Work::Edit(path, Box::new(edit)));
+        }
+    }
+
+    /// Keep a raw's last export in its sidecar, after everything sent
+    /// before.
+    pub fn exported(&self, path: PathBuf, exported: Exported) {
+        if let Some(marks) = &self.marks {
+            let _ = marks.send(Work::Exported(path, Box::new(exported)));
         }
     }
 

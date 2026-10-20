@@ -52,6 +52,11 @@ pub struct Frame {
     pub captured: Option<f64>,
     /// What it looks like, roughly, for stacking by look.
     pub signature: Option<Signature>,
+    /// Its sidecar holds an edit, and which ([`sidecar::export_key`]), as
+    /// it was when the shoot was opened.
+    pub edit_key: Option<String>,
+    /// Its last export, as its sidecar held it when the shoot was opened.
+    pub exported: Option<sidecar::Exported>,
 }
 
 impl Frame {
@@ -132,7 +137,12 @@ impl Shoot {
         let read: Vec<(Frame, Option<String>)> = paths
             .into_par_iter()
             .map(|path| {
-                let rating = sidecar::read(&path).and_then(|xmp| xmp.as_deref().map(sidecar::rating).transpose());
+                let xmp = sidecar::read(&path);
+                let rating = xmp.as_ref().map_err(|e| io::Error::new(e.kind(), e.to_string())).and_then(|xmp| xmp.as_deref().map(sidecar::rating).transpose());
+                // What it holds of OmaLux's; one that can't be read is said when its edit's wanted.
+                let xmp = xmp.ok().flatten();
+                let edit_key = xmp.as_deref().and_then(|xmp| sidecar::edit(xmp).ok().flatten()).map(|edit| sidecar::export_key(Some(&edit.settings)));
+                let exported = xmp.as_deref().and_then(|xmp| sidecar::exported(xmp).ok().flatten());
                 let (rating, problem) = match rating {
                     Ok(rating) => (rating.flatten().unwrap_or(0).clamp(REJECT, 5), None),
                     Err(e) => (0, Some(format!("{}: {e}", sidecar::path_for(&path).display()))),
@@ -143,7 +153,7 @@ impl Shoot {
                     let jpeg = r.read(r.thumbnail().filter(|j| j.len < 1 << 20)?).ok()?;
                     Some(Signature::of(&crate::thumbs::decode_thumb(&jpeg).ok()?))
                 });
-                (Frame { path, rating, captured, signature }, problem)
+                (Frame { path, rating, captured, signature, edit_key, exported }, problem)
             })
             .collect();
         let (frames, problems): (Vec<Frame>, Vec<Option<String>>) = read.into_iter().unzip();
@@ -434,6 +444,8 @@ mod tests {
             rating,
             captured: None,
             signature: None,
+            edit_key: None,
+            exported: None,
         });
         Shoot::new("/shoot".into(), frames.collect())
     }
@@ -444,6 +456,8 @@ mod tests {
             rating,
             captured: Some(t),
             signature: None,
+            edit_key: None,
+            exported: None,
         });
         Shoot::new("/shoot".into(), frames.collect())
     }

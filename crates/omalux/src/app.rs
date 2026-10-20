@@ -62,13 +62,23 @@ struct Editing {
     camera: Arc<Camera>,
     /// The history's settings, as the renderer is handed them.
     settings: Arc<DevelopSettings>,
+    /// Which edit it is, as an export records it ([`sidecar::export_key`]):
+    /// what tells a frame edited since its export.
+    key: String,
+}
+
+/// [`sidecar::export_key`] of a frame's edit: `fresh` for one that's a
+/// fresh raw's, as an export names it.
+fn key_of(history: &History) -> String {
+    sidecar::export_key(history.edited().then_some(history.settings()))
 }
 
 impl Editing {
     fn new(history: History, decoded: Option<(Arc<SourceInfo>, Arc<Camera>)>) -> Self {
         let settings = Arc::new(history.settings().clone());
         let (info, camera) = decoded.unzip();
-        Self { history, info, camera: camera.unwrap_or_default(), settings }
+        let key = key_of(&history);
+        Self { history, info, camera: camera.unwrap_or_default(), settings, key }
     }
 
     /// Change the edit with `change`, which says whether it did. Nothing
@@ -86,6 +96,7 @@ impl Editing {
         let changed = *self.settings != *self.history.settings();
         if changed {
             self.settings = Arc::new(self.history.settings().clone());
+            self.key = key_of(&self.history);
         }
         changed
     }
@@ -111,7 +122,7 @@ pub struct Workers {
 /// Frames being exported to a folder, and how it's gone so far.
 struct Exporting {
     to: PathBuf,
-    /// The TIFF files that were asked for, including those already present.
+    /// The TIFFs written, or there already, as each frame is dealt with.
     tiffs: Vec<PathBuf>,
     total: usize,
     exported: usize,
@@ -121,8 +132,8 @@ struct Exporting {
     failed: Vec<String>,
     /// Whether to open in the configured program once done.
     edit: bool,
-    /// Whether each was exported, as it's dealt with.
-    results: Receiver<Result<bool, String>>,
+    /// What each frame's export did, as it's dealt with.
+    results: Receiver<(PathBuf, Result<omalux_engine::export::Exported, String>)>,
 }
 
 impl Exporting {
@@ -201,6 +212,9 @@ pub struct App {
     /// Whether V is held, between frames: how Ctrl+V is told (see
     /// [`Command::pressed`]).
     v_down: bool,
+    /// The frames exported this session: each one's last export, as its
+    /// sidecar now holds it (the shoot has what they held at open).
+    exports: HashMap<PathBuf, sidecar::Exported>,
     /// The settings last copied, for the session.
     clipboard: Option<Copied>,
     /// How many pastes there have been: each one's number is on its step
@@ -318,6 +332,7 @@ impl App {
             watch,
             display,
             v_down: false,
+            exports: HashMap::new(),
             clipboard: None,
             pastes: 0,
             at: None,
@@ -384,6 +399,7 @@ impl App {
         self.saved.clear();
         self.unreadable.clear();
         self.edits.clear();
+        self.exports.clear();
         self.filmstrip.reset();
         (self.at, self.previous) = (None, None);
         self.choosing = None;
@@ -446,24 +462,20 @@ impl App {
             return;
         }
         let to = shoot.dir().join(&self.config.export_folder);
-        let tiffs: Vec<PathBuf> = frames
-            .iter()
-            .map(|f| {
-                let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                to.join(format!("{stem}.tif"))
-            })
-            .collect();
         let (tx, rx) = channel();
         // Each with its edit as it stands, where it's been opened this
         // session; the rest are exported with what their sidecars hold.
-        let to_export: Vec<(PathBuf, Option<Arc<DevelopSettings>>)> =
-            frames.iter().map(|frame| (frame.clone(), self.edits.get(frame).map(|editing| editing.settings.clone()))).collect();
+        // And each with its last export, to tell whether it's to be done
+        // again.
+        let last = |frame: &PathBuf| self.exports.get(frame).cloned().or_else(|| shoot.frames().iter().find(|f| f.path == *frame).and_then(|f| f.exported.clone()));
+        let to_export: Vec<(PathBuf, Option<Arc<DevelopSettings>>, Option<sidecar::Exported>)> =
+            frames.iter().map(|frame| (frame.clone(), self.edits.get(frame).map(|editing| editing.settings.clone()), last(frame))).collect();
         let (ctx, target) = (ctx.clone(), to.clone());
         let total = frames.len();
         self.message = Some((format!("Exporting 1 of {total}…"), false));
         self.exporting = Some(Exporting {
             to,
-            tiffs,
+            tiffs: Vec::new(),
             total,
             exported: 0,
             there: 0,
@@ -472,10 +484,10 @@ impl App {
             results: rx,
         });
         std::thread::spawn(move || {
-            for (frame, settings) in to_export {
-                let res = omalux_engine::export::export(&frame, &target, settings.as_deref())
+            for (frame, settings, last) in to_export {
+                let res = omalux_engine::export::export(&frame, &target, settings.as_deref(), last.as_ref())
                     .map_err(|e| format!("{}: {e}", file_name(&frame)));
-                if tx.send(res).is_err() {
+                if tx.send((frame, res)).is_err() {
                     return;
                 }
                 ctx.request_repaint();
@@ -488,9 +500,17 @@ impl App {
         let mut more = false;
         loop {
             match exporting.results.try_recv() {
-                Ok(Ok(true)) => exporting.exported += 1,
-                Ok(Ok(false)) => exporting.there += 1,
-                Ok(Err(why)) => exporting.failed.push(why),
+                Ok((frame, Ok(omalux_engine::export::Exported::Written { tiff, record }))) => {
+                    exporting.exported += 1;
+                    exporting.tiffs.push(tiff);
+                    self.disk.exported(frame.clone(), record.clone());
+                    self.exports.insert(frame, record);
+                }
+                Ok((_, Ok(omalux_engine::export::Exported::There(tiff)))) => {
+                    exporting.there += 1;
+                    exporting.tiffs.push(tiff);
+                }
+                Ok((_, Err(why))) => exporting.failed.push(why),
                 Err(TryRecvError::Empty) if more => {
                     let done = exporting.exported + exporting.there + exporting.failed.len();
                     if done < exporting.total {
@@ -1413,7 +1433,9 @@ impl App {
     /// The shown frames' thumbnails, under the loupe.
     fn filmstrip(&mut self, ui: &mut Ui) {
         let Some(shoot) = &mut self.shoot else { return };
-        let (clicked, response) = self.filmstrip.show(ui, shoot, &self.theme);
+        let (edits, exports, frames) = (&self.edits, &self.exports, shoot.frames());
+        let marks = |i: usize| frame_marks(&frames[i], edits.get(&frames[i].path), exports.get(&frames[i].path));
+        let (clicked, response) = self.filmstrip.show(ui, shoot, &self.theme, &marks);
         let was = shoot.current();
         match clicked {
             Some((clicked, Click::Toggle)) => shoot.toggle_selected(clicked),
@@ -1572,6 +1594,15 @@ fn status(shoot: &Shoot) -> String {
         n => format!("   {n} selected"),
     };
     format!("{}   {mark}{place} / {of}{selected}", shoot.frame().name())
+}
+
+/// What a frame's thumbnail says of its edit and its export: from its
+/// edit this session where it has one, its export this session where it
+/// was exported, and else what its sidecar held when the shoot was opened.
+fn frame_marks(frame: &omalux_engine::shoot::Frame, editing: Option<&Editing>, exported: Option<&sidecar::Exported>) -> crate::filmstrip::Marks {
+    let key = editing.map_or_else(|| frame.edit_key.clone().unwrap_or_else(|| sidecar::export_key(None)), |editing| editing.key.clone());
+    let exported = exported.or(frame.exported.as_ref());
+    crate::filmstrip::Marks { edited: key != sidecar::export_key(None), exported: exported.map(|exported| exported.settings == key) }
 }
 
 /// What an info overlay says of a frame: its name first, then what's
@@ -3011,6 +3042,59 @@ mod tests {
         let target = folder.0.join("omalux/DSC00001.tif");
         assert!(target.exists(), "TIFF was not exported");
         assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exported 1 of 1 to omalux", false)));
+    }
+
+    #[test]
+    fn an_export_is_kept_in_the_sidecar_marked_in_the_filmstrip_and_done_again_once_edited() {
+        let dir = std::env::var_os("LIGHTCRAFT_CORPUS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/lightcraft/corpus"))
+            .join("raw");
+        let Ok(bytes) = std::fs::read(dir.join("arw-sony-a7m3-compressed.arw")) else {
+            eprintln!("skip: CC0 corpus raws absent");
+            return;
+        };
+        let folder = Folder::new("export-again", &[]);
+        let raw_path = folder.0.join("DSC00001.ARW");
+        std::fs::write(&raw_path, &bytes).unwrap();
+        sidecar::update(&raw_path, |xmp| sidecar::with_rating(xmp, 1)).unwrap();
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let marks = |h: &Harness| {
+            let shoot = h.app.shoot.as_ref().unwrap();
+            frame_marks(shoot.frame(), h.app.edits.get(&raw_path), h.app.exports.get(&raw_path))
+        };
+        assert_eq!(marks(&h), crate::filmstrip::Marks { edited: false, exported: None });
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(marks(&h), crate::filmstrip::Marks { edited: true, exported: None });
+        let export = |h: &mut Harness| {
+            h.press(Modifiers { shift: true, ..Modifiers::COMMAND }, Key::E);
+            let started = std::time::Instant::now();
+            while h.app.exporting.is_some() {
+                assert!(started.elapsed() < std::time::Duration::from_secs(60), "export timed out");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                h.frame(vec![]);
+            }
+            h.app.disk.flush();
+            h.app.message.clone().map(|(text, _)| text)
+        };
+        assert_eq!(export(&mut h).as_deref(), Some("Exported 1 of 1 to omalux"));
+        assert_eq!(marks(&h).exported, Some(true));
+        let xmp = sidecar::read(&raw_path).unwrap().unwrap();
+        assert_eq!(sidecar::exported(&xmp).unwrap().map(|e| e.file), Some("DSC00001.tif".to_owned()));
+        assert!(sidecar::edit(&xmp).unwrap().is_some(), "the edit is kept beside it");
+        // Up to date: nothing to do.
+        assert_eq!(export(&mut h).as_deref(), Some("Exported 0 of 1 to omalux; 1 was there already"));
+        // Edited since: marked, and exported again over the same TIFF, which nothing has saved into.
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(marks(&h).exported, Some(false));
+        assert_eq!(export(&mut h).as_deref(), Some("Exported 1 of 1 to omalux"));
+        assert_eq!(marks(&h).exported, Some(true));
+        assert!(!folder.0.join("omalux/DSC00001-2.tif").exists());
+        // Opened again, the marks come from the sidecar.
+        h.app.open(folder.0.clone());
+        assert_eq!(marks(&h), crate::filmstrip::Marks { edited: true, exported: Some(true) });
     }
 
     #[test]

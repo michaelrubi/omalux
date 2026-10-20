@@ -8,6 +8,11 @@
 //!   `omalux:processVersion`. Written with Lightcraft's `merge_xmp`, which
 //!   removes OmaLux's old properties and writes the new ones into a
 //!   description of their own just before `</rdf:RDF>`.
+//! - **The last export**, in the same namespace (`omalux:exportedFile`,
+//!   `omalux:exportedSettings`, `omalux:exportedModified`): the TIFF, the
+//!   edit it was rendered from, and when the TIFF was last written, so a
+//!   frame edited since can be told and exported again ([`Exported`]).
+//!   Kept when the edit is written, and the edit when it is.
 //! - **The rating** (`xmp:Rating`, -1 rejected), written as Omacull writes
 //!   it: the characters of its value replaced and nothing else, so either
 //!   tool can change a mark. (`merge_xmp` would move it into OmaLux's
@@ -70,6 +75,24 @@ impl Edit {
     }
 }
 
+/// A frame's last export, as kept in its sidecar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exported {
+    /// The TIFF's name, in the shoot's export folder.
+    pub file: String,
+    /// The edit it was rendered from ([`export_key`]).
+    pub settings: String,
+    /// When the TIFF was last written, in seconds since 1970: when it's
+    /// still that, nothing (Omapix) has saved into it since.
+    pub modified: u64,
+}
+
+/// What names an edit for [`Exported::settings`]: its settings' hash, or
+/// `fresh` for a frame with none.
+pub fn export_key(settings: Option<&DevelopSettings>) -> String {
+    settings.map_or_else(|| "fresh".to_owned(), |settings| format!("{:016x}", settings.hash64()))
+}
+
 fn invalid(what: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, what)
 }
@@ -105,30 +128,74 @@ pub fn edit(xmp: &str) -> io::Result<Option<Edit>> {
     Ok(Some(Edit { process, settings }))
 }
 
+/// The last export in a sidecar's text, if it has one whole.
+pub fn exported(xmp: &str) -> io::Result<Option<Exported>> {
+    let data = parse_xmp(xmp).map_err(|e| invalid(e.to_string()))?;
+    let text = |name: &str| data.values.get(name).and_then(|v| v.text()).map(str::to_owned);
+    let (Some(file), Some(settings), Some(modified)) = (text("omalux:exportedFile"), text("omalux:exportedSettings"), text("omalux:exportedModified")) else {
+        return Ok(None);
+    };
+    let modified = modified.parse().map_err(|_| invalid(format!("sidecar has an export time that isn't one: {modified:?}")))?;
+    Ok(Some(Exported { file, settings, modified }))
+}
+
 /// `<`, `>` and `&` escaped, for element content (quotes needn't be, which
 /// keeps the JSON readable).
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// A sidecar's text with `edit` in it and every byte that isn't OmaLux's
-/// as it was.
-pub fn with_edit(xmp: &str, edit: &Edit) -> io::Result<String> {
+/// OmaLux's properties as they're written, in order: (name, value).
+type Owned = Vec<(&'static str, String)>;
+
+/// The edit's properties.
+fn edit_properties(edit: &Edit) -> io::Result<Owned> {
     let settings = serde_json::to_string(&edit.settings.to_json()).map_err(invalid)?;
+    Ok(vec![("processVersion", edit.process.to_string()), ("settings", settings)])
+}
+
+/// The export's properties.
+fn export_properties(exported: &Exported) -> Owned {
+    vec![("exportedFile", exported.file.clone()), ("exportedSettings", exported.settings.clone()), ("exportedModified", exported.modified.to_string())]
+}
+
+/// `xmp` with OmaLux's properties replaced by `properties`, and every
+/// byte that isn't OmaLux's as it was.
+fn with_owned(xmp: &str, properties: &Owned) -> io::Result<String> {
+    let elements: String = properties.iter().map(|(name, value)| format!("   <omalux:{name}>{}</omalux:{name}>\n", escape(value))).collect();
     let fresh = format!(
         "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n \
          <rdf:RDF xmlns:rdf=\"{RDF_NS}\">\n  \
          <rdf:Description rdf:about=\"\"\n    \
-         xmlns:omalux=\"{NAMESPACE}\">\n   \
-         <omalux:processVersion>{}</omalux:processVersion>\n   \
-         <omalux:settings>{}</omalux:settings>\n  \
+         xmlns:omalux=\"{NAMESPACE}\">\n\
+         {elements}  \
          </rdf:Description>\n \
          </rdf:RDF>\n\
          </x:xmpmeta>\n",
-        edit.process,
-        escape(&settings),
     );
     merge_xmp(xmp, &fresh, OWNED).map_err(|e| invalid(e.to_string()))
+}
+
+/// A sidecar's text with `edit` in it, its last export kept, and every
+/// byte that isn't OmaLux's as it was.
+pub fn with_edit(xmp: &str, edit: &Edit) -> io::Result<String> {
+    let mut properties = edit_properties(edit)?;
+    // An export record that can't be read is dropped with the rest of OmaLux's.
+    if let Ok(Some(exported)) = exported(xmp) {
+        properties.extend(export_properties(&exported));
+    }
+    with_owned(xmp, &properties)
+}
+
+/// A sidecar's text with `exported` as its last export, its edit kept as
+/// it is (whatever OmaLux made it), and every byte that isn't OmaLux's as
+/// it was.
+pub fn with_exported(xmp: &str, exported: &Exported) -> io::Result<String> {
+    let data = parse_xmp(xmp).map_err(|e| invalid(e.to_string()))?;
+    let text = |name: &str| data.values.get(&format!("omalux:{name}")).and_then(|v| v.text()).map(str::to_owned);
+    let mut properties: Owned = ["processVersion", "settings"].into_iter().filter_map(|name| Some((name, text(name)?))).collect();
+    properties.extend(export_properties(exported));
+    with_owned(xmp, &properties)
 }
 
 /// A sidecar for a raw that has none, with nothing in it yet.
@@ -361,6 +428,30 @@ mod tests {
         let picked = with_rating(&fresh, 1).unwrap();
         assert_eq!(rating(&picked).unwrap(), Some(1));
         assert_eq!(edit(&picked).unwrap(), Some(edited()));
+    }
+
+    #[test]
+    fn an_export_and_an_edit_keep_each_other() {
+        let record = Exported { file: "DSC01234.tif".into(), settings: export_key(Some(&edited().settings)), modified: 1_760_000_000 };
+        for (name, before) in [("darktable", DARKTABLE), ("omacull", OMACULL), ("marked", MARKED)] {
+            assert_eq!(exported(before).unwrap(), None, "{name}");
+            // Exported before it was edited: the record alone goes in.
+            let after = with_exported(before, &record).unwrap();
+            assert!(only_inserted(before, &after).contains("<omalux:exportedFile>DSC01234.tif"), "{name}");
+            assert_eq!((exported(&after).unwrap(), edit(&after).unwrap()), (Some(record.clone()), None), "{name}");
+            // Edited since: the record stays.
+            let edited_after = with_edit(&after, &edited()).unwrap();
+            assert_eq!((exported(&edited_after).unwrap(), edit(&edited_after).unwrap()), (Some(record.clone()), Some(edited())), "{name}");
+            // Exported again: the edit stays, the record is the new one, once.
+            let again = Exported { modified: record.modified + 60, ..record.clone() };
+            let twice = with_exported(&edited_after, &again).unwrap();
+            assert_eq!((exported(&twice).unwrap(), edit(&twice).unwrap()), (Some(again), Some(edited())), "{name}");
+            assert_eq!(twice.matches("omalux:exportedFile>").count(), 2, "{name}: one element, opened and closed");
+            assert_eq!(rating(&twice).unwrap(), rating(before).unwrap(), "{name}");
+            assert!(only_inserted(before, &twice).contains("omalux:"), "{name}: nothing else changed");
+        }
+        assert_eq!(export_key(None), "fresh");
+        assert_ne!(export_key(Some(&edited().settings)), export_key(Some(&DevelopSettings::default())));
     }
 
     #[test]

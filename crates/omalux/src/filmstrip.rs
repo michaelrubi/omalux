@@ -33,6 +33,17 @@ pub enum Slot {
     Failed,
 }
 
+/// What a frame's thumbnail says of its edit and its export, besides its
+/// mark.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Marks {
+    /// It has an edit (Lightroom's ± on a thumbnail).
+    pub edited: bool,
+    /// It's been exported: whether that's of its edit as it stands (false:
+    /// edited since, to export again).
+    pub exported: Option<bool>,
+}
+
 /// How a filmstrip click was meant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Click {
@@ -131,7 +142,7 @@ impl Filmstrip {
     /// Draw the filmstrip: thumbnails in a row that scrolls sideways and
     /// keeps the current frame in view. Returns the frame clicked, and how,
     /// and the strip's response, for its right-click menu.
-    pub fn show(&mut self, ui: &mut Ui, shoot: &Shoot, theme: &Theme) -> (Option<(usize, Click)>, egui::Response) {
+    pub fn show(&mut self, ui: &mut Ui, shoot: &Shoot, theme: &Theme, marks: &dyn Fn(usize) -> Marks) -> (Option<(usize, Click)>, egui::Response) {
         let (strip, response) = ui.allocate_exact_size(vec2(ui.available_width(), STRIP_HEIGHT), Sense::click());
         let painter = ui.painter_at(strip);
         let cell = vec2(STRIP_HEIGHT * 1.5, STRIP_HEIGHT);
@@ -184,6 +195,16 @@ impl Filmstrip {
                 }
             }
             badge(&painter, inner.center_bottom() - vec2(0.0, 3.0), Align2::CENTER_BOTTOM, rating, 13.0, theme);
+            // Edited, and exported (red once it's been edited since), at the bottom right.
+            let Marks { edited, exported } = marks(i);
+            let mut corner = inner.right_bottom() + vec2(-3.0, -3.0);
+            if let Some(current) = exported {
+                let colour = if current { theme.foreground } else { theme.red };
+                corner.x -= label(&painter, corner, Align2::RIGHT_BOTTOM, "TIFF".to_owned(), colour, 10.0).width() + 3.0;
+            }
+            if edited {
+                label(&painter, corner, Align2::RIGHT_BOTTOM, "±".to_owned(), theme.foreground, 11.0);
+            }
             match stack {
                 Some(n) if collapsed => {
                     let at = inner.right_top() + vec2(-3.0, 3.0);
@@ -244,11 +265,13 @@ fn badge(painter: &egui::Painter, at: Pos2, align: Align2, rating: Rating, size:
     label(painter, at, align, text, colour, size);
 }
 
-fn label(painter: &egui::Painter, at: Pos2, align: Align2, text: String, colour: Color32, size: f32) {
+/// `text` on a dark plate at `at`; where the plate is.
+fn label(painter: &egui::Painter, at: Pos2, align: Align2, text: String, colour: Color32, size: f32) -> Rect {
     let galley = painter.layout_no_wrap(text, FontId::proportional(size), colour);
     let rect = align.anchor_size(at, galley.size()).expand2(vec2(size * 0.35, size * 0.15));
     painter.rect_filled(rect, size * 0.2, Color32::from_black_alpha(170));
     painter.galley(align.anchor_size(at, galley.size()).min, galley, colour);
+    rect
 }
 
 #[cfg(test)]
