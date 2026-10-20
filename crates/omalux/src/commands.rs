@@ -88,6 +88,9 @@ pub enum Command {
     CompareTopBottom,
     /// The frame split, before at the left, or back to the loupe.
     CompareSplit,
+    /// Guided Upright's tool: draw lines along what should be upright or
+    /// level. Or put it away.
+    GuidedUpright,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -152,6 +155,7 @@ impl Command {
         Command::CompareSideBySide,
         Command::CompareTopBottom,
         Command::CompareSplit,
+        Command::GuidedUpright,
     ];
 
     /// Look a command up by its name in code, e.g. "Open".
@@ -217,6 +221,7 @@ impl Command {
         Command::CompareSplit,
         Command::CompareTopBottom,
         Command::CompareSideBySide,
+        Command::GuidedUpright,
     ];
 
     pub fn label(self) -> &'static str {
@@ -277,6 +282,7 @@ impl Command {
             Command::CompareSideBySide => "Before/After Left/Right",
             Command::CompareTopBottom => "Before/After Top/Bottom",
             Command::CompareSplit => "Before/After Split",
+            Command::GuidedUpright => "Guided Upright Tool",
         }
     }
 
@@ -350,6 +356,7 @@ impl Command {
             Command::CompareSideBySide => s(Modifiers::NONE, Key::Y),
             Command::CompareTopBottom => s(Modifiers::ALT, Key::Y),
             Command::CompareSplit => s(Modifiers::SHIFT, Key::Y),
+            Command::GuidedUpright => s(Modifiers::SHIFT, Key::T),
         }
     }
 
@@ -490,6 +497,7 @@ mod tests {
         assert_eq!(press(&ctx, Modifiers::NONE, Key::Y), [Command::CompareSideBySide]);
         assert_eq!(press(&ctx, Modifiers::ALT, Key::Y), [Command::CompareTopBottom]);
         assert_eq!(press(&ctx, Modifiers::SHIFT, Key::Y), [Command::CompareSplit]);
+        assert_eq!(press(&ctx, Modifiers::SHIFT, Key::T), [Command::GuidedUpright]);
     }
 
     #[test]

@@ -332,6 +332,15 @@ impl Loupe {
         self.area
     }
 
+    /// A frame's render, if it's of the whole frame through its lens
+    /// corrections alone, uncropped, untransformed and turned as
+    /// `orientation`: what Guided Upright's lines are drawn on.
+    pub fn untransformed(&self, path: &Path, orientation: Orientation) -> Option<&TextureHandle> {
+        let render = self.shown.get(path)?.render.as_ref()?;
+        let plain = render.settings.crop == Default::default() && render.settings.geometry == Default::default();
+        (plain && render.settings.orientation == orientation).then_some(&render.texture)
+    }
+
     /// A frame's render, if it's of the whole frame, uncropped and turned
     /// as `orientation`: what the crop tool draws the crop over.
     pub fn whole(&self, path: &Path, orientation: Orientation) -> Option<&TextureHandle> {

@@ -1,6 +1,6 @@
 //! The develop panel's sliders, in Lightroom's order under Lightroom's
 //! names: the Profile, White Balance, Light, HDR, Presence, Detail, Lens
-//! Corrections. Which controls there are, their ranges and what they do
+//! Corrections, Transform. Which controls there are, their ranges and what they do
 //! are Lightcraft's (`lightcraft_develop::controls`), all but HDR, which
 //! is OmaLux's (`omalux_engine::look`).
 //!
@@ -11,7 +11,7 @@
 
 use egui::{Align2, FontId, Sense, Ui, vec2};
 use lightcraft_develop::controls::{self, ControlSpec};
-use lightcraft_develop::{DevelopSettings, WbMode};
+use lightcraft_develop::{DevelopSettings, Upright, WbMode};
 use omalux_engine::auto::Auto;
 use omalux_engine::copy::Group;
 use omalux_engine::look::{Camera, Profile};
@@ -36,9 +36,23 @@ enum Row {
     /// The Enable Profile Corrections checkbox, and the lens the profile
     /// is for.
     ProfileCorrections,
+    /// Upright's buttons: Off, Auto, Guided, Level, Vertical, Full.
+    UprightModes,
+    /// The Constrain Crop checkbox.
+    ConstrainCrop,
 }
 
-use Row::{Named, ProfileCorrections, RemoveCa, Slider, Sub};
+use Row::{ConstrainCrop, Named, ProfileCorrections, RemoveCa, Slider, Sub, UprightModes};
+
+/// Upright's modes, as Lightroom's buttons are, left to right.
+const UPRIGHTS: [(Upright, &str); 6] = [
+    (Upright::Off, "Off"),
+    (Upright::Auto, "Auto"),
+    (Upright::Guided, "Guided"),
+    (Upright::Level, "Level"),
+    (Upright::Vertical, "Vertical"),
+    (Upright::Full, "Full"),
+];
 
 /// The panels and their rows, top to bottom: the order `,` and `.` step
 /// through the sliders in. Lightcraft's other noise-reduction controls
@@ -97,6 +111,21 @@ const PANELS: &[(&str, &[Row])] = &[
             Slider("optics.defringeGreenHueHi"),
         ],
     ),
+    (
+        "Transform",
+        &[
+            UprightModes,
+            ConstrainCrop,
+            Sub("Transform"),
+            Slider("geometry.vertical"),
+            Slider("geometry.horizontal"),
+            Slider("geometry.rotate"),
+            Slider("geometry.aspect"),
+            Slider("geometry.scale"),
+            Named("geometry.offsetX", "X Offset"),
+            Named("geometry.offsetY", "Y Offset"),
+        ],
+    ),
 ];
 
 impl Row {
@@ -105,7 +134,7 @@ impl Row {
         match self {
             Slider(id) => controls::find(id).copied(),
             Named(id, label) => controls::find(id).map(|spec| ControlSpec { label, ..*spec }),
-            Sub(_) | RemoveCa | ProfileCorrections => None,
+            Sub(_) | RemoveCa | ProfileCorrections | UprightModes | ConstrainCrop => None,
         }
     }
 }
@@ -120,6 +149,7 @@ pub fn switches(title: &str) -> &'static [Group] {
         "Presence" => &[Group::Presence],
         "Detail" => &[Group::Sharpening, Group::NoiseReduction],
         "Lens Corrections" => &[Group::LensCorrections],
+        "Transform" => &[Group::Transform],
         _ => &[],
     }
 }
@@ -152,6 +182,10 @@ pub struct PanelOut {
     pub remove_ca: Option<bool>,
     /// Enable Profile Corrections was ticked, or unticked.
     pub lens_profile: Option<bool>,
+    /// An Upright button was clicked.
+    pub upright: Option<Upright>,
+    /// Constrain Crop was ticked, or unticked.
+    pub constrain_crop: Option<bool>,
     /// A panel's switch was flipped, or one of its sliders touched while
     /// it was off: its groups, and whether they're on now.
     pub switch: Option<(&'static [Group], bool)>,
@@ -292,6 +326,30 @@ pub fn show(ui: &mut Ui, theme: &Theme, settings: &DevelopSettings, fresh: &Deve
                     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
                     ui.painter().text(row.left_center() + vec2(4.0, 1.0), Align2::LEFT_CENTER, lens, FontId::proportional(11.5), theme.muted);
                 }
+                UprightModes => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for (mode, label) in UPRIGHTS {
+                            let button = egui::Button::new(egui::RichText::new(label).size(12.0)).selected(settings.geometry.upright == mode);
+                            let hover = if mode == Upright::Guided { tip(Command::GuidedUpright) } else { format!("Upright: {label}") };
+                            if ui.add(button).on_hover_text(hover).clicked() {
+                                out.upright = Some(mode);
+                            }
+                        }
+                    });
+                    // Upright reads the frame through its lens corrections, as Lightroom says.
+                    if settings.geometry.upright != Upright::Off && !settings.optics.lens_profile {
+                        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+                        let text = "Works best with Enable Profile Corrections";
+                        ui.painter().text(row.left_center() + vec2(4.0, 1.0), Align2::LEFT_CENTER, text, FontId::proportional(11.5), theme.muted);
+                    }
+                }
+                ConstrainCrop => {
+                    let mut ticked = settings.geometry.constrain_crop;
+                    if ui.checkbox(&mut ticked, "Constrain Crop").changed() {
+                        out.constrain_crop = Some(ticked);
+                    }
+                }
                 Slider(id) | Named(id, _) => {
                     let Some(spec) = row.spec() else { continue };
                     let value = controls::get(settings, id).unwrap_or(spec.default);
@@ -325,6 +383,7 @@ mod tests {
         assert_eq!(of("effects.dehaze"), [Group::Presence]);
         assert_eq!(of("detail.nrColor"), [Group::Sharpening, Group::NoiseReduction]);
         assert_eq!(of("optics.defringeGreenHueHi"), [Group::LensCorrections]);
+        assert_eq!(of("geometry.offsetY"), [Group::Transform]);
         assert!(switches_of(sliders().count()).is_empty());
     }
 
@@ -339,6 +398,7 @@ mod tests {
             "Amount", "Radius", "Detail", "Masking", "Luminance", "Color",
             "Distortion", "Vignetting",
             "Purple Amount", "Purple Hue Low", "Purple Hue High", "Green Amount", "Green Hue Low", "Green Hue High",
+            "Vertical", "Horizontal", "Rotate", "Aspect", "Scale", "X Offset", "Y Offset",
         ]);
     }
 }

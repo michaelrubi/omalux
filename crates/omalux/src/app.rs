@@ -215,6 +215,9 @@ pub struct App {
     /// The Crop & Straighten tool, while it's open: the loupe shows the
     /// current frame whole, with its crop drawn over it.
     crop: Option<crate::crop::Tool>,
+    /// Guided Upright's tool, while it's open: the loupe shows the current
+    /// frame through its lens corrections alone, with its lines over it.
+    guided: Option<crate::guided::Tool>,
     /// The crop keeps its shape when it's dragged (Lightroom's lock, A),
     /// from one frame and one opening of the tool to the next.
     crop_locked: bool,
@@ -321,6 +324,7 @@ impl App {
             previous: None,
             choosing: None,
             crop: None,
+            guided: None,
             crop_locked: true,
         }
     }
@@ -383,7 +387,7 @@ impl App {
         self.filmstrip.reset();
         (self.at, self.previous) = (None, None);
         self.choosing = None;
-        self.crop = None;
+        (self.crop, self.guided) = (None, None);
         self.off.clear();
         self.leave();
     }
@@ -552,7 +556,7 @@ impl App {
             Command::DecreaseMore => self.nudge(-5.0),
             Command::WhiteBalance => {
                 self.selector = !self.selector && self.shoot.is_some();
-                (self.crop, self.compare) = (None, None);
+                (self.crop, self.guided, self.compare) = (None, None, None);
             }
             // In a before/after view, back to the loupe.
             Command::BeforeAfter if self.compare.is_some() => self.compare = None,
@@ -565,9 +569,10 @@ impl App {
                 };
                 self.compare = (self.compare != Some(view) && self.shoot.is_some()).then_some(view);
                 if self.compare.is_some() {
-                    (self.before, self.selector, self.crop) = (false, false, None);
+                    (self.before, self.selector, self.crop, self.guided) = (false, false, None, None);
                 }
             }
+            Command::GuidedUpright => self.guided_tool(self.guided.is_none()),
             Command::Clipping => self.clipping = !self.clipping,
             Command::Shortcuts => self.legend = !self.legend,
             // Lightroom's I: Info 1, Info 2, none, and round again.
@@ -588,7 +593,7 @@ impl App {
             }
             Command::Crop => {
                 self.crop = (self.crop.is_none() && self.shoot.is_some()).then(Default::default);
-                (self.selector, self.compare) = (false, None);
+                (self.selector, self.compare, self.guided) = (false, None, None);
             }
             Command::RotateLeft => self.edit(|history, _| history.set(|settings| crop::turn(settings, false))),
             Command::RotateRight => self.edit(|history, _| history.set(|settings| crop::turn(settings, true))),
@@ -733,6 +738,10 @@ impl App {
                     if let Some(source) = self.renderer.source(path) {
                         let dims = crop::dims((source.width, source.height), &becomes);
                         crop::constrain(&mut becomes, dims);
+                        // An automatic Upright, found on this frame.
+                        if let Some(info) = editing.info.as_deref().filter(|_| becomes.geometry.upright_transform.is_none()) {
+                            edit::refresh_upright(&mut becomes, info, &source);
+                        }
                     }
                     if becomes != *editing.history.settings() {
                         changes.push((path.clone(), becomes));
@@ -863,6 +872,9 @@ impl App {
                 edit::set_control(settings, info, spec.id, crate::slider::nudged(&spec, value, steps));
             })
         });
+        if spec.id.starts_with("optics.") {
+            self.refresh_upright();
+        }
     }
 
     /// Set `what` on the current frame from the frame itself, as one step.
@@ -940,6 +952,68 @@ impl App {
         self.dragged(change, out.stopped);
     }
 
+    /// Open Guided Upright's tool, which sets the frame's Upright to
+    /// Guided, or put it away.
+    fn guided_tool(&mut self, open: bool) {
+        if !open || self.shoot.is_none() {
+            self.guided = None;
+            return;
+        }
+        // What Esc goes back to is the frame before the tool set Guided.
+        let mut tool = crate::guided::Tool::default();
+        if let Some(shoot) = &self.shoot
+            && let Some(editing) = self.edits.get(&shoot.frame().path)
+        {
+            tool.on(&shoot.frame().path, editing.history.settings());
+        }
+        self.guided = Some(tool);
+        (self.crop, self.selector, self.compare, self.before) = (None, false, None, false);
+        self.edit(|history, _| history.set(|settings| settings.geometry.upright = lightcraft_develop::Upright::Guided));
+    }
+
+    /// Set the current frame's Upright to `mode`, found on its source, as
+    /// one step. Guided opens its tool.
+    fn upright(&mut self, mode: lightcraft_develop::Upright) {
+        if mode == lightcraft_develop::Upright::Guided {
+            return self.guided_tool(true);
+        }
+        self.guided = None;
+        let Some(source) = self.shoot.as_ref().and_then(|shoot| self.renderer.source(&shoot.frame().path)) else { return };
+        let started = std::time::Instant::now();
+        self.edit(|history, info| history.set(|settings| edit::upright(settings, info, &source, mode)));
+        log::debug!("Upright {mode:?} in {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
+    }
+
+    /// An automatic Upright on the current frame found again, after the
+    /// lens corrections it reads the frame through have changed: part of
+    /// the change, not a step of its own.
+    fn refresh_upright(&mut self) {
+        let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
+        let Some(source) = self.renderer.source(&path) else { return };
+        let Some(editing) = self.edits.get_mut(&path) else { return };
+        let Some(info) = editing.info.clone() else { return };
+        if editing.history.amend(|settings| edit::refresh_upright(settings, &info, &source)) {
+            editing.stepped();
+            self.save(&path);
+        }
+    }
+
+    /// An automatic Upright pasted onto a frame before its raw was
+    /// decoded, found on it now it is: no step, as the paste was the step.
+    fn fill_upright(&mut self, path: &Path) {
+        let Some(source) = self.renderer.source(path) else { return };
+        let Some(editing) = self.edits.get_mut(path) else { return };
+        let geometry = &editing.history.settings().geometry;
+        if !edit::upright_is_auto(geometry.upright) || geometry.upright_transform.is_some() || self.unreadable.contains(path) {
+            return;
+        }
+        let Some(info) = editing.info.clone() else { return };
+        if editing.history.amend(|settings| edit::refresh_upright(settings, &info, &source)) {
+            editing.stepped();
+            self.save(path);
+        }
+    }
+
     /// What was done in the develop panel.
     fn panel(&mut self, out: PanelOut) {
         if let Some((groups, on)) = out.switch {
@@ -962,9 +1036,17 @@ impl App {
         }
         if let Some(on) = out.remove_ca {
             self.edit(|history, _| history.set(|settings| settings.optics.remove_ca = on));
+            self.refresh_upright();
         }
         if let Some(on) = out.lens_profile {
             self.edit(|history, _| history.set(|settings| settings.optics.lens_profile = on));
+            self.refresh_upright();
+        }
+        if let Some(mode) = out.upright {
+            self.upright(mode);
+        }
+        if let Some(on) = out.constrain_crop {
+            self.edit(|history, _| history.set(|settings| settings.geometry.constrain_crop = on));
         }
         let Some((index, slid)) = out.slider else { return };
         let Some(spec) = develop::sliders().nth(index) else { return };
@@ -977,6 +1059,9 @@ impl App {
         self.slide(slid, |settings, info, value| {
             edit::set_control(settings, info, spec.id, value);
         });
+        if spec.id.starts_with("optics.") && !self.dragging && (slid.value.is_some() || slid.drag_stopped) {
+            self.refresh_upright();
+        }
     }
 
     /// What was done in the crop tool's panel.
@@ -1030,6 +1115,31 @@ impl App {
         }
     }
 
+    /// The keys that are Guided Upright's tool's while it's open: Delete
+    /// takes the line held, or else the last, away; Return puts the tool
+    /// away, and Esc puts it away with the lines as they were when the
+    /// tool came to the frame.
+    fn guided_keys(&mut self, ctx: &egui::Context) {
+        let pressed = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+        if pressed(egui::Key::Delete) || pressed(egui::Key::Backspace) {
+            let held = self.guided.as_mut().and_then(|tool| tool.held.take());
+            self.edit(|history, _| {
+                let count = history.settings().geometry.guides.len();
+                let Some(index) = held.filter(|i| *i < count).or(count.checked_sub(1)) else { return false };
+                history.set(|settings| _ = settings.geometry.guides.remove(index))
+            });
+        }
+        if pressed(egui::Key::Enter) {
+            self.guided = None;
+        }
+        if pressed(egui::Key::Escape) {
+            let was = self.shoot.as_ref().zip(self.guided.take()).and_then(|(shoot, tool)| tool.was(&shoot.frame().path));
+            if let Some(geometry) = was {
+                self.edit(|history, _| history.set(|settings| settings.geometry = geometry));
+            }
+        }
+    }
+
     /// The script's next command, once everything wanted has been
     /// developed: so a script sees what its last command led to, and
     /// `Next,Zoom,Quit` on real raws renders each step before the next.
@@ -1070,6 +1180,9 @@ impl App {
             if self.crop.is_some() && !self.legend {
                 self.crop_keys(ctx);
             }
+            if self.guided.is_some() && !self.legend {
+                self.guided_keys(ctx);
+            }
             // Under the legend, only its own key, to put it away.
             for command in Command::pressed(ctx, &mut self.v_down) {
                 if !self.legend || command == Command::Shortcuts {
@@ -1093,6 +1206,9 @@ impl App {
             if let (Some(tool), Some(editing)) = (&mut self.crop, self.edits.get(&shoot.frame().path)) {
                 tool.on(&shoot.frame().path, editing.history.settings());
             }
+            if let (Some(tool), Some(editing)) = (&mut self.guided, self.edits.get(&shoot.frame().path)) {
+                tool.on(&shoot.frame().path, editing.history.settings());
+            }
         }
         let title = match &self.shoot {
             Some(shoot) => format!("{} — OmaLux", file_name(shoot.dir())),
@@ -1108,7 +1224,7 @@ impl App {
     /// take in what's been finished.
     fn develop(&mut self, ctx: &egui::Context) {
         let wanted = self.wanted();
-        let zoom = self.loupe.zoom().filter(|_| self.crop.is_none());
+        let zoom = self.loupe.zoom().filter(|_| self.crop.is_none() && self.guided.is_none());
         self.loupe.retain(|path| wanted.iter().any(|w| w.path == path));
         self.loupe.set_compare(self.compare);
         let compare = self.compare.is_some();
@@ -1128,8 +1244,9 @@ impl App {
                         }
                         // Decoded again, for another profile's look.
                         Some(editing) => (editing.info, editing.camera) = (Some(info), camera),
-                        None => _ = self.edits.insert(path, Editing::new(History::new(fresh, saved), Some((info, camera)))),
+                        None => _ = self.edits.insert(path.clone(), Editing::new(History::new(fresh, saved), Some((info, camera)))),
                     }
+                    self.fill_upright(&path);
                 }
                 News::Failed(path, error) => self.message = Some((format!("Couldn't develop {}: {error}", file_name(&path)), true)),
             }
@@ -1163,6 +1280,15 @@ impl App {
             && let Some(settings) = current.settings.as_mut().filter(|settings| settings.crop != Default::default())
         {
             Arc::make_mut(settings).crop = Default::default();
+        }
+        // Guided Upright's lines are drawn on the frame through its lens
+        // corrections alone.
+        if self.guided.is_some()
+            && let Some(current) = wanted.first_mut()
+            && let Some(settings) = current.settings.as_mut()
+        {
+            let settings = Arc::make_mut(settings);
+            (settings.crop, settings.geometry) = (Default::default(), Default::default());
         }
         wanted
     }
@@ -1204,12 +1330,13 @@ impl App {
         let dims = self.dims();
         let mut picked = None;
         let mut cropped = None;
+        let mut guided = None;
         let mut clicked = None;
         let context = self.menu_context();
         let mut chosen = None;
         egui::CentralPanel::no_frame().frame(pasteboard).show(ui, |ui| match &self.shoot {
             Some(shoot) => {
-                let mouse = if self.crop.is_some() {
+                let mouse = if self.crop.is_some() || self.guided.is_some() {
                     Mouse::Tool
                 } else if self.selector {
                     Mouse::Pick
@@ -1226,6 +1353,11 @@ impl App {
                     let settings = editing.history.settings();
                     let frame = crate::crop::Frame { area: self.loupe.area(), whole: self.loupe.whole(path, settings.orientation), dims };
                     cropped = Some(tool.show(ui, &self.theme, frame, settings, self.crop_locked));
+                }
+                if let (Some(tool), Some(editing), Some(dims)) = (&mut self.guided, self.edits.get(path), dims) {
+                    let settings = editing.history.settings();
+                    let whole = self.loupe.untransformed(path, settings.orientation);
+                    guided = tool.show(ui, &self.theme, self.loupe.area(), whole, dims, &settings.geometry.guides).added;
                 }
                 let mut corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);
                 if let Some(info) = self.info {
@@ -1248,6 +1380,14 @@ impl App {
         }
         if let Some(cropped) = cropped {
             self.crop_gesture(cropped);
+        }
+        if let Some(line) = guided {
+            self.edit(|history, _| {
+                history.set(|settings| {
+                    settings.geometry.upright = lightcraft_develop::Upright::Guided;
+                    settings.geometry.guides.push(line);
+                })
+            });
         }
         if let Some(dir) = clicked {
             self.open(dir);
@@ -3354,6 +3494,84 @@ mod tests {
     }
 
     #[test]
+    fn upright_is_a_step_found_on_the_frame_and_pasted_it_is_found_again() {
+        use lightcraft_develop::Upright;
+        let folder = Folder::new("upright", &[1, 1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 3000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().clone();
+        // Upright's button, not the slider of the same name below it.
+        let output = h.frame(vec![]);
+        let vertical = texts(&output).into_iter().find(|(text, _)| text == "Vertical").unwrap().1;
+        h.click(vertical.center());
+        assert_eq!(h.settings().geometry.upright, Upright::Vertical);
+        assert!(h.settings().geometry.upright_transform.is_some(), "found and kept");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        let constrain = h.text("Constrain Crop");
+        h.click(constrain.center());
+        assert!(h.settings().geometry.constrain_crop);
+        h.press(Modifiers::COMMAND, Key::Z);
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh, "two steps");
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        assert_eq!(h.settings().geometry.upright, Upright::Vertical);
+
+        // Pasted onto a frame not decoded yet (past the neighbours
+        // prepared ahead): found once it is.
+        copy(&mut h);
+        let last = h.app.shoot.as_ref().unwrap().frames()[4].path.clone();
+        assert!(h.app.renderer.source(&last).is_none());
+        h.app.paste_onto(&h.app.clipboard.clone().unwrap(), std::slice::from_ref(&last));
+        assert_eq!(h.app.edits[&last].history.settings().geometry.upright_transform, None, "not this frame's yet");
+        h.press(Modifiers::NONE, Key::End);
+        h.settle();
+        assert_eq!(h.settings().geometry.upright, Upright::Vertical);
+        assert!(h.settings().geometry.upright_transform.is_some(), "found on its own frame");
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().geometry.upright, Upright::Off, "the paste was the one step");
+    }
+
+    #[test]
+    fn shift_t_draws_guided_uprights_lines_on_the_frame_and_esc_takes_them_back() {
+        use lightcraft_develop::Upright;
+        let folder = Folder::new("guided", &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().geometry.clone();
+        h.press(Modifiers::SHIFT, Key::T);
+        h.settle();
+        assert!(h.app.guided.is_some());
+        assert_eq!(h.settings().geometry.upright, Upright::Guided);
+        let frame = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("guided frame"))).expect("the frame is drawn");
+        let at = |u: f32, v: f32| frame.min + frame.size() * egui::vec2(u, v);
+        drag(&mut h, at(0.2, 0.1), at(0.25, 0.9), Modifiers::NONE);
+        drag(&mut h, at(0.8, 0.1), at(0.75, 0.9), Modifiers::NONE);
+        let guides = h.settings().geometry.guides.clone();
+        assert_eq!(guides.len(), 2);
+        assert!((guides[0].0.x - 0.2).abs() < 0.01 && (guides[0].1.y - 0.9).abs() < 0.01, "{guides:?}");
+        assert_eq!(h.saved().map(|s| s.geometry.guides.len()), Some(2));
+        // The frame shown is through its lens corrections alone.
+        let wanted = h.app.wanted();
+        assert_eq!(wanted[0].settings.as_ref().unwrap().geometry, Default::default());
+        // Delete takes the last away; Esc, all of what the tool did.
+        h.press(Modifiers::NONE, Key::Delete);
+        assert_eq!(h.settings().geometry.guides.len(), 1);
+        h.press(Modifiers::NONE, Key::Escape);
+        assert!(h.app.guided.is_none());
+        assert_eq!(h.settings().geometry, fresh);
+        // Return keeps them.
+        h.press(Modifiers::SHIFT, Key::T);
+        h.settle();
+        drag(&mut h, at(0.2, 0.1), at(0.25, 0.9), Modifiers::NONE);
+        h.press(Modifiers::NONE, Key::Enter);
+        assert!(h.app.guided.is_none());
+        assert_eq!(h.settings().geometry.guides.len(), 1);
+    }
+
+    #[test]
     fn i_cycles_lightrooms_info_overlays_and_ctrl_i_shows_or_hides_the_last() {
         let folder = Folder::new("info", &[1]);
         let mut h = Harness::new(&[]);
@@ -3402,8 +3620,10 @@ mod tests {
         h.settle();
 
         assert_eq!(h.settings().wb.mode, WbMode::AsShot);
-        // Initially state word is "As Shot", and to its left is "Auto".
-        let auto_btn = h.text("Auto");
+        // Initially state word is "As Shot", and to its left is "Auto"
+        // (the first: Upright has an Auto too).
+        let output = h.frame(vec![]);
+        let auto_btn = texts(&output).into_iter().find(|(text, _)| text == "Auto").unwrap().1;
         h.click(auto_btn.center());
         assert_eq!(h.settings().wb.mode, WbMode::Auto);
 

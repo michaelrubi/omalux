@@ -27,6 +27,8 @@ pub enum Group {
     Sharpening,
     NoiseReduction,
     LensCorrections,
+    /// Upright and the Transform sliders.
+    Transform,
     Crop,
 }
 
@@ -45,6 +47,7 @@ impl Group {
         Group::Sharpening,
         Group::NoiseReduction,
         Group::LensCorrections,
+        Group::Transform,
         Group::Crop,
     ];
 
@@ -58,6 +61,7 @@ impl Group {
             Group::Sharpening => "Sharpening",
             Group::NoiseReduction => "Noise Reduction",
             Group::LensCorrections => "Lens Corrections",
+            Group::Transform => "Transform",
             Group::Crop => "Crop",
         }
     }
@@ -75,6 +79,7 @@ impl Group {
                 &[("detail", &["nr_luminance", "nr_detail", "nr_contrast", "nr_color", "nr_color_detail", "nr_color_smoothness"])]
             }
             Group::LensCorrections => &[("optics", &[])],
+            Group::Transform => &[("geometry", &[])],
             Group::Crop => &[("crop", &[])],
         }
     }
@@ -120,6 +125,11 @@ impl Copied {
         let mut pasted = apply_partial(onto, &self.partial, 1.0);
         if pasted.wb.mode == WbMode::AsShot {
             (pasted.wb.temp, pasted.wb.tint) = (fresh.wb.temp, fresh.wb.tint);
+        }
+        // An automatic Upright's transform was found on the frame it was
+        // copied from: this one's is its own ([`crate::edit::upright`]).
+        if self.groups.contains(&Group::Transform) && crate::edit::upright_is_auto(pasted.geometry.upright) {
+            pasted.geometry.upright_transform = None;
         }
         pasted
     }
@@ -181,6 +191,25 @@ mod tests {
         let pasted = Copied::new(&fresh, &[Group::Presence]).paste(&from, &fresh);
         assert_eq!(pasted.effects, fresh.effects);
         assert_eq!(switched_off(&from, &fresh, &[Group::Presence]).effects, Default::default());
+    }
+
+    #[test]
+    fn transform_takes_upright_and_its_sliders_but_not_another_frames_analysis() {
+        use lightcraft_develop::Upright;
+        let fresh = DevelopSettings::for_raw(6100.0, -2.0);
+        let mut from = fresh.clone();
+        (from.geometry.upright, from.geometry.vertical, from.geometry.constrain_crop) = (Upright::Vertical, -20.0, true);
+        from.geometry.upright_transform = Some(lightcraft_geom::Homography::IDENTITY);
+        let pasted = Copied::new(&from, &[Group::Transform]).paste(&fresh, &fresh);
+        assert_eq!((pasted.geometry.upright, pasted.geometry.vertical, pasted.geometry.constrain_crop), (Upright::Vertical, -20.0, true));
+        assert_eq!(pasted.geometry.upright_transform, None, "found again on the frame it's pasted onto");
+        // Guided takes its lines, which are where the frame's uprights are.
+        from.geometry.upright = Upright::Guided;
+        from.geometry.guides = vec![(lightcraft_geom::Point::new(0.1, 0.1), lightcraft_geom::Point::new(0.1, 0.9))];
+        let pasted = Copied::new(&from, &[Group::Transform]).paste(&fresh, &fresh);
+        assert_eq!(pasted.geometry.guides, from.geometry.guides);
+        assert_eq!(Copied::new(&from, &[Group::Crop]).paste(&fresh, &fresh).geometry, fresh.geometry, "nor in another group");
+        assert_eq!(switched_off(&from, &fresh, &[Group::Transform]).geometry, Default::default());
     }
 
     #[test]

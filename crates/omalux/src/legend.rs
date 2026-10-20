@@ -33,7 +33,7 @@ const SECTIONS: &[(&str, &[Command])] = &[
             Command::Redo,
         ],
     ),
-    ("Crop", &[Command::Crop, Command::RotateLeft, Command::RotateRight, Command::ResetCrop]),
+    ("Crop and Transform", &[Command::Crop, Command::RotateLeft, Command::RotateRight, Command::ResetCrop, Command::GuidedUpright]),
     ("Copy and Paste", &[Command::Copy, Command::CopyChoose, Command::Paste, Command::PastePrevious, Command::PasteStack]),
     ("View", &[Command::BeforeAfter, Command::CompareSideBySide, Command::CompareTopBottom, Command::CompareSplit, Command::Clipping, Command::Zoom, Command::InfoCycle, Command::InfoShow, Command::Shortcuts]),
     ("Folder", &[Command::Open, Command::Close, Command::Export, Command::ExportAndEdit, Command::Quit]),
