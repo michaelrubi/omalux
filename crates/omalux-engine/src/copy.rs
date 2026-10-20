@@ -135,6 +135,75 @@ impl Copied {
     }
 }
 
+/// What a change to one frame's settings touched, for Auto Sync to make
+/// the same change on others: each setting that changed (a value of
+/// `DevelopSettings`' JSON, or a list whole), at the value it was changed
+/// to, as Lightroom's Auto Sync makes it. A frame's quarter turns are its
+/// own, and never in it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Changes(Vec<(Vec<String>, Option<Value>)>);
+
+/// The leaves of `after` that differ from `before`'s, at `path`; `None` for
+/// one `after` doesn't have (left out at its default, as HDR is).
+fn diff(path: &mut Vec<String>, before: Option<&Value>, after: Option<&Value>, out: &mut Vec<(Vec<String>, Option<Value>)>) {
+    match (before, after) {
+        (Some(Value::Object(b)), Some(Value::Object(a))) => {
+            let keys: std::collections::BTreeSet<&String> = b.keys().chain(a.keys()).collect();
+            for key in keys {
+                path.push(key.clone());
+                diff(path, b.get(key), a.get(key), out);
+                path.pop();
+            }
+        }
+        (b, a) if b != a => out.push((path.clone(), a.cloned())),
+        _ => {}
+    }
+}
+
+/// What changed from `before` to `after`.
+pub fn changes(before: &DevelopSettings, after: &DevelopSettings) -> Changes {
+    let mut out = Vec::new();
+    diff(&mut Vec::new(), Some(&before.to_json()), Some(&after.to_json()), &mut out);
+    out.retain(|(path, _)| !matches!(path.first().map(String::as_str), Some("orientation" | "version" | "process")));
+    Changes(out)
+}
+
+impl Changes {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// `onto` with the same changes made. `fresh` is the frame's own fresh
+    /// settings: a white balance changed to as shot is the frame's own,
+    /// and an automatic Upright's transform is left to be found on it.
+    pub fn apply(&self, onto: &DevelopSettings, fresh: &DevelopSettings) -> DevelopSettings {
+        let mut json = onto.to_json();
+        for (path, value) in &self.0 {
+            let Some((last, parents)) = path.split_last() else { continue };
+            let mut at = &mut json;
+            for key in parents {
+                let Value::Object(map) = at else { break };
+                at = map.entry(key.clone()).or_insert_with(|| Value::Object(Map::new()));
+            }
+            if let Value::Object(map) = at {
+                match value {
+                    Some(value) => _ = map.insert(last.clone(), value.clone()),
+                    None => _ = map.remove(last),
+                }
+            }
+        }
+        let mut changed = DevelopSettings::from_json(&json).unwrap_or_else(|_| onto.clone());
+        if changed.wb.mode == WbMode::AsShot {
+            (changed.wb.temp, changed.wb.tint) = (fresh.wb.temp, fresh.wb.tint);
+        }
+        let transform = self.0.iter().any(|(path, _)| path.iter().map(String::as_str).eq(["geometry", "upright_transform"]));
+        if transform && crate::edit::upright_is_auto(changed.geometry.upright) {
+            changed.geometry.upright_transform = None;
+        }
+        changed
+    }
+}
+
 /// `settings` with `groups` switched off, as a panel's switch shows it:
 /// each group as a fresh raw would have it with nothing applied (no
 /// sharpening, no lens corrections), but the white balance as shot.
@@ -210,6 +279,48 @@ mod tests {
         assert_eq!(pasted.geometry.guides, from.geometry.guides);
         assert_eq!(Copied::new(&from, &[Group::Crop]).paste(&fresh, &fresh).geometry, fresh.geometry, "nor in another group");
         assert_eq!(switched_off(&from, &fresh, &[Group::Transform]).geometry, Default::default());
+    }
+
+    #[test]
+    fn a_change_is_made_on_another_frame_as_the_values_touched_and_nothing_else() {
+        use lightcraft_develop::Upright;
+        let fresh = DevelopSettings::for_raw(5200.0, 3.0);
+        let mut before = fresh.clone();
+        (before.light.exposure, before.light.contrast) = (0.5, 10.0);
+        let mut other_fresh = DevelopSettings::for_raw(6100.0, -2.0);
+        other_fresh.light.contrast = -30.0;
+        let other = other_fresh.clone();
+
+        // Exposure moved to 0.7: 0.7 on the other frame, its own contrast kept.
+        let mut after = before.clone();
+        after.light.exposure = 0.7;
+        let changed = changes(&before, &after);
+        assert!(!changed.is_empty());
+        let made = changed.apply(&other, &other_fresh);
+        assert_eq!((made.light.exposure, made.light.contrast), (0.7, -30.0));
+        assert_eq!(changes(&other, &made), Changes(vec![(vec!["light".into(), "exposure".into()], Some(0.7.into()))]), "and nothing else");
+
+        // HDR on, and off again: it's left out at its default.
+        let mut hdr = before.clone();
+        hdr.light.hdr = 40.0;
+        let on = changes(&before, &hdr).apply(&other, &other_fresh);
+        assert_eq!(on.light.hdr, 40.0);
+        assert_eq!(changes(&hdr, &before).apply(&on, &other_fresh).light.hdr, 0.0);
+
+        // As shot is each frame's own; a turn is no change; an automatic Upright is found again.
+        let mut custom = before.clone();
+        (custom.wb.mode, custom.wb.temp) = (WbMode::Custom, 7000.0);
+        let mut as_shot = custom.clone();
+        (as_shot.wb.mode, as_shot.wb.temp, as_shot.wb.tint) = (WbMode::AsShot, 5200.0, 3.0);
+        let made = changes(&custom, &as_shot).apply(&changes(&before, &custom).apply(&other, &other_fresh), &other_fresh);
+        assert_eq!((made.wb.mode, made.wb.temp, made.wb.tint), (WbMode::AsShot, 6100.0, -2.0));
+        let mut turned = before.clone();
+        turned.orientation = turned.orientation.rotated(true);
+        assert!(changes(&before, &turned).is_empty());
+        let mut upright = before.clone();
+        (upright.geometry.upright, upright.geometry.upright_transform) = (Upright::Auto, Some(lightcraft_geom::Homography::IDENTITY));
+        let made = changes(&before, &upright).apply(&other, &other_fresh);
+        assert_eq!((made.geometry.upright, made.geometry.upright_transform), (Upright::Auto, None));
     }
 
     #[test]

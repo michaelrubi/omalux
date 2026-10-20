@@ -65,6 +65,9 @@ struct Editing {
     /// Which edit it is, as an export records it ([`sidecar::export_key`]):
     /// what tells a frame edited since its export.
     key: String,
+    /// What Auto Sync asked to be set automatically before the frame's
+    /// raw was decoded: set once it is.
+    pending: Vec<Auto>,
 }
 
 /// [`sidecar::export_key`] of a frame's edit: `fresh` for one that's a
@@ -78,7 +81,7 @@ impl Editing {
         let settings = Arc::new(history.settings().clone());
         let (info, camera) = decoded.unzip();
         let key = key_of(&history);
-        Self { history, info, camera: camera.unwrap_or_default(), settings, key }
+        Self { history, info, camera: camera.unwrap_or_default(), settings, key, pending: Vec::new() }
     }
 
     /// Change the edit with `change`, which says whether it did. Nothing
@@ -215,6 +218,9 @@ pub struct App {
     /// The frames exported this session: each one's last export, as its
     /// sidecar now holds it (the shoot has what they held at open).
     exports: HashMap<PathBuf, sidecar::Exported>,
+    /// Lightroom's Auto Sync is on: with a selection, a change to the
+    /// current frame is made on the rest of it too.
+    auto_sync: bool,
     /// The settings last copied, for the session.
     clipboard: Option<Copied>,
     /// How many pastes there have been: each one's number is on its step
@@ -333,6 +339,7 @@ impl App {
             display,
             v_down: false,
             exports: HashMap::new(),
+            auto_sync: false,
             clipboard: None,
             pastes: 0,
             at: None,
@@ -595,6 +602,11 @@ impl App {
             Command::GuidedUpright => self.guided_tool(self.guided.is_none()),
             Command::Clipping => self.clipping = !self.clipping,
             Command::Shortcuts => self.legend = !self.legend,
+            Command::AutoSync => {
+                self.auto_sync = !self.auto_sync;
+                let text = if self.auto_sync { "Auto Sync is on: a change to this frame is made on every selected frame" } else { "Auto Sync is off" };
+                self.message = Some((text.to_owned(), false));
+            }
             // Lightroom's I: Info 1, Info 2, none, and round again.
             Command::InfoCycle => {
                 self.info = match self.info {
@@ -854,12 +866,90 @@ impl App {
     /// says whether it changed anything. Nothing happens until the frame's
     /// raw has been decoded.
     fn edit(&mut self, change: impl FnOnce(&mut History, &SourceInfo) -> bool) {
+        self.edit_with(change, &[]);
+    }
+
+    /// [`Self::edit`], with what Auto Sync sets automatically on each
+    /// frame for itself rather than making the same change.
+    fn edit_with(&mut self, change: impl FnOnce(&mut History, &SourceInfo) -> bool, autos: &[Auto]) {
         let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
         if self.locked(&path) {
             return;
         }
         if self.edits.get_mut(&path).is_some_and(|editing| editing.edit(change)) {
             self.save(&path);
+            self.synced(autos);
+        }
+    }
+
+    /// Auto Sync: the current frame's last step made on the rest of the
+    /// selection too, each frame's white balance as shot its own, its crop
+    /// inside its shape, and `autos` (and an automatic Upright) found on
+    /// it for itself. One step to undo on all of them, as a paste is.
+    fn synced(&mut self, autos: &[Auto]) {
+        let Some(shoot) = self.shoot.as_ref().filter(|_| self.auto_sync) else { return };
+        let current = shoot.frame().path.clone();
+        let others: Vec<PathBuf> = shoot.selection().into_iter().map(|i| shoot.frames()[i].path.clone()).filter(|path| *path != current).collect();
+        let Some(editing) = self.edits.get(&current).filter(|_| !others.is_empty()) else { return };
+        let Some(before) = editing.history.last_before() else { return };
+        let changes = copy::changes(before, editing.history.settings());
+        if changes.is_empty() && autos.is_empty() {
+            return;
+        }
+        self.pastes += 1;
+        let number = self.pastes;
+        if let Some(editing) = self.edits.get_mut(&current) {
+            editing.history.tag_last(number);
+        }
+        for path in others {
+            if !self.edits.contains_key(&path) {
+                // Not decoded this session: its edit is what its sidecar holds.
+                let saved = self.settings_of(&path).map(|settings| (*settings).clone());
+                if !self.unreadable.contains(&path) {
+                    self.edits.insert(path.clone(), Editing::new(History::unseen(saved), None));
+                }
+            }
+            if self.unreadable.contains(&path) {
+                continue;
+            }
+            let source = self.renderer.source(&path);
+            let Some(editing) = self.edits.get_mut(&path) else { continue };
+            let mut becomes = changes.apply(editing.history.settings(), editing.history.fresh());
+            match (&source, editing.info.clone()) {
+                (Some(source), Some(info)) => {
+                    let dims = crop::dims((source.width, source.height), &becomes);
+                    crop::constrain(&mut becomes, dims);
+                    for &what in autos {
+                        auto::apply(&mut becomes, &info, &editing.camera, source, what);
+                    }
+                    if becomes.geometry.upright_transform.is_none() {
+                        edit::refresh_upright(&mut becomes, &info, source);
+                    }
+                }
+                // Found on it once its raw is decoded.
+                _ => editing.pending.extend_from_slice(autos),
+            }
+            editing.history.paste(number, becomes);
+            if editing.stepped() {
+                self.save(&path);
+            }
+        }
+    }
+
+    /// What Auto Sync asked to be set automatically on a frame before its
+    /// raw was decoded, set now it is: no step, as the sync was the step.
+    fn apply_pending(&mut self, path: &Path) {
+        let Some(source) = self.renderer.source(path) else { return };
+        let Some(editing) = self.edits.get_mut(path).filter(|editing| !editing.pending.is_empty()) else { return };
+        let Some(info) = editing.info.clone() else { return };
+        let (pending, camera) = (std::mem::take(&mut editing.pending), editing.camera.clone());
+        if editing.history.amend(|settings| {
+            for what in pending {
+                auto::apply(settings, &info, &camera, &source, what);
+            }
+        }) {
+            editing.stepped();
+            self.save(path);
         }
     }
 
@@ -903,10 +993,14 @@ impl App {
         let Some(source) = self.renderer.source(&path) else { return };
         let camera = self.edits.get(&path).map(|editing| editing.camera.clone()).unwrap_or_default();
         let (mut found, mut changed, started) = (true, false, std::time::Instant::now());
-        self.edit(|history, info| {
-            changed = history.set(|settings| found = auto::apply(settings, info, &camera, &source, what));
-            changed
-        });
+        // Auto Sync sets it on each frame for itself.
+        self.edit_with(
+            |history, info| {
+                changed = history.set(|settings| found = auto::apply(settings, info, &camera, &source, what));
+                changed
+            },
+            &[what],
+        );
         log::debug!("{what:?} in {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
         // A press that changes nothing says why.
         let text = match what {
@@ -943,6 +1037,7 @@ impl App {
         }
         if stopped && editing.edit(|history, _| history.commit()) {
             self.save(&path);
+            self.synced(&[]);
         }
     }
 
@@ -1267,6 +1362,7 @@ impl App {
                         None => _ = self.edits.insert(path.clone(), Editing::new(History::new(fresh, saved), Some((info, camera)))),
                     }
                     self.fill_upright(&path);
+                    self.apply_pending(&path);
                 }
                 News::Failed(path, error) => self.message = Some((format!("Couldn't develop {}: {error}", file_name(&path)), true)),
             }
@@ -1488,6 +1584,17 @@ impl App {
             self.clipping = !self.clipping;
         }
         ui.add_space(6.0);
+        // Auto Sync, while it's on, as Lightroom's switch on its Sync button.
+        if self.auto_sync {
+            let selected = self.shoot.as_ref().map_or(0, |shoot| shoot.selection().len());
+            let text = if selected > 1 { format!("Auto Sync: {selected} frames") } else { "Auto Sync: select frames to sync".to_owned() };
+            let tip = hotkeys::current().command(Command::AutoSync).map_or_else(|| "Turn Auto Sync off".to_owned(), |s| format!("Turn Auto Sync off ({})", format_shortcut(&s)));
+            let label = egui::Label::new(RichText::new(text).color(self.theme.accent)).sense(egui::Sense::click());
+            if ui.add(label).on_hover_text(tip).clicked() {
+                self.auto_sync = false;
+            }
+            ui.add_space(4.0);
+        }
         // Not until the frame's raw has been decoded: the sliders are read against it.
         let editing = self.shoot.as_ref().and_then(|shoot| self.edits.get(&shoot.frame().path));
         let Some(editing) = editing.filter(|editing| editing.info.is_some()) else { return };
@@ -3653,6 +3760,58 @@ mod tests {
         h.press(Modifiers::NONE, Key::Enter);
         assert!(h.app.guided.is_none());
         assert_eq!(h.settings().geometry.guides.len(), 1);
+    }
+
+    #[test]
+    fn auto_sync_makes_a_change_on_every_selected_frame_as_one_step() {
+        use lightcraft_develop::WbMode;
+        let folder = Folder::new("auto-sync", &[1, 1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let paths: Vec<PathBuf> = h.app.shoot.as_ref().unwrap().frames().iter().map(|f| f.path.clone()).collect();
+        // Off, nothing but the current frame changes.
+        h.press(Modifiers::COMMAND, Key::A);
+        h.press(Modifiers::NONE, Key::Equals);
+        assert!(h.app.edits.get(&paths[1]).is_none_or(|e| e.history.settings().light.exposure == 0.0));
+        h.press(Modifiers::COMMAND, Key::Z);
+
+        let ctrl_alt_shift = Modifiers { alt: true, shift: true, ..Modifiers::COMMAND };
+        h.press(ctrl_alt_shift, Key::A);
+        assert!(h.app.auto_sync);
+        h.frame(vec![]);
+        assert!(h.text("Auto Sync: 5 frames").is_positive());
+        // A drag of Exposure: the value it ends at, on every selected frame, once.
+        let track = h.track("light.exposure");
+        drag(&mut h, track.center(), track.center() + egui::vec2(track.width() * 0.2, 0.0), Modifiers::NONE);
+        let exposure = h.settings().light.exposure;
+        assert!(exposure > 0.0);
+        for path in &paths {
+            assert_eq!(h.saved_of(&file_name(path)).map(|s| s.light.exposure), Some(exposure), "{path:?}");
+        }
+        // Undone from all of them at once, decoded or not.
+        h.press(Modifiers::COMMAND, Key::Z);
+        for path in &paths {
+            assert_eq!(h.app.edits[path].history.settings().light.exposure, 0.0, "{path:?}");
+        }
+        // Auto white balance: each frame's own, not the current frame's numbers;
+        // the frames not decoded yet get theirs once they are.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::U);
+        for path in &paths {
+            assert_eq!(h.app.edits[path].history.settings().wb.mode, WbMode::Auto, "{path:?}");
+        }
+        assert!(!h.app.edits[&paths[4]].pending.is_empty(), "set once it's decoded");
+        h.press(Modifiers::NONE, Key::End);
+        h.settle();
+        assert!(h.app.edits[&paths[4]].pending.is_empty());
+        // As shot is each frame's own.
+        h.press(Modifiers::COMMAND, Key::A);
+        h.app.edit(|history, info| history.set(|settings| edit::as_shot(settings, info)));
+        for path in &paths {
+            let settings = h.app.edits[path].history.settings();
+            assert_eq!(settings.wb.mode, WbMode::AsShot, "{path:?}");
+        }
     }
 
     #[test]

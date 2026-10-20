@@ -91,6 +91,9 @@ pub enum Command {
     /// Guided Upright's tool: draw lines along what should be upright or
     /// level. Or put it away.
     GuidedUpright,
+    /// Lightroom's Auto Sync: a change to the current frame is made on
+    /// every selected frame as it's made. Or not.
+    AutoSync,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -156,6 +159,7 @@ impl Command {
         Command::CompareTopBottom,
         Command::CompareSplit,
         Command::GuidedUpright,
+        Command::AutoSync,
     ];
 
     /// Look a command up by its name in code, e.g. "Open".
@@ -167,6 +171,7 @@ impl Command {
     /// Ctrl+Z even when Shift is also held, so Ctrl+Shift+Z has to be
     /// checked before it.
     pub const KEYBOARD_ORDER: &[Command] = &[
+        Command::AutoSync,
         Command::Redo,
         Command::Reset,
         Command::Undo,
@@ -283,6 +288,7 @@ impl Command {
             Command::CompareTopBottom => "Before/After Top/Bottom",
             Command::CompareSplit => "Before/After Split",
             Command::GuidedUpright => "Guided Upright Tool",
+            Command::AutoSync => "Auto Sync",
         }
     }
 
@@ -357,6 +363,8 @@ impl Command {
             Command::CompareTopBottom => s(Modifiers::ALT, Key::Y),
             Command::CompareSplit => s(Modifiers::SHIFT, Key::Y),
             Command::GuidedUpright => s(Modifiers::SHIFT, Key::T),
+            // Lightroom's Enable Auto Sync.
+            Command::AutoSync => s(Modifiers { alt: true, shift: true, ..CMD }, Key::A),
         }
     }
 
@@ -498,6 +506,7 @@ mod tests {
         assert_eq!(press(&ctx, Modifiers::ALT, Key::Y), [Command::CompareTopBottom]);
         assert_eq!(press(&ctx, Modifiers::SHIFT, Key::Y), [Command::CompareSplit]);
         assert_eq!(press(&ctx, Modifiers::SHIFT, Key::T), [Command::GuidedUpright]);
+        assert_eq!(press(&ctx, Modifiers { alt: true, shift: true, ..CMD }, Key::A), [Command::AutoSync], "not Select All");
     }
 
     #[test]

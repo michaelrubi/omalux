@@ -118,6 +118,20 @@ impl History {
         changed
     }
 
+    /// What the settings were before the last step: what it changed is
+    /// what Auto Sync makes on the other frames.
+    pub fn last_before(&self) -> Option<&DevelopSettings> {
+        self.undo.last().map(|(settings, _)| settings)
+    }
+
+    /// Make the last step part of paste (or Auto Sync) number `paste`, so
+    /// undoing it here undoes it on every frame it reached.
+    pub fn tag_last(&mut self, paste: u64) {
+        if let Some((_, tag)) = self.undo.last_mut() {
+            *tag = Some(paste);
+        }
+    }
+
     /// The paste the next undo would take back, if it's one.
     pub fn undoes(&self) -> Option<u64> {
         if self.before.as_ref().is_some_and(|before| *before != self.settings) {
