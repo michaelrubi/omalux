@@ -203,8 +203,9 @@ afterwards in Omapix.
   A TIFF is never written over once Omapix has saved into it. From M9
   the export is recorded in the sidecar (`omalux:exported`), the
   filmstrip marks frames that are edited, exported, or edited since
-  their export, and an out-of-date frame can be exported again (how is
-  M9's decision).
+  their export, and an out-of-date frame is exported again: over its
+  TIFF if nothing has saved into it since, beside it as
+  `DSC01234-2.tif` if Omapix has.
 - **Undo and redo** per frame, and Ctrl+Shift+R resets a frame.
 
 ### Out (for now)
@@ -222,7 +223,7 @@ job:
 - Match Total Exposures across a set. Later.
 - Presets saved by name. Copy and paste covers the need for now.
 - Healing, liquify and anything else that changes pixels by hand:
-  Omapix. The one exception (M9, if the sensor needs it) is sensor
+  Omapix. The one exception (M9) is sensor
   dust: heal circles that paste across a set, since dust is in the same
   place on every frame.
 - Culling beyond marks: compare, survey, faces, signals are Omacull's.
@@ -262,7 +263,7 @@ Omapix's are.
 | In the crop tool: Return, Esc | Put the tool away; and with the crop as it was |
 | In the crop tool: Ctrl+drag | Straighten along a line |
 | Shift+T | Guided Upright (M8) |
-| Q | Spot Removal, for sensor dust (M9, if needed); A in it visualizes spots |
+| Q | Spot Removal, for sensor dust (M9); in it A visualizes spots, `[` `]` size a spot, Delete takes it away |
 | Ctrl+[, Ctrl+] | Rotate left, rotate right |
 | Ctrl+Alt+R | Reset the crop |
 | J | Clipping warnings |
