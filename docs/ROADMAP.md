@@ -633,7 +633,8 @@ DESIGN.md. Lightcraft already renders every one of these controls on the
 CPU and the GPU, so the work is OmaLux's panels, keys, copy groups and
 views. Every new setting's default is what's rendered today, so an edit
 that doesn't use one renders as before and the process version stays.
-Smallest first.
+Smallest first. Built on `m8` on 2026-10-20 and tested headlessly; not
+tried by hand yet.
 
 - **White balance presets.** Lightroom's menu in the White Balance
   panel: As Shot, Auto, Daylight, Cloudy, Shade, Tungsten, Fluorescent,
@@ -641,30 +642,37 @@ Smallest first.
   has them all, at the Kelvin and tint Lightroom's panel shows. A preset
   is pasted as that preset (a fixed Kelvin), unlike As Shot, which each
   frame gets its own of. Tests: each preset's Temp and Tint, and a
-  paste.
+  paste. *Done:* the menu is on the word naming the white balance, as
+  Lightroom's "WB:" menu.
 - **Texture, Clarity and Dehaze** in Presence, above Vibrance and
   Saturation, as in Lightroom (Lightcraft's `effects.texture`,
   `effects.clarity` and `effects.dehaze`). The Presence copy group and
   the panel's switch take `effects` along with `color`.
   Shift+double-click gives whatever Lightcraft's Auto has for each, or
-  says it has nothing. Checks:
+  says it has nothing. *Done;* Lightcraft's Auto has nothing for them.
+  Checks:
   - How they stack with HDR. Dehaze, Clarity and HDR all work on local
     contrast, on top of Light's local tone mapping. Try HDR at 50 with
     Dehaze at +30 and Clarity at +30 on backlit frames, at 100%, and
-    look for halos.
+    look for halos. *On the laptop*, on Michael's frames.
   - That `look::effective` puts DRO's lift and Flat's curve where
-    Lightroom's profile sits relative to them.
+    Lightroom's profile sits relative to them. *Done:* the lift and HDR
+    are folded into Light's Shadows and Highlights, and Flat into the
+    tone curve, so they sit under Texture, Clarity and Dehaze as
+    Lightroom's profile and Basic sliders do.
   - The GPU against the CPU for each, within 1/255, at fit and in a
     100% window. Dehaze takes its airlight from the whole frame, so a
-    window has to match the fit view. Upstream's "Dehaze's zoomed proxy"
-    was left out of the re-sync because OmaLux had no Dehaze (see
-    "Keeping up with Lightcraft"); take it now.
+    window has to match the fit view. *Done:* Lightcraft's equivalence
+    tests cover all three, at fit and in windows, and pass on the RTX
+    4070 (max 1/255). Upstream's "Dehaze's zoomed proxy" turned out to
+    have come with the 2026-10-15 re-sync already.
 - **Info overlay** (I): Lightroom's loupe info. I cycles Info 1, Info 2
   and off, and Ctrl+I shows or hides it. Info 1 shows the file name, the
   capture date and time, and the cropped size. Info 2 shows ISO,
   shutter, aperture, focal length and lens. The data comes from the Exif
   `meta` already reads. The fields are fixed: Lightroom lets you choose
-  them, but nobody here needs that setting.
+  them, but nobody here needs that setting. *Done*, for the session
+  (Lightroom remembers it; OmaLux doesn't yet).
 - **Before/after views** (Y, Alt+Y, Shift+Y): Lightroom's left/right,
   top/bottom, and the one frame split down the middle. Y again goes back
   to the loupe, and `\` stays the toggle it is. "Before" is the frame
@@ -675,23 +683,32 @@ Smallest first.
   warnings stay the edit's. Opening the crop tool or the Guided Upright
   tool goes back to the loupe, as Lightroom does. Headless tests: each
   view's layout, the locked pan, and that the before render is kept
-  across a drag.
+  across a drag. *Done.* `\` and W go back to the loupe too. The
+  camera's JPEG stands in for before until it's rendered, and the
+  before half has its own window at 100%.
 - **Transform:** Lightroom's panel, below Lens Corrections. Upright
   (Off, Auto, Guided, Level, Vertical, Full), Vertical, Horizontal,
   Rotate, Aspect, Scale, Offset X and Y, and Constrain Crop. This is
   Lightcraft's `Geometry`, and its `upright` analysis of the
   lens-corrected frame. The analysis runs once, when a mode is chosen,
-  off the UI thread, and its result is stored in the edit
-  (`upright_transform`) so the loupe and the export use the same
-  transform.
+  and its result is stored in the edit (`upright_transform`) so the
+  loupe and the export use the same transform. *Done.* It runs on the UI
+  thread, as Auto Level's does: 85 ms on the loupe's source of a corpus
+  frame, which is a hitch on the click and not worth a thread. It's
+  found again when the lens corrections change.
   - Upright works best with the lens profile on, as Lightroom says. The
     panel says so when Enable Profile Corrections is off.
   - Guided (Shift+T, Lightroom's Guided Upright tool): draw up to four
     lines along verticals or horizontals on the loupe. It's a tool like
-    the crop's: Return or Esc puts it away.
+    the crop's: Return or Esc puts it away. *Done*, with Delete for a
+    line (the one clicked, or else the last). While it's open the frame
+    is shown through its lens corrections alone, where the lines are
+    kept, and not transformed as each line goes in, as Lightroom shows
+    it.
   - The crop tool shows the transformed frame. Constrain Crop keeps the
     crop inside the picture, and is off by default, as Lightroom's is.
     Check what Lightcraft draws outside the picture when it's off.
+    *Done:* Lightcraft's grey (`geometry::BLANK`).
   - Auto level stays in the crop panel. Lightroom has both: the crop's
     straighten turns the frame, and Upright's Level is a perspective
     transform.
@@ -701,7 +718,11 @@ Smallest first.
     pastes its lines. Quarter turns stay in no group, as now.
   - Checks: the GPU's `sample_warp` with a homography against the CPU;
     a drag of Vertical still shows in the next frame; how long Auto's
-    analysis takes on a full 24 MP frame.
+    analysis takes on a full 24 MP frame. *Done:* Lightcraft's
+    equivalence tests cover a perspective (the same homography in the
+    warp) and pass on the RTX 4070. The `spike` example now times it:
+    on a corpus frame, Upright Auto takes 85 ms on the loupe's source
+    and 96 ms at full size, and a drag of Vertical 2.6 ms on the GPU.
 
 ## M9. Sets, exporting again and dust
 
@@ -857,7 +878,7 @@ craft-watch's notes:
   OmaLux's own reader stays. M5's measurements of Sony's correction on
   the ILCE-7M3 against its JPEGs could go upstream with an offer to open
   its gate for this body.
-- *Not taken:* Dehaze's zoomed proxy (OmaLux has no Dehaze), DNG and
+- *Not taken:* DNG and
   HDR-merge writing, spot healing, mask overlays, and export and command
   fixes in `engine`, whose OmaLux equivalents are its own.
 
