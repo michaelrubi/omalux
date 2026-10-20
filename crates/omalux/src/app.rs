@@ -171,6 +171,10 @@ pub struct App {
     /// The edits their sidecars held, of frames not decoded yet: read
     /// when a frame is first wanted.
     saved: HashMap<PathBuf, Option<Arc<DevelopSettings>>>,
+    /// The process version of each edit read from a sidecar that's older
+    /// than this OmaLux's: it keeps rendering, and is saved, as that one
+    /// (Lightroom's way). Every other frame's is this OmaLux's.
+    processes: HashMap<PathBuf, u32>,
     /// Frames whose sidecar holds an edit this OmaLux can't read (a newer
     /// one's, say): shown as fresh raws and never written over.
     unreadable: HashSet<PathBuf>,
@@ -320,6 +324,7 @@ impl App {
             renderer: workers.renderer,
             loupe: Loupe::default(),
             saved: HashMap::new(),
+            processes: HashMap::new(),
             unreadable: HashSet::new(),
             edits: HashMap::new(),
             selected: develop::sliders().position(|spec| spec.id == "light.exposure").unwrap_or(0),
@@ -408,6 +413,7 @@ impl App {
     /// stays: it can be pasted in the next shoot.
     fn forget(&mut self) {
         self.saved.clear();
+        self.processes.clear();
         self.unreadable.clear();
         self.edits.clear();
         self.exports.clear();
@@ -479,8 +485,13 @@ impl App {
         // And each with its last export, to tell whether it's to be done
         // again.
         let last = |frame: &PathBuf| self.exports.get(frame).cloned().or_else(|| shoot.frames().iter().find(|f| f.path == *frame).and_then(|f| f.exported.clone()));
-        let to_export: Vec<(PathBuf, Option<Arc<DevelopSettings>>, Option<sidecar::Exported>)> =
-            frames.iter().map(|frame| (frame.clone(), self.edits.get(frame).map(|editing| editing.settings.clone()), last(frame))).collect();
+        let to_export: Vec<(PathBuf, Option<sidecar::Edit>, Option<sidecar::Exported>)> = frames
+            .iter()
+            .map(|frame| {
+                let edit = self.edits.get(frame).map(|editing| sidecar::Edit { process: self.process_of(frame), settings: (*editing.settings).clone() });
+                (frame.clone(), edit, last(frame))
+            })
+            .collect();
         let (ctx, target) = (ctx.clone(), to.clone());
         let total = frames.len();
         self.message = Some((format!("Exporting 1 of {total}…"), false));
@@ -495,8 +506,8 @@ impl App {
             results: rx,
         });
         std::thread::spawn(move || {
-            for (frame, settings, last) in to_export {
-                let res = omalux_engine::export::export(&frame, &target, settings.as_deref(), last.as_ref())
+            for (frame, edit, last) in to_export {
+                let res = omalux_engine::export::export(&frame, &target, edit.as_ref(), last.as_ref())
                     .map_err(|e| format!("{}: {e}", file_name(&frame)));
                 if tx.send((frame, res)).is_err() {
                     return;
@@ -996,7 +1007,13 @@ impl App {
     /// Send a frame's edit to its sidecar, on the disk thread.
     fn save(&mut self, path: &Path) {
         let Some(editing) = self.edits.get(path) else { return };
-        self.disk.save(path.to_path_buf(), sidecar::Edit::new(editing.history.settings().clone()));
+        let edit = sidecar::Edit { process: self.process_of(path), settings: editing.history.settings().clone() };
+        self.disk.save(path.to_path_buf(), edit);
+    }
+
+    /// The process version a frame's edit is rendered and saved under.
+    fn process_of(&self, path: &Path) -> u32 {
+        self.processes.get(path).copied().unwrap_or(sidecar::PROCESS_VERSION)
     }
 
     /// Move the selected slider by `steps` nudges.
@@ -1538,7 +1555,13 @@ impl App {
             let frames = std::iter::once(shoot.current()).chain(shoot.neighbours(AHEAD, BEHIND));
             frames.map(|i| shoot.frames()[i].path.clone()).collect()
         });
-        let mut wanted: Vec<Wanted> = paths.into_iter().map(|path| Wanted { settings: self.settings_of(&path), path }).collect();
+        let mut wanted: Vec<Wanted> = paths
+            .into_iter()
+            .map(|path| {
+                let settings = self.settings_of(&path);
+                Wanted { settings, process: self.process_of(&path), path }
+            })
+            .collect();
         // Panels switched off: each frame without them, once it's decoded
         // and its fresh settings are known.
         if !self.off.is_empty() {
@@ -1550,7 +1573,7 @@ impl App {
         }
         // Before: the current frame as a fresh raw (`None` is one).
         if let Some(current) = wanted.first_mut().filter(|_| self.before) {
-            current.settings = None;
+            (current.settings, current.process) = (None, sidecar::PROCESS_VERSION);
         }
         // The crop tool draws its crop over the current frame whole, so
         // a change to the crop there is nothing to render again.
@@ -1600,6 +1623,9 @@ impl App {
                 None
             }
         };
+        if let Some(edit) = saved.as_ref().filter(|edit| edit.process < sidecar::PROCESS_VERSION) {
+            self.processes.insert(path.to_path_buf(), edit.process);
+        }
         let settings = saved.map(|edit| Arc::new(edit.settings));
         self.saved.insert(path.to_path_buf(), settings.clone());
         settings
@@ -3762,6 +3788,39 @@ mod tests {
         h.settle();
         assert_eq!(Profile::of(h.settings()), Profile::Camera);
         assert_eq!(h.settings(), &look::fresh(5200.0, 3.0));
+    }
+
+    #[test]
+    fn an_edit_keeps_its_process_version_when_its_saved_again() {
+        let folder = Folder::new("process", &[1, 1]);
+        let raw = folder.0.join("DSC00001.ARW");
+        // As M4 to M6's preparation saved an edit: process version 2.
+        let mut before = look::fresh(5200.0, 3.0);
+        before.light.exposure = 0.5;
+        sidecar::update(&raw, |xmp| {
+            let with = sidecar::with_edit(xmp, &sidecar::Edit::new(before.clone()))?;
+            Ok(with.replace(&format!(">{}</omalux:processVersion>", sidecar::PROCESS_VERSION), ">2</omalux:processVersion>"))
+        })
+        .unwrap();
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let process = |h: &Harness, name: &str| {
+            h.app.disk.flush();
+            sidecar::edit(&sidecar::read(&folder.0.join(name)).unwrap().unwrap()).unwrap().unwrap().process
+        };
+
+        assert_eq!(h.settings(), &before);
+        assert_eq!(h.app.wanted()[0].process, 2, "it's developed as process version 2 developed it");
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(process(&h, "DSC00001.ARW"), 2, "and saved as one");
+        // A fresh raw's edit is this OmaLux's.
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.settle();
+        assert_eq!(h.app.wanted()[0].process, sidecar::PROCESS_VERSION);
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(process(&h, "DSC00002.ARW"), sidecar::PROCESS_VERSION);
     }
 
     #[test]

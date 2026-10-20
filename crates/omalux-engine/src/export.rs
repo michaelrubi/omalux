@@ -96,8 +96,8 @@ fn beside(to: &Path, stem: &str) -> PathBuf {
 
 /// Export `raw` to `to`, `<to>/<stem>.tif` the first time.
 ///
-/// Decodes at full size, takes `settings` or the edit in its sidecar or a
-/// fresh raw's as-shot settings, renders to 16-bit Linear ProPhoto RGB, and
+/// Decodes at full size, takes `edit` or the edit in its sidecar or a
+/// fresh raw's as-shot settings, under the edit's process version, renders to 16-bit Linear ProPhoto RGB, and
 /// writes the TIFF in one step via a temporary file.
 ///
 /// `last` is the frame's last export, from its sidecar. A TIFF already
@@ -109,7 +109,7 @@ fn beside(to: &Path, stem: &str) -> PathBuf {
 ///
 /// Returns an error if the raw cannot be read or decoded, if its sidecar
 /// has an edit with a newer process version, or if rendering/writing fails.
-pub fn export(raw: &Path, to: &Path, settings: Option<&DevelopSettings>, last: Option<&crate::sidecar::Exported>) -> Result<Exported, String> {
+pub fn export(raw: &Path, to: &Path, edit: Option<&crate::sidecar::Edit>, last: Option<&crate::sidecar::Exported>) -> Result<Exported, String> {
     let stem = raw.file_stem().ok_or_else(|| format!("{}: not a file", raw.display()))?.to_string_lossy().into_owned();
     let first = to.join(format!("{stem}.tif"));
     let there = |path: &Path| path.try_exists().map_err(|e| format!("{}: {e}", path.display()));
@@ -117,16 +117,18 @@ pub fn export(raw: &Path, to: &Path, settings: Option<&DevelopSettings>, last: O
         return Ok(Exported::There(first));
     }
 
-    let saved = match settings {
-        Some(s) => Some(s.clone()),
+    let saved = match edit {
+        Some(edit) => Some(edit.clone()),
         None => {
             let xmp = crate::sidecar::read(raw).map_err(|e| format!("{}: {e}", raw.display()))?;
-            xmp.as_deref().map(crate::sidecar::edit).transpose().map_err(|e| format!("{}: {e}", raw.display()))?.flatten().map(|edit| edit.settings)
+            xmp.as_deref().map(crate::sidecar::edit).transpose().map_err(|e| format!("{}: {e}", raw.display()))?.flatten()
         }
     };
+    let process = saved.as_ref().map_or(crate::sidecar::PROCESS_VERSION, |edit| edit.process);
+    let saved = saved.map(|edit| edit.settings);
     let bytes = fs::read(raw).map_err(|e| format!("{}: {e}", raw.display()))?;
     let profile = saved.as_ref().map_or(Profile::Camera, Profile::of);
-    let crate::raw::Loaded { image: full, info, camera, .. } = crate::raw::load(&bytes, usize::MAX, profile)?;
+    let crate::raw::Loaded { image: full, info, camera, .. } = crate::raw::load(&bytes, usize::MAX, profile, process)?;
     let fresh = look::fresh(info.as_shot_temp, info.as_shot_tint);
     let dev_settings = saved.unwrap_or_else(|| fresh.clone());
     // An edit that's a fresh raw's is named as having none.
@@ -274,7 +276,7 @@ mod tests {
             // Edited since, and nothing saved into it: written over.
             let mut since = look::fresh(6500.0, 0.0);
             since.light.exposure = 1.0;
-            let Exported::Written { tiff, record: again } = export(&raw_path, &out, Some(&since), Some(&record)).unwrap() else { panic!("not written") };
+            let Exported::Written { tiff, record: again } = export(&raw_path, &out, Some(&crate::sidecar::Edit::new(since.clone())), Some(&record)).unwrap() else { panic!("not written") };
             assert_eq!(tiff, target);
             assert_ne!(again.settings, record.settings);
             // Saved into since (Omapix's retouching): a new one beside it.
@@ -282,7 +284,7 @@ mod tests {
             fs::File::options().append(true).open(&target).unwrap().set_modified(later).unwrap();
             let retouched = fs::read(&target).unwrap();
             since.light.exposure = 0.5;
-            let Exported::Written { tiff, .. } = export(&raw_path, &out, Some(&since), Some(&again)).unwrap() else { panic!("not written") };
+            let Exported::Written { tiff, .. } = export(&raw_path, &out, Some(&crate::sidecar::Edit::new(since.clone())), Some(&again)).unwrap() else { panic!("not written") };
             assert_eq!(tiff, out.join(format!("{stem}-2.tif")));
             assert_eq!(fs::read(&target).unwrap(), retouched, "the retouched one is left as it was");
             // One OmaLux has no record of is never written over.
@@ -303,7 +305,7 @@ mod tests {
             let tiff::decoder::DecodingResult::U16(edit_samples) = decoder.read_image().unwrap() else { panic!("not 16-bit") };
             assert_ne!(edit_samples, default_samples);
 
-            let crate::raw::Loaded { image: full, info, camera, .. } = crate::raw::load(&bytes, usize::MAX, Profile::Camera).unwrap();
+            let crate::raw::Loaded { image: full, info, camera, .. } = crate::raw::load(&bytes, usize::MAX, Profile::Camera, crate::sidecar::PROCESS_VERSION).unwrap();
             let expected_image = render(&full, &info, &camera, &edited_settings).unwrap();
             assert_eq!(edit_samples, expected_image.samples);
 

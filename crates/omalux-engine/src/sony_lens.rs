@@ -527,7 +527,7 @@ mod tests {
             assert!(vig_stops > 0.1 && vig_stops < 2.5, "{name}: plausible vignetting stops {vig_stops}");
             assert!(ca_r.abs() < 5.0 && ca_b.abs() < 5.0, "{name}: plausible CA sizes");
 
-            let found = crate::lens_profiles::for_raw(&info, &bytes, crate::lens_profiles::Source::Sony)
+            let found = crate::lens_profiles::for_raw(&info, &bytes, crate::lens_profiles::Source::Sony, crate::sidecar::PROCESS_VERSION)
                 .unwrap_or_else(|| panic!("{name}: for_raw Sony"));
             assert_eq!(found.source, crate::lens_profiles::Source::Sony, "{name}: Source::Sony");
         }

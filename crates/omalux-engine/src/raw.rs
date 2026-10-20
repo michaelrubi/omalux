@@ -10,8 +10,8 @@
 //! full-size source to fit it (`0d13a7d5`). The smallest embedded JPEG
 //! that covers a preview (`14e0d128`) isn't taken: an ILCE-7M3's ARW holds
 //! only its 1616 px preview beside a 160 px thumbnail, so it's always the
-//! one. Nor is the camera look through the lens warp (`c854e172`), here:
-//! see [`load`].
+//! one. The camera look through the lens warp (`c854e172`) is taken from
+//! process version 3 on: see [`load`].
 
 use std::sync::Arc;
 
@@ -265,21 +265,22 @@ pub struct Loaded {
 
 /// Decode a raw into a linear Rec.2020 image no larger than `max_edge`, oriented, with the look `profile` starts
 /// from: fitted to its own JPEG ([`Profile::Fitted`]), or its camera's fixed one (Camera match and Flat, which
-/// share a development). A raw that can't be decoded yet shows its embedded JPEG.
+/// share a development), as process version `process` develops it. A raw that can't be decoded yet shows its
+/// embedded JPEG.
 ///
 /// Whatever is rendered from it goes through [`crate::look::effective`] first.
 ///
-/// The look fitted to a frame's JPEG and DRO's lift are measured on the raw as it is, not through the lens warp
-/// the camera applied to its JPEG ([`crate::camera_preview::camera_lens_geometry`]): through it they'd follow an
-/// FE 35 frame's JPEG better and come out different, and edits made under process versions 1 and 2 render as they did.
+/// From process version 3, the look fitted to a frame's JPEG and DRO's lift are measured through the lens warp the
+/// camera applied to its JPEG ([`crate::camera_preview::camera_lens_geometry`]): they follow an FE 35 frame's JPEG
+/// better. Under 1 and 2 they're measured on the raw as it is, so edits made then render as they did.
 ///
 /// Runs on a rayon worker: its many short parallel loops then start on the worker's own queue
 /// instead of each one waking the pool from outside and waiting for it.
-pub fn load(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, String> {
-    rayon::scope(|_| load_now(bytes, max_edge, profile))
+pub fn load(bytes: &[u8], max_edge: usize, profile: Profile, process: u32) -> Result<Loaded, String> {
+    rayon::scope(|_| load_now(bytes, max_edge, profile, process))
 }
 
-fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, String> {
+fn load_now(bytes: &[u8], max_edge: usize, profile: Profile, process: u32) -> Result<Loaded, String> {
     let ms = |t: web_time::Instant| t.elapsed().as_secs_f64() * 1e3;
     let mut timings = Timings::default();
     if lightcraft_raw::probe(bytes).is_none() {
@@ -300,10 +301,12 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
     // Embedded lens corrections are applied by the pipeline ("Enable Profile Corrections"), not baked in
     // (removed before the camera look's binned sensor proxy too, which needs an empty `OpcodeList3`).
     let info = raw.info();
-    let lens = crate::lens_profiles::for_raw(&info, bytes, crate::lens_profiles::DEFAULT);
+    let lens = crate::lens_profiles::for_raw(&info, bytes, crate::lens_profiles::DEFAULT, process);
     // The full-size frame's long edge: noise reduction's radii are in its pixels, so a smaller
     // development looks like the full-size one scaled down (Lightcraft's catalogue gives it the same).
     let native_long = Some(info.developed_size()).map(|(w, h)| w.max(h)).filter(|&n| n > 0);
+    // The warp the camera applied to its JPEG, read before the raw's own lens corrections go (see above).
+    let warp = (process >= 3).then(|| crate::camera_preview::camera_lens_geometry(&raw, bytes)).flatten();
     raw.opcodes.list3.retain(|op| !op.is_lens_correction());
     // Which scale white balance is edited on, and the as-shot white on it, from the file's own colour tags or
     // the camera's measured matrices
@@ -312,7 +315,7 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
     // The look: the camera's fixed profile for its Creative Style, or where there's none (and for an edit made
     // before there were any) the one fitted to this frame's own JPEG.
     let shot = crate::sony::settings(bytes);
-    let fixed = if profile.fitted() { None } else { fixed_look(&raw, shot.creative_style.as_deref().unwrap_or_default()) };
+    let fixed = if profile.fitted() { None } else { fixed_look(&raw, shot.creative_style.as_deref().unwrap_or_default(), process) };
     let camera = Camera {
         style: shot.creative_style,
         dro: shot.dro,
@@ -321,11 +324,11 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
         lens: lens.as_ref().map(|found| found.name.clone()),
         capture: crate::look::Capture { size: Some(info.developed_size()), ..crate::look::Capture::of(&raw.metadata) },
     };
-    // (without the lens warp: see above)
-    let (xy, transform, camera_look) = fixed.unwrap_or_else(|| crate::camera_preview::starting_colour(&mut raw, bytes, None));
+    // (through the lens warp from process version 3: see above)
+    let (xy, transform, camera_look) = fixed.unwrap_or_else(|| crate::camera_preview::starting_colour(&mut raw, bytes, warp.as_ref()));
     // What DRO did to the camera's JPEG that the raw doesn't have, for Camera match to put back.
     let lifted = !profile.fitted() && camera.dro.is_some_and(|dro| dro != crate::sony::Dro::Off);
-    let lift = camera_look.as_ref().filter(|_| lifted).and_then(|look| crate::dro::measure(&raw, bytes, &transform, look));
+    let lift = camera_look.as_ref().filter(|_| lifted).and_then(|look| crate::dro::measure(&raw, bytes, &transform, look, warp.as_ref()));
     let camera = Camera { lift: lift.unwrap_or(0.0), ..camera };
     timings.look = ms(t);
     // Previews bin the mosaic straight to (about) the size they need; only larger levels (exports, 1:1)
@@ -398,8 +401,8 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile) -> Result<Loaded, S
 /// white, the camera transform at it and the profile's colour and tone, as
 /// [`crate::camera_preview::starting_colour`] gives a fitted one. `None` without a profile for them, or for a raw
 /// with colour matrices of its own.
-fn fixed_look(raw: &lightcraft_raw::RawImage, style: &str) -> Option<(lightcraft_color::Xy, lightcraft_raw::color::CameraTransform, Option<CameraLook>)> {
-    let profile = crate::camera_profiles::get(raw.metadata.model.as_deref()?, style)?;
+fn fixed_look(raw: &lightcraft_raw::RawImage, style: &str, process: u32) -> Option<(lightcraft_color::Xy, lightcraft_raw::color::CameraTransform, Option<CameraLook>)> {
+    let profile = crate::camera_profiles::get(raw.metadata.model.as_deref()?, style, process)?;
     let xy = lightcraft_raw::color::as_shot_white_xy(raw);
     let transform = lightcraft_raw::color::camera_transform(raw, xy);
     if !transform.matrix_is_fallback {
@@ -528,7 +531,7 @@ pub(crate) mod tests {
     #[test]
     fn corpus_a7m3_opens_with_a_camera_look_and_kelvin_white_balance() {
         for (name, bytes) in a7m3_corpus() {
-            let Loaded { image: img, info, timings, .. } = load(&bytes, 1200, Profile::Camera).unwrap();
+            let Loaded { image: img, info, timings, .. } = load(&bytes, 1200, Profile::Camera, crate::sidecar::PROCESS_VERSION).unwrap();
             assert_eq!(img.width.max(img.height), 1200, "{name}");
             assert!(img.data.iter().flatten().all(|v| v.is_finite() && *v >= 0.0), "{name}");
             assert!(info.raw && info.camera_tone.is_some(), "{name}: a camera look");
@@ -536,7 +539,7 @@ pub(crate) mod tests {
             assert!(!info.relative_wb && (2500.0..10000.0).contains(&info.as_shot_temp), "{name}: {info:?}");
             assert!(timings.decode > 0.0 && timings.demosaic > 0.0, "{name}: {timings:?}");
             // Noise reduction is sized to the full frame, which is what a full-size load is.
-            let full = load(&bytes, usize::MAX, Profile::Camera).unwrap();
+            let full = load(&bytes, usize::MAX, Profile::Camera, crate::sidecar::PROCESS_VERSION).unwrap();
             assert_eq!(info.native_long, Some(full.image.width.max(full.image.height)), "{name}");
             assert_eq!(full.info.native_long, info.native_long, "{name}");
             let preview = embedded_preview_srgb(&bytes, 512).unwrap();
@@ -546,11 +549,11 @@ pub(crate) mod tests {
 
     #[test]
     fn what_isnt_a_raw_is_an_error_not_a_panic() {
-        assert!(load(b"", 100, Profile::Camera).is_err());
-        assert!(load(b"not a raw at all", 100, Profile::Camera).is_err());
-        assert!(load(&[0xff, 0xd8, 0xff, 0xe0, 0, 0x10], 100, Profile::Camera).is_err());
+        assert!(load(b"", 100, Profile::Camera, crate::sidecar::PROCESS_VERSION).is_err());
+        assert!(load(b"not a raw at all", 100, Profile::Camera, crate::sidecar::PROCESS_VERSION).is_err());
+        assert!(load(&[0xff, 0xd8, 0xff, 0xe0, 0, 0x10], 100, Profile::Camera, crate::sidecar::PROCESS_VERSION).is_err());
         // a TIFF header that goes nowhere
-        assert!(load(b"II*\0\x08\0\0\0\0\0", 100, Profile::Camera).is_err());
+        assert!(load(b"II*\0\x08\0\0\0\0\0", 100, Profile::Camera, crate::sidecar::PROCESS_VERSION).is_err());
         assert!(embedded_preview_srgb(b"II*\0\x08\0\0\0\0\0", 100).is_none());
     }
 

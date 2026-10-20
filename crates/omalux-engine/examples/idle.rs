@@ -22,7 +22,7 @@ fn main() {
         std::process::exit(2);
     };
     let bytes = std::fs::read(&path).expect("read");
-    let raw::Loaded { image, info, .. } = raw::load(&bytes, 2560, Profile::Fitted).expect("decode");
+    let raw::Loaded { image, info, .. } = raw::load(&bytes, 2560, Profile::Fitted, omalux_engine::sidecar::PROCESS_VERSION).expect("decode");
     let source = Arc::new(image);
     let settings = DevelopSettings::for_raw(info.as_shot_temp, info.as_shot_tint);
     let loupe = RenderRequest::fit(1920, 1280);
@@ -68,7 +68,7 @@ fn main() {
         .map(|_| {
             let until = Instant::now() + Duration::from_millis(1000);
             while Instant::now() < until {
-                drop(raw::load(&bytes, 2560, Profile::Fitted));
+                drop(raw::load(&bytes, 2560, Profile::Fitted, omalux_engine::sidecar::PROCESS_VERSION));
             }
             render()
         })

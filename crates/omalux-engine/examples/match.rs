@@ -53,25 +53,42 @@ fn measure(path: &Path) -> Result<Frame, String> {
     // The middle half of each side: the JPEG has Sony's distortion and shading corrections in it.
     let (w, h) = (reference.width, reference.height);
     let middle = |image: &Rgba8| image.crop(w / 4, h / 4, w / 2, h / 2);
+    let comp = omalux_engine::sony::settings(&bytes).lens_comp;
     let against = |loaded: &raw::Loaded, profile: Profile, camera: &Camera| -> Result<Measured, String> {
         let mut fresh = look::fresh(loaded.info.as_shot_temp, loaded.info.as_shot_tint);
         profile.set(&mut fresh);
-        let (settings, info) = look::effective(&fresh, &loaded.info, camera);
+        fresh.optics.profile_distortion = if comp.distortion { 100.0 } else { 0.0 };
+        fresh.optics.profile_vignetting = if comp.shading { 100.0 } else { 0.0 };
+        fresh.optics.lens_profile = comp.distortion || comp.shading || comp.ca;
+        let mut info = loaded.info.clone();
+        if let Some(ref mut lens) = info.lens {
+            if !comp.shading {
+                lens.vignette = None;
+            }
+            if !comp.distortion && !comp.ca {
+                lens.warp = None;
+            } else if !comp.ca && let Some(ref mut warp) = lens.warp {
+                warp.planes[0] = warp.planes[1];
+                warp.planes[2] = warp.planes[1];
+            }
+        }
+        let (settings, info) = look::effective(&fresh, &info, camera);
         let mut rendered = lightcraft_pipeline::render(&loaded.image, &info, &settings, &RenderRequest::fit(w, h)).image;
         if (rendered.width, rendered.height) != (w, h) {
             rendered = resize(&rendered.to_linear(), w, h, Filter::Box).to_srgb8();
         }
         compare::compare(&middle(&rendered), &middle(&reference))
     };
-    let fitted = raw::load(&bytes, EDGE, Profile::Fitted)?;
-    let camera = raw::load(&bytes, EDGE, Profile::Camera)?;
+    let fitted = raw::load(&bytes, EDGE, Profile::Fitted, omalux_engine::sidecar::PROCESS_VERSION)?;
+    let camera = raw::load(&bytes, EDGE, Profile::Camera, omalux_engine::sidecar::PROCESS_VERSION)?;
     let unlifted = Camera { lift: 0.0, ..camera.camera.clone() };
     let dro = camera.camera.dro.map_or("?".to_owned(), |dro| dro.label());
     let shot = format!(
-        "{}, DRO {dro}, lift {:+.0}{}",
+        "{}, DRO {dro}, lift {:+.0}{}, lens comp {}",
         camera.camera.style.as_deref().unwrap_or("?"),
         camera.camera.lift,
-        if camera.camera.fixed { "" } else { ", no profile" }
+        if camera.camera.fixed { "" } else { ", no profile" },
+        comp.label()
     );
     let ways = [
         against(&fitted, Profile::Fitted, &fitted.camera)?,

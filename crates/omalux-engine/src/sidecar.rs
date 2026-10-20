@@ -49,7 +49,12 @@ pub const REJECT: i32 = -1;
 /// 2: M4. The profile is a setting (Camera match with DRO's lift, or
 /// Flat), and there's HDR. An edit from 1 has neither, and keeps its
 /// fitted look ([`crate::look::Profile::Fitted`]): it renders as it did.
-pub const PROCESS_VERSION: u32 = 2;
+/// 3: Lightcraft re-synced to `0da998f2`. The look fitted to a frame's
+/// JPEG and DRO's lift are measured through the lens warp the camera
+/// applied to its JPEG (`c854e172`), and lensfun's profile is scaled to
+/// the frame's crop factor in an in-camera crop mode (`4ddbb5a3`). An edit
+/// keeps the version it was made with: one from 2 renders as it did.
+pub const PROCESS_VERSION: u32 = 3;
 
 /// The `omalux:` namespace.
 pub const NAMESPACE: &str = "https://github.com/michaelrubi/omalux/xmp/1.0/";
