@@ -14,6 +14,7 @@ mod loupe;
 mod menus;
 mod monitor;
 mod render;
+mod spot;
 mod slider;
 mod state;
 mod theme;

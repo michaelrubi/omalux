@@ -238,6 +238,9 @@ pub struct App {
     /// Guided Upright's tool, while it's open: the loupe shows the current
     /// frame through its lens corrections alone, with its lines over it.
     guided: Option<crate::guided::Tool>,
+    /// Spot Removal, while it's open: the loupe shows the current frame
+    /// before its lens corrections, crop and transform, with its spots.
+    spot: Option<crate::spot::Tool>,
     /// The crop keeps its shape when it's dragged (Lightroom's lock, A),
     /// from one frame and one opening of the tool to the next.
     crop_locked: bool,
@@ -347,6 +350,7 @@ impl App {
             choosing: None,
             crop: None,
             guided: None,
+            spot: None,
             crop_locked: true,
         }
     }
@@ -410,7 +414,7 @@ impl App {
         self.filmstrip.reset();
         (self.at, self.previous) = (None, None);
         self.choosing = None;
-        (self.crop, self.guided) = (None, None);
+        (self.crop, self.guided, self.spot) = (None, None, None);
         self.off.clear();
         self.leave();
     }
@@ -458,7 +462,7 @@ impl App {
     fn copy(&mut self, groups: &[Group]) {
         let Some(shoot) = &self.shoot else { return };
         let Some(editing) = self.edits.get(&shoot.frame().path) else { return };
-        self.clipboard = Some(Copied::new(editing.history.settings(), groups));
+        self.clipboard = Some(Copied::new(editing.history.settings(), groups).held(shoot.frame().held));
         let what = if groups == Group::ALL { "every setting".to_owned() } else { listed(groups) };
         self.message = Some((format!("Copied {what} of {}", shoot.frame().name()), false));
     }
@@ -583,7 +587,7 @@ impl App {
             Command::DecreaseMore => self.nudge(-5.0),
             Command::WhiteBalance => {
                 self.selector = !self.selector && self.shoot.is_some();
-                (self.crop, self.guided, self.compare) = (None, None, None);
+                (self.crop, self.guided, self.spot, self.compare) = (None, None, None, None);
             }
             // In a before/after view, back to the loupe.
             Command::BeforeAfter if self.compare.is_some() => self.compare = None,
@@ -596,10 +600,16 @@ impl App {
                 };
                 self.compare = (self.compare != Some(view) && self.shoot.is_some()).then_some(view);
                 if self.compare.is_some() {
-                    (self.before, self.selector, self.crop, self.guided) = (false, false, None, None);
+                    (self.before, self.selector, self.crop, self.guided, self.spot) = (false, false, None, None, None);
                 }
             }
             Command::GuidedUpright => self.guided_tool(self.guided.is_none()),
+            Command::SpotRemoval => {
+                self.spot = (self.spot.is_none() && self.shoot.is_some()).then(Default::default);
+                if self.spot.is_some() {
+                    (self.crop, self.guided, self.selector, self.compare, self.before) = (None, None, false, None, false);
+                }
+            }
             Command::Clipping => self.clipping = !self.clipping,
             Command::Shortcuts => self.legend = !self.legend,
             Command::AutoSync => {
@@ -625,7 +635,7 @@ impl App {
             }
             Command::Crop => {
                 self.crop = (self.crop.is_none() && self.shoot.is_some()).then(Default::default);
-                (self.selector, self.compare, self.guided) = (false, None, None);
+                (self.selector, self.compare, self.guided, self.spot) = (false, None, None, None);
             }
             Command::RotateLeft => self.edit(|history, _| history.set(|settings| crop::turn(settings, false))),
             Command::RotateRight => self.edit(|history, _| history.set(|settings| crop::turn(settings, true))),
@@ -733,6 +743,13 @@ impl App {
         self.message = Some(pasted.said("Pasted onto"));
     }
 
+    /// How the camera was held for a frame of the shoot (its raw's Exif
+    /// orientation): where its sensor's dust is.
+    fn held_of(&self, path: &Path) -> crop::Orientation {
+        let frame = self.shoot.as_ref().and_then(|shoot| shoot.frames().iter().find(|f| f.path == path));
+        frame.map_or_else(Default::default, |f| f.held)
+    }
+
     /// Ctrl+Alt+V, Lightroom's Paste from Previous: every setting of the
     /// frame the cursor came from, onto the current frame alone.
     fn paste_previous(&mut self) {
@@ -742,7 +759,8 @@ impl App {
         };
         // A frame with no edit is pasted as a fresh raw.
         let settings = self.settings_of(&from).map_or_else(|| History::unseen(None).settings().clone(), |settings| (*settings).clone());
-        let pasted = self.paste_onto(&Copied::new(&settings, Group::ALL), &[to]);
+        let held = self.held_of(&from);
+        let pasted = self.paste_onto(&Copied::new(&settings, Group::ALL).held(held), &[to]);
         self.message = Some(pasted.said(&format!("Pasted {}'s settings onto", file_name(&from))));
     }
 
@@ -764,7 +782,8 @@ impl App {
             }
             match self.edits.get(path) {
                 Some(editing) if !self.unreadable.contains(path) => {
-                    let mut becomes = copied.paste(editing.history.settings(), editing.history.fresh());
+                    let held = self.shoot.as_ref().and_then(|shoot| shoot.frames().iter().find(|f| f.path == *path)).map(|f| f.held);
+                    let mut becomes = copied.paste_held(editing.history.settings(), editing.history.fresh(), held);
                     // A crop from a frame of another shape, kept inside this
                     // one: where the frame's raw is decoded, so its shape is known.
                     if let Some(source) = self.renderer.source(path) {
@@ -893,6 +912,12 @@ impl App {
         let Some(editing) = self.edits.get(&current).filter(|_| !others.is_empty()) else { return };
         let Some(before) = editing.history.last_before() else { return };
         let changes = copy::changes(before, editing.history.settings());
+        // Spots go where the same dust is on each frame.
+        let spots = changes.touches("spots").then(|| {
+            let way = omalux_engine::dust::Way { held: shoot.frame().held, turned: editing.history.settings().orientation };
+            (editing.history.settings().spots.clone(), way)
+        });
+        let helds: HashMap<PathBuf, crop::Orientation> = shoot.frames().iter().map(|f| (f.path.clone(), f.held)).collect();
         if changes.is_empty() && autos.is_empty() {
             return;
         }
@@ -915,6 +940,10 @@ impl App {
             let source = self.renderer.source(&path);
             let Some(editing) = self.edits.get_mut(&path) else { continue };
             let mut becomes = changes.apply(editing.history.settings(), editing.history.fresh());
+            if let Some((spots, from)) = &spots {
+                let to = omalux_engine::dust::Way { held: helds.get(&path).copied().unwrap_or_default(), turned: becomes.orientation };
+                becomes.spots = omalux_engine::dust::carry(spots, *from, to);
+            }
             match (&source, editing.info.clone()) {
                 (Some(source), Some(info)) => {
                     let dims = crop::dims((source.width, source.height), &becomes);
@@ -1082,7 +1111,7 @@ impl App {
             tool.on(&shoot.frame().path, editing.history.settings());
         }
         self.guided = Some(tool);
-        (self.crop, self.selector, self.compare, self.before) = (None, false, None, false);
+        (self.crop, self.spot, self.selector, self.compare, self.before) = (None, None, false, None, false);
         self.edit(|history, _| history.set(|settings| settings.geometry.upright = lightcraft_develop::Upright::Guided));
     }
 
@@ -1230,6 +1259,133 @@ impl App {
         }
     }
 
+    /// What was done to the spots on the frame, with the mouse.
+    fn spot_gesture(&mut self, out: crate::spot::Out) {
+        if let Some(at) = out.added {
+            let size = self.spot.as_ref().map_or(omalux_engine::dust::SIZE, |tool| tool.size);
+            self.edit(|history, _| history.set(|settings| settings.spots.push(omalux_engine::dust::heal(at, size))));
+        }
+        let change = out.moved.map(|(index, to)| {
+            move |settings: &mut DevelopSettings, _: &SourceInfo| {
+                if let Some(at) = settings.spots.get_mut(index).and_then(|spot| spot.points.first_mut()) {
+                    *at = to;
+                }
+            }
+        });
+        self.dragged(change, out.stopped);
+    }
+
+    /// What was done in Spot Removal's panel.
+    fn spot_panel(&mut self, out: crate::spot::PanelOut) {
+        let held = self.spot.as_ref().and_then(|tool| tool.held);
+        let current_spots = self.shoot.as_ref().and_then(|shoot| self.edits.get(&shoot.frame().path)).map_or(0, |e| e.history.settings().spots.len());
+        match held.filter(|i| *i < current_spots) {
+            Some(i) => {
+                for (slid, field) in [(out.size, 0), (out.feather, 1), (out.opacity, 2)] {
+                    if slid != SliderOut::default() {
+                        self.slide(slid, move |settings, _, value| {
+                            if let Some(spot) = settings.spots.get_mut(i) {
+                                match field {
+                                    0 => spot.size = value.clamp(omalux_engine::dust::SIZES.0, omalux_engine::dust::SIZES.1),
+                                    1 => spot.feather = value,
+                                    _ => spot.opacity = value,
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            // With none held, Size is the next spot's.
+            None => {
+                if let (Some(value), Some(tool)) = (out.size.value, &mut self.spot) {
+                    tool.size = value.clamp(omalux_engine::dust::SIZES.0, omalux_engine::dust::SIZES.1);
+                }
+            }
+        }
+        if out.find {
+            self.find_dust();
+        }
+        if out.clear {
+            self.edit(|history, _| history.set(|settings| settings.spots.clear()));
+            if let Some(tool) = &mut self.spot {
+                tool.held = None;
+            }
+        }
+        if out.done {
+            self.spot = None;
+        }
+    }
+
+    /// Find Dust: a heal circle on each speck found on the current frame,
+    /// as one step.
+    fn find_dust(&mut self) {
+        let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
+        let Some(source) = self.renderer.source(&path) else { return };
+        let mut found = 0;
+        self.edit(|history, _| {
+            let settings = history.settings();
+            let spots = omalux_engine::dust::find(&source, settings.orientation, crate::spot::SENSITIVITY, &settings.spots);
+            found = spots.len();
+            history.set(|settings| settings.spots.extend(spots))
+        });
+        let text = match found {
+            0 => "Found no dust".to_owned(),
+            1 => "Found 1 speck of dust".to_owned(),
+            n => format!("Found {n} specks of dust"),
+        };
+        self.message = Some((text, false));
+    }
+
+    /// The keys that are Spot Removal's while it's open, Lightroom's: `[`
+    /// and `]` size the held spot (or the next), Delete takes the held one
+    /// (or else the last) away, A is Visualize Spots, Return puts the tool
+    /// away and Esc puts it away with the spots as they were.
+    fn spot_keys(&mut self, ctx: &egui::Context) {
+        let pressed = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+        if pressed(egui::Key::A)
+            && let Some(tool) = &mut self.spot
+        {
+            tool.toggle_visualize();
+        }
+        for (key, by) in [(egui::Key::OpenBracket, 1.0 / crate::spot::STEP), (egui::Key::CloseBracket, crate::spot::STEP)] {
+            if !pressed(key) {
+                continue;
+            }
+            let held = self.spot.as_ref().and_then(|tool| tool.held);
+            let (min, max) = omalux_engine::dust::SIZES;
+            let mut sized = false;
+            if let Some(i) = held {
+                self.edit(|history, _| {
+                    if i >= history.settings().spots.len() {
+                        return false;
+                    }
+                    sized = true;
+                    history.set(|settings| settings.spots[i].size = (settings.spots[i].size * by).clamp(min, max))
+                });
+            }
+            if !sized && let Some(tool) = &mut self.spot {
+                tool.size = (tool.size * by).clamp(min, max);
+            }
+        }
+        if pressed(egui::Key::Delete) || pressed(egui::Key::Backspace) {
+            let held = self.spot.as_mut().and_then(|tool| tool.held.take());
+            self.edit(|history, _| {
+                let count = history.settings().spots.len();
+                let Some(index) = held.filter(|i| *i < count).or(count.checked_sub(1)) else { return false };
+                history.set(|settings| _ = settings.spots.remove(index))
+            });
+        }
+        if pressed(egui::Key::Enter) {
+            self.spot = None;
+        }
+        if pressed(egui::Key::Escape) {
+            let was = self.shoot.as_ref().zip(self.spot.take()).and_then(|(shoot, tool)| tool.was(&shoot.frame().path));
+            if let Some(spots) = was {
+                self.edit(|history, _| history.set(|settings| settings.spots = spots));
+            }
+        }
+    }
+
     /// The keys that are Guided Upright's tool's while it's open: Delete
     /// takes the line held, or else the last, away; Return puts the tool
     /// away, and Esc puts it away with the lines as they were when the
@@ -1298,6 +1454,9 @@ impl App {
             if self.guided.is_some() && !self.legend {
                 self.guided_keys(ctx);
             }
+            if self.spot.is_some() && !self.legend {
+                self.spot_keys(ctx);
+            }
             // Under the legend, only its own key, to put it away.
             for command in Command::pressed(ctx, &mut self.v_down) {
                 if !self.legend || command == Command::Shortcuts {
@@ -1324,6 +1483,9 @@ impl App {
             if let (Some(tool), Some(editing)) = (&mut self.guided, self.edits.get(&shoot.frame().path)) {
                 tool.on(&shoot.frame().path, editing.history.settings());
             }
+            if let (Some(tool), Some(editing)) = (&mut self.spot, self.edits.get(&shoot.frame().path)) {
+                tool.on(&shoot.frame().path, editing.history.settings());
+            }
         }
         let title = match &self.shoot {
             Some(shoot) => format!("{} — OmaLux", file_name(shoot.dir())),
@@ -1339,11 +1501,12 @@ impl App {
     /// take in what's been finished.
     fn develop(&mut self, ctx: &egui::Context) {
         let wanted = self.wanted();
-        let zoom = self.loupe.zoom().filter(|_| self.crop.is_none() && self.guided.is_none());
+        let zoom = self.loupe.zoom().filter(|_| self.crop.is_none() && self.guided.is_none() && self.spot.is_none());
         self.loupe.retain(|path| wanted.iter().any(|w| w.path == path));
         self.loupe.set_compare(self.compare);
         let compare = self.compare.is_some();
-        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom, compare });
+        let spots = self.spot.as_ref().and_then(|tool| tool.visualize);
+        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom, compare, spots });
         for news in self.loupe.take(ctx, self.renderer.done()) {
             match news {
                 News::Decoded(path, info, camera) => {
@@ -1397,6 +1560,15 @@ impl App {
         {
             Arc::make_mut(settings).crop = Default::default();
         }
+        // Spot Removal's spots are put on the frame before its lens
+        // corrections, crop and transform.
+        if self.spot.is_some()
+            && let Some(current) = wanted.first_mut()
+            && let Some(settings) = current.settings.as_mut()
+        {
+            let settings = Arc::make_mut(settings);
+            (settings.crop, settings.geometry, settings.optics) = (Default::default(), Default::default(), Default::default());
+        }
         // Guided Upright's lines are drawn on the frame through its lens
         // corrections alone.
         if self.guided.is_some()
@@ -1447,12 +1619,13 @@ impl App {
         let mut picked = None;
         let mut cropped = None;
         let mut guided = None;
+        let mut spotted = None;
         let mut clicked = None;
         let context = self.menu_context();
         let mut chosen = None;
         egui::CentralPanel::no_frame().frame(pasteboard).show(ui, |ui| match &self.shoot {
             Some(shoot) => {
-                let mouse = if self.crop.is_some() || self.guided.is_some() {
+                let mouse = if self.crop.is_some() || self.guided.is_some() || self.spot.is_some() {
                     Mouse::Tool
                 } else if self.selector {
                     Mouse::Pick
@@ -1475,6 +1648,11 @@ impl App {
                     let whole = self.loupe.untransformed(path, settings.orientation);
                     guided = tool.show(ui, &self.theme, self.loupe.area(), whole, dims, &settings.geometry.guides).added;
                 }
+                if let (Some(tool), Some(editing), Some(dims)) = (&mut self.spot, self.edits.get(path), dims) {
+                    let settings = editing.history.settings();
+                    let whole = self.loupe.bare(path, settings.orientation);
+                    spotted = Some(tool.show(ui, &self.theme, self.loupe.area(), whole, dims, &settings.spots));
+                }
                 let mut corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);
                 if let Some(info) = self.info {
                     let editing = self.edits.get(path);
@@ -1496,6 +1674,9 @@ impl App {
         }
         if let Some(cropped) = cropped {
             self.crop_gesture(cropped);
+        }
+        if let Some(out) = spotted {
+            self.spot_gesture(out);
         }
         if let Some(line) = guided {
             self.edit(|history, _| {
@@ -1601,14 +1782,20 @@ impl App {
         let (settings, fresh) = (editing.history.settings(), editing.history.fresh());
         let dims = self.dims().filter(|_| self.crop.is_some());
         let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
-        let (cropped, out) = scroll
+        let mut spot = self.spot.take();
+        let (cropped, spotted, out) = scroll
             .show(ui, |ui| {
                 let cropped = dims.map(|dims| crop_panel::show(ui, &self.theme, settings, dims, self.crop_locked));
-                (cropped, develop::show(ui, &self.theme, settings, fresh, self.selected, &editing.camera, &self.off))
+                let spotted = spot.as_mut().map(|tool| crate::spot::panel(ui, &self.theme, tool, &settings.spots));
+                (cropped, spotted, develop::show(ui, &self.theme, settings, fresh, self.selected, &editing.camera, &self.off))
             })
             .inner;
+        self.spot = spot;
         if let Some(cropped) = cropped {
             self.crop_panel(cropped);
+        }
+        if let Some(spotted) = spotted {
+            self.spot_panel(spotted);
         }
         self.panel(out);
     }
@@ -3812,6 +3999,63 @@ mod tests {
             let settings = h.app.edits[path].history.settings();
             assert_eq!(settings.wb.mode, WbMode::AsShot, "{path:?}");
         }
+    }
+
+    #[test]
+    fn q_puts_heal_circles_on_dust_and_esc_takes_them_back() {
+        use lightcraft_develop::SpotMode;
+        let folder = Folder::new("spots", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().clone();
+        h.press(Modifiers::NONE, Key::Q);
+        h.settle();
+        assert!(h.app.spot.is_some());
+        // Shown before its lens corrections, crop and transform, where spots are kept.
+        let wanted = h.app.wanted();
+        let shown = wanted[0].settings.as_ref().unwrap();
+        assert_eq!((shown.optics, shown.crop), (Default::default(), Default::default()));
+        let frame = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("spot frame"))).expect("the frame is drawn");
+        let at = |u: f32, v: f32| frame.min + frame.size() * egui::vec2(u, v);
+        h.click(at(0.25, 0.5));
+        let spots = h.settings().spots.clone();
+        assert_eq!(spots.len(), 1);
+        assert_eq!(spots[0].mode, SpotMode::Heal);
+        assert!((spots[0].points[0].x - 0.25).abs() < 0.01 && (spots[0].points[0].y - 0.5).abs() < 0.01, "{spots:?}");
+        assert_eq!(h.saved().map(|s| s.spots.len()), Some(1));
+        // ] makes the held one larger; a drag moves it, as one step.
+        h.press(Modifiers::NONE, Key::CloseBracket);
+        assert!(h.settings().spots[0].size > spots[0].size);
+        drag(&mut h, at(0.25, 0.5), at(0.6, 0.4), Modifiers::NONE);
+        let moved = h.settings().spots[0].points[0];
+        assert!((moved.x - 0.6).abs() < 0.01 && (moved.y - 0.4).abs() < 0.01, "{moved:?}");
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert!((h.settings().spots[0].points[0].x - 0.25).abs() < 0.01, "the drag was one step");
+        // A is Visualize Spots, rendered on the frame.
+        h.press(Modifiers::NONE, Key::A);
+        h.settle();
+        assert!(h.app.renderer.shared_view().spots.is_some());
+        // Find Dust on a frame with none says so.
+        h.app.find_dust();
+        assert_eq!(h.said(), "Found no dust");
+        // Esc: the spots as they were when the tool came to the frame.
+        h.click(at(0.75, 0.75));
+        assert_eq!(h.settings().spots.len(), 2);
+        h.press(Modifiers::NONE, Key::Escape);
+        assert!(h.app.spot.is_none());
+        assert_eq!(h.settings().spots, fresh.spots);
+        // Copied and pasted onto another frame, with the Spot Removal group.
+        h.press(Modifiers::NONE, Key::Q);
+        h.settle();
+        h.click(at(0.25, 0.5));
+        h.press(Modifiers::NONE, Key::Enter);
+        assert!(h.app.spot.is_none());
+        h.app.copy(&[Group::SpotRemoval]);
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.settle();
+        paste(&mut h, Modifiers::COMMAND);
+        assert_eq!(h.settings().spots.len(), 1);
     }
 
     #[test]

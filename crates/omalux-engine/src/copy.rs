@@ -30,6 +30,8 @@ pub enum Group {
     /// Upright and the Transform sliders.
     Transform,
     Crop,
+    /// Sensor dust's heal circles ([`crate::dust`]).
+    SpotRemoval,
 }
 
 /// Part of `DevelopSettings`' JSON: a top-level key, and the fields under
@@ -49,6 +51,7 @@ impl Group {
         Group::LensCorrections,
         Group::Transform,
         Group::Crop,
+        Group::SpotRemoval,
     ];
 
     pub fn label(self) -> &'static str {
@@ -63,6 +66,7 @@ impl Group {
             Group::LensCorrections => "Lens Corrections",
             Group::Transform => "Transform",
             Group::Crop => "Crop",
+            Group::SpotRemoval => "Spot Removal",
         }
     }
 
@@ -81,6 +85,7 @@ impl Group {
             Group::LensCorrections => &[("optics", &[])],
             Group::Transform => &[("geometry", &[])],
             Group::Crop => &[("crop", &[])],
+            Group::SpotRemoval => &[("spots", &[])],
         }
     }
 }
@@ -90,6 +95,8 @@ impl Group {
 pub struct Copied {
     groups: Vec<Group>,
     partial: Value,
+    /// The way up of the frame it was copied from, where its spots are.
+    way: crate::dust::Way,
 }
 
 impl Copied {
@@ -111,7 +118,15 @@ impl Copied {
                 part.insert((*field).to_owned(), value.get(*field).cloned().unwrap_or_else(|| 0.0.into()));
             }
         }
-        Self { groups: groups.to_vec(), partial: Value::Object(partial) }
+        Self { groups: groups.to_vec(), partial: Value::Object(partial), way: crate::dust::Way { turned: settings.orientation, ..Default::default() } }
+    }
+
+    /// The frame it's copied from was held `held` (its raw's Exif
+    /// orientation): its spots are carried to where its dust is on each
+    /// frame they're pasted onto ([`Self::paste_held`]).
+    pub fn held(mut self, held: lightcraft_geom::Orientation) -> Self {
+        self.way.held = held;
+        self
     }
 
     pub fn groups(&self) -> &[Group] {
@@ -122,7 +137,16 @@ impl Copied {
     /// settings: a white balance copied as shot is pasted as the frame's
     /// own as shot, not the Kelvin the other frame was shot at.
     pub fn paste(&self, onto: &DevelopSettings, fresh: &DevelopSettings) -> DevelopSettings {
+        self.paste_held(onto, fresh, None)
+    }
+
+    /// [`Self::paste`] onto a frame held `held`: spots copied are carried
+    /// to where the same dust is on it.
+    pub fn paste_held(&self, onto: &DevelopSettings, fresh: &DevelopSettings, held: Option<lightcraft_geom::Orientation>) -> DevelopSettings {
         let mut pasted = apply_partial(onto, &self.partial, 1.0);
+        if let Some(held) = held.filter(|_| self.groups.contains(&Group::SpotRemoval)) {
+            pasted.spots = crate::dust::carry(&pasted.spots, self.way, crate::dust::Way { held, turned: pasted.orientation });
+        }
         if pasted.wb.mode == WbMode::AsShot {
             (pasted.wb.temp, pasted.wb.tint) = (fresh.wb.temp, fresh.wb.tint);
         }
@@ -171,6 +195,12 @@ pub fn changes(before: &DevelopSettings, after: &DevelopSettings) -> Changes {
 impl Changes {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Whether it changed anything under `key` (a top-level one, as
+    /// `spots`).
+    pub fn touches(&self, key: &str) -> bool {
+        self.0.iter().any(|(path, _)| path.first().is_some_and(|first| first == key))
     }
 
     /// `onto` with the same changes made. `fresh` is the frame's own fresh
@@ -321,6 +351,22 @@ mod tests {
         (upright.geometry.upright, upright.geometry.upright_transform) = (Upright::Auto, Some(lightcraft_geom::Homography::IDENTITY));
         let made = changes(&before, &upright).apply(&other, &other_fresh);
         assert_eq!((made.geometry.upright, made.geometry.upright_transform), (Upright::Auto, None));
+    }
+
+    #[test]
+    fn spots_pasted_onto_a_frame_held_another_way_are_where_its_dust_is() {
+        use lightcraft_geom::{Orientation, Point};
+        let fresh = DevelopSettings::for_raw(5200.0, 3.0);
+        let mut from = fresh.clone();
+        from.spots = vec![crate::dust::heal(Point::new(0.2, 0.1), 0.01)];
+        let copied = Copied::new(&from, &[Group::SpotRemoval]).held(Orientation::Normal);
+        let level = copied.paste_held(&fresh, &fresh, Some(Orientation::Normal));
+        assert_eq!(level.spots, from.spots);
+        let portrait = copied.paste_held(&fresh, &fresh, Some(Orientation::Rotate90));
+        let at = portrait.spots[0].points[0];
+        assert!((at.x - 0.9).abs() < 1e-9 && (at.y - 0.2).abs() < 1e-9, "{at:?}");
+        assert_eq!(Copied::new(&from, &[Group::Crop]).paste_held(&fresh, &fresh, Some(Orientation::Rotate90)).spots, fresh.spots, "nor in another group");
+        assert!(changes(&fresh, &from).touches("spots") && !changes(&fresh, &from).touches("crop"));
     }
 
     #[test]

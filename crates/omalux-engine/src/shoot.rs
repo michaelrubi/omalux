@@ -57,6 +57,9 @@ pub struct Frame {
     pub edit_key: Option<String>,
     /// Its last export, as its sidecar held it when the shoot was opened.
     pub exported: Option<sidecar::Exported>,
+    /// How the camera was held (the raw's Exif orientation): where its
+    /// sensor's dust is in the frame as it's shown.
+    pub held: lightcraft_geom::Orientation,
 }
 
 impl Frame {
@@ -153,7 +156,8 @@ impl Shoot {
                     let jpeg = r.read(r.thumbnail().filter(|j| j.len < 1 << 20)?).ok()?;
                     Some(Signature::of(&crate::thumbs::decode_thumb(&jpeg).ok()?))
                 });
-                (Frame { path, rating, captured, signature, edit_key, exported }, problem)
+                let held = raw.as_ref().and_then(|r| r.orientation).map_or(lightcraft_geom::Orientation::Normal, lightcraft_geom::Orientation::from_exif);
+                (Frame { path, rating, captured, signature, edit_key, exported, held }, problem)
             })
             .collect();
         let (frames, problems): (Vec<Frame>, Vec<Option<String>>) = read.into_iter().unzip();
@@ -446,6 +450,7 @@ mod tests {
             signature: None,
             edit_key: None,
             exported: None,
+            held: Default::default(),
         });
         Shoot::new("/shoot".into(), frames.collect())
     }
@@ -458,6 +463,7 @@ mod tests {
             signature: None,
             edit_key: None,
             exported: None,
+            held: Default::default(),
         });
         Shoot::new("/shoot".into(), frames.collect())
     }

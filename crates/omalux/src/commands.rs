@@ -94,6 +94,8 @@ pub enum Command {
     /// Lightroom's Auto Sync: a change to the current frame is made on
     /// every selected frame as it's made. Or not.
     AutoSync,
+    /// Spot Removal, for sensor dust: open the tool, or put it away.
+    SpotRemoval,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -160,6 +162,7 @@ impl Command {
         Command::CompareSplit,
         Command::GuidedUpright,
         Command::AutoSync,
+        Command::SpotRemoval,
     ];
 
     /// Look a command up by its name in code, e.g. "Open".
@@ -227,6 +230,7 @@ impl Command {
         Command::CompareTopBottom,
         Command::CompareSideBySide,
         Command::GuidedUpright,
+        Command::SpotRemoval,
     ];
 
     pub fn label(self) -> &'static str {
@@ -289,6 +293,7 @@ impl Command {
             Command::CompareSplit => "Before/After Split",
             Command::GuidedUpright => "Guided Upright Tool",
             Command::AutoSync => "Auto Sync",
+            Command::SpotRemoval => "Spot Removal",
         }
     }
 
@@ -365,6 +370,8 @@ impl Command {
             Command::GuidedUpright => s(Modifiers::SHIFT, Key::T),
             // Lightroom's Enable Auto Sync.
             Command::AutoSync => s(Modifiers { alt: true, shift: true, ..CMD }, Key::A),
+            // Lightroom's.
+            Command::SpotRemoval => s(Modifiers::NONE, Key::Q),
         }
     }
 
@@ -507,6 +514,8 @@ mod tests {
         assert_eq!(press(&ctx, Modifiers::SHIFT, Key::Y), [Command::CompareSplit]);
         assert_eq!(press(&ctx, Modifiers::SHIFT, Key::T), [Command::GuidedUpright]);
         assert_eq!(press(&ctx, Modifiers { alt: true, shift: true, ..CMD }, Key::A), [Command::AutoSync], "not Select All");
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::Q), [Command::SpotRemoval]);
+        assert_eq!(press(&ctx, CMD, Key::Q), [Command::Quit], "not Spot Removal");
     }
 
     #[test]

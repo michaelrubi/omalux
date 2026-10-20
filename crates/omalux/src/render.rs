@@ -103,6 +103,9 @@ pub struct View {
     /// The loupe compares before and after (Y): the current frame is also
     /// rendered with no edit, once, and kept while it's the current one.
     pub compare: bool,
+    /// Lightroom's Visualize Spots on the current frame, at this threshold
+    /// (0..100): dust shows as white specks on black.
+    pub spots: Option<u8>,
 }
 
 /// Which render of a frame this is: of what settings, how large, how good.
@@ -113,6 +116,8 @@ pub struct Key {
     pub draft: bool,
     /// Its clipped pixels are coloured.
     pub clipping: bool,
+    /// Visualize Spots, at this threshold.
+    pub spots: Option<u8>,
 }
 
 /// Which window of a frame at 100% a render is: where in the frame (x, y,
@@ -456,7 +461,7 @@ impl State {
         let source = self.sources.get(&frame.path).filter(|source| source.suits(frame))?;
         let settings = source.fresh();
         let (w, h) = (self.view.size.0.min(source.image.width), self.view.size.1.min(source.image.height));
-        let key = Key { settings: settings.hash64(), size: (w, h), draft: false, clipping: false };
+        let key = Key { settings: settings.hash64(), size: (w, h), draft: false, clipping: false, spots: None };
         let done = self.before.as_ref().is_some_and(|(path, last)| *path == frame.path && *last == key);
         (!done).then(|| (frame.path.clone(), source.clone(), settings, key))
     }
@@ -468,7 +473,8 @@ impl State {
         // No larger than the source: there's nothing more in it to show.
         let (w, h) = (self.view.size.0.min(source.image.width), self.view.size.1.min(source.image.height));
         let size = if draft { (w.min(DRAFT.0), h.min(DRAFT.1)) } else { (w, h) };
-        Key { settings: settings.hash64(), size, draft, clipping: self.view.clipping }
+        let spots = self.view.spots.filter(|_| index == 0);
+        Key { settings: settings.hash64(), size, draft, clipping: self.view.clipping, spots }
     }
 
     /// The most wanted frame that's decoded and whose render isn't the one
@@ -659,7 +665,10 @@ impl Shared {
         };
         while let Some((path, source, settings, stages, display, job)) = self.next(claim) {
             let (draft, clipping, request) = match job {
-                Job::Fit(key) | Job::Before(key) => (key.draft, key.clipping, RenderRequest::fit(key.size.0, key.size.1)),
+                Job::Fit(key) | Job::Before(key) => {
+                    let overlay = key.spots.map_or(lightcraft_pipeline::visualize::Overlay::None, lightcraft_pipeline::visualize::Overlay::Spots);
+                    (key.draft, key.clipping, RenderRequest { overlay, ..RenderRequest::fit(key.size.0, key.size.1) })
+                }
                 Job::Zoom(key) | Job::ZoomBefore(key) => {
                     let [x, y, w, h] = key.window;
                     let request = RenderRequest { window: Some(PixelWindow { x, y, w, h }), ..RenderRequest::fit(key.full.0, key.full.1) };

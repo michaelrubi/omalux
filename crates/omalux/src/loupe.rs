@@ -332,6 +332,16 @@ impl Loupe {
         self.area
     }
 
+    /// A frame's render, if it's of the whole frame as it's shown before
+    /// its lens corrections, crop and transform: what Spot Removal's spots
+    /// are put on.
+    pub fn bare(&self, path: &Path, orientation: Orientation) -> Option<&TextureHandle> {
+        let render = self.shown.get(path)?.render.as_ref()?;
+        let s = &render.settings;
+        let bare = s.crop == Default::default() && s.geometry == Default::default() && s.optics == Default::default();
+        (bare && s.orientation == orientation).then_some(&render.texture)
+    }
+
     /// A frame's render, if it's of the whole frame through its lens
     /// corrections alone, uncropped, untransformed and turned as
     /// `orientation`: what Guided Upright's lines are drawn on.
