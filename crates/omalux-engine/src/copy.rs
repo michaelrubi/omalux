@@ -69,7 +69,7 @@ impl Group {
             Group::Profile => &[("profile", &[])],
             Group::Light => &[("light", &["exposure", "contrast", "highlights", "shadows", "whites", "blacks"])],
             Group::Hdr => &[("light", &["hdr", "hdr_highlights", "hdr_shadows"])],
-            Group::Presence => &[("color", &[])],
+            Group::Presence => &[("effects", &[]), ("color", &[])],
             Group::Sharpening => &[("detail", &["sharpen_amount", "sharpen_radius", "sharpen_detail", "sharpen_masking"])],
             Group::NoiseReduction => {
                 &[("detail", &["nr_luminance", "nr_detail", "nr_contrast", "nr_color", "nr_color_detail", "nr_color_smoothness"])]
@@ -166,6 +166,21 @@ mod tests {
 
         let nothing = Copied::new(&edited(), &[]);
         assert_eq!(nothing.paste(&onto, &fresh), onto);
+    }
+
+    #[test]
+    fn presence_takes_texture_clarity_and_dehaze_with_vibrance_and_saturation() {
+        let fresh = DevelopSettings::for_raw(6100.0, -2.0);
+        let mut from = fresh.clone();
+        (from.effects.texture, from.effects.clarity, from.effects.dehaze, from.color.vibrance) = (10.0, 20.0, 30.0, 15.0);
+        let pasted = Copied::new(&from, &[Group::Presence]).paste(&fresh, &fresh);
+        assert_eq!((pasted.effects, pasted.color), (from.effects, from.color));
+        let pasted = Copied::new(&from, &[Group::Light]).paste(&fresh, &fresh);
+        assert_eq!(pasted.effects, fresh.effects, "nor in any other group");
+        // A frame with none pasted takes them away.
+        let pasted = Copied::new(&fresh, &[Group::Presence]).paste(&from, &fresh);
+        assert_eq!(pasted.effects, fresh.effects);
+        assert_eq!(switched_off(&from, &fresh, &[Group::Presence]).effects, Default::default());
     }
 
     #[test]

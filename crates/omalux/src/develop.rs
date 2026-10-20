@@ -63,7 +63,10 @@ const PANELS: &[(&str, &[Row])] = &[
     // Its Highlights and Shadows move either end of the range off the
     // Amount, so one can have more of it than the other.
     ("HDR", &[Named("light.hdr", "Amount"), Named("light.hdrHighlights", "Highlights"), Named("light.hdrShadows", "Shadows")]),
-    ("Presence", &[Slider("color.vibrance"), Slider("color.saturation")]),
+    (
+        "Presence",
+        &[Slider("effects.texture"), Slider("effects.clarity"), Slider("effects.dehaze"), Slider("color.vibrance"), Slider("color.saturation")],
+    ),
     (
         "Detail",
         &[
@@ -319,6 +322,7 @@ mod tests {
         let of = |id| switches_of(sliders().position(|spec| spec.id == id).unwrap());
         assert_eq!(of("wb.tint"), [Group::WhiteBalance]);
         assert_eq!(of("light.hdrShadows"), [Group::Hdr]);
+        assert_eq!(of("effects.dehaze"), [Group::Presence]);
         assert_eq!(of("detail.nrColor"), [Group::Sharpening, Group::NoiseReduction]);
         assert_eq!(of("optics.defringeGreenHueHi"), [Group::LensCorrections]);
         assert!(switches_of(sliders().count()).is_empty());
@@ -331,7 +335,7 @@ mod tests {
             "Temp", "Tint",
             "Exposure", "Contrast", "Highlights", "Shadows", "Whites", "Blacks",
             "Amount", "Highlights", "Shadows",
-            "Vibrance", "Saturation",
+            "Texture", "Clarity", "Dehaze", "Vibrance", "Saturation",
             "Amount", "Radius", "Detail", "Masking", "Luminance", "Color",
             "Distortion", "Vignetting",
             "Purple Amount", "Purple Hue Low", "Purple Hue High", "Green Amount", "Green Hue Low", "Green Hue High",
