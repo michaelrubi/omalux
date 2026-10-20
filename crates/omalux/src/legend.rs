@@ -35,7 +35,7 @@ const SECTIONS: &[(&str, &[Command])] = &[
     ),
     ("Crop", &[Command::Crop, Command::RotateLeft, Command::RotateRight, Command::ResetCrop]),
     ("Copy and Paste", &[Command::Copy, Command::CopyChoose, Command::Paste, Command::PastePrevious, Command::PasteStack]),
-    ("View", &[Command::BeforeAfter, Command::Clipping, Command::Zoom, Command::InfoCycle, Command::InfoShow, Command::Shortcuts]),
+    ("View", &[Command::BeforeAfter, Command::CompareSideBySide, Command::CompareTopBottom, Command::CompareSplit, Command::Clipping, Command::Zoom, Command::InfoCycle, Command::InfoShow, Command::Shortcuts]),
     ("Folder", &[Command::Open, Command::Close, Command::Export, Command::ExportAndEdit, Command::Quit]),
 ];
 
@@ -174,9 +174,13 @@ mod tests {
             assert_eq!(runs.len(), columns);
             assert!(runs.windows(2).all(|w| w[0].end == w[1].start) && runs[0].start == 0 && runs[columns - 1].end == sections.len());
         }
-        let rows = |run: std::ops::Range<usize>| sections[run].iter().map(|(_, rows)| rows.len() + 2).sum::<usize>();
+        // As even as whole sections allow: no column longer than its share
+        // and the longest section.
+        let size = |(_, rows): &(&str, Vec<_>)| rows.len() + 2;
+        let rows = |run: std::ops::Range<usize>| sections[run].iter().map(size).sum::<usize>();
+        let (total, longest) = (rows(0..sections.len()), sections.iter().map(size).max().unwrap());
         let lengths: Vec<usize> = split(&sections, 3).into_iter().map(rows).collect();
-        assert!(lengths.iter().max().unwrap() - lengths.iter().min().unwrap() <= 12, "{lengths:?}");
+        assert!(*lengths.iter().max().unwrap() <= total.div_ceil(3) + longest, "{lengths:?}");
     }
 
     #[test]

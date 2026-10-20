@@ -100,6 +100,9 @@ pub struct View {
     /// middle (a share of the frame's width and height): the window of the
     /// frame that's on screen is rendered from the raw at full size.
     pub zoom: Option<[f32; 2]>,
+    /// The loupe compares before and after (Y): the current frame is also
+    /// rendered with no edit, once, and kept while it's the current one.
+    pub compare: bool,
 }
 
 /// Which render of a frame this is: of what settings, how large, how good.
@@ -132,11 +135,15 @@ pub enum Done {
     /// how large the frame is at 100% (near enough, until it's rendered
     /// there).
     Decoded { path: PathBuf, info: Arc<SourceInfo>, camera: Arc<Camera>, full: (usize, usize) },
-    /// The window of the current frame that's on screen at 100%.
-    Zoomed { path: PathBuf, key: ZoomKey, image: egui::ColorImage },
+    /// The window of the current frame that's on screen at 100%: of its
+    /// edit, or of the frame with none for the before/after views.
+    Zoomed { path: PathBuf, key: ZoomKey, image: egui::ColorImage, before: bool },
     Rendered {
         path: PathBuf,
         key: Key,
+        /// The current frame with no edit, for the before/after views, not
+        /// the frame as it's wanted.
+        before: bool,
         image: egui::ColorImage,
         histogram: Histogram,
         /// The settings it was rendered with: the frame's own, or a fresh
@@ -234,6 +241,10 @@ struct State {
     full_failed: Option<PathBuf>,
     /// The last window rendered at 100%.
     zoomed: Option<ZoomKey>,
+    /// The current frame's render with no edit, for the before/after
+    /// views, and its last window at 100%.
+    before: Option<(PathBuf, Key)>,
+    zoomed_before: Option<ZoomKey>,
     /// The monitor's colours, where they aren't sRGB's.
     display: Option<Display>,
     done: Vec<Done>,
@@ -294,7 +305,11 @@ impl Renderer {
         }
         // The full size is the current frame's, and only while it's zoomed.
         if view.zoom.is_none() || state.full.as_ref().is_some_and(|(path, ..)| Some(path) != current) {
-            (state.full, state.zoomed) = (None, None);
+            (state.full, state.zoomed, state.zoomed_before) = (None, None, None);
+        }
+        // Before is the current frame's, and only while it's compared.
+        if !view.compare || state.before.as_ref().is_some_and(|(path, _)| Some(path) != current) {
+            (state.before, state.zoomed_before) = (None, None);
         }
         if state.full_failed.as_ref() != current {
             state.full_failed = None;
@@ -323,6 +338,7 @@ impl Renderer {
         state.sources.clear();
         state.rendered.clear();
         (state.stages, state.full, state.zoomed) = (None, None, None);
+        (state.before, state.zoomed_before) = (None, None);
         drop(state);
         self.shared.changed.notify_all();
     }
@@ -331,6 +347,12 @@ impl Renderer {
     /// balance selector samples.
     pub fn source(&self, path: &Path) -> Option<Arc<Rgb32f>> {
         self.shared.lock().sources.get(path).map(|source| source.image.clone())
+    }
+
+    /// What the renderer was last told the loupe has room for.
+    #[cfg(test)]
+    pub fn shared_view(&self) -> View {
+        self.shared.lock().view
     }
 
     /// What's been finished since this was last called.
@@ -342,7 +364,12 @@ impl Renderer {
     /// finished that [`Self::done`] hasn't handed over yet.
     pub fn busy(&self) -> bool {
         let state = self.shared.lock();
-        let waiting = state.next_decode().is_some() || state.next_render().is_some() || state.next_full().is_some() || state.next_zoom().is_some();
+        let waiting = state.next_decode().is_some()
+            || state.next_render().is_some()
+            || state.next_full().is_some()
+            || state.next_zoom().is_some()
+            || state.next_before().is_some()
+            || state.next_zoom_before().is_some();
         !state.decoding.is_empty() || state.full_decoding.is_some() || state.rendering || !state.done.is_empty() || waiting
     }
 }
@@ -383,10 +410,28 @@ impl State {
     /// The window of the current frame on screen at 100%, if it isn't
     /// what was last rendered there.
     fn next_zoom(&self) -> Option<ZoomJob> {
+        let frame = self.wanted.first()?;
+        let (_, full, _) = self.full.as_ref()?;
+        let settings = frame.settings.clone().unwrap_or_else(|| full.fresh());
+        self.zoom_job(settings, self.zoomed, self.view.dragging, self.view.clipping)
+    }
+
+    /// The same window of the current frame with no edit, while it's
+    /// compared, if it isn't what was last rendered there.
+    fn next_zoom_before(&self) -> Option<ZoomJob> {
+        if !self.view.compare {
+            return None;
+        }
+        let (_, full, _) = self.full.as_ref()?;
+        self.zoom_job(full.fresh(), self.zoomed_before, false, false)
+    }
+
+    /// The window of the current frame on screen at 100% with `settings`,
+    /// if it isn't `last`.
+    fn zoom_job(&self, settings: Arc<DevelopSettings>, last: Option<ZoomKey>, draft: bool, clipping: bool) -> Option<ZoomJob> {
         let centre = self.view.zoom?;
         let frame = self.wanted.first()?;
         let (path, full, stages) = self.full.as_ref().filter(|(path, full, _)| *path == frame.path && full.suits(frame))?;
-        let settings = frame.settings.clone().unwrap_or_else(|| full.fresh());
         let (frame_w, frame_h) = omalux_engine::export::full_size(&full.image, &settings);
         let (w, h) = (self.view.size.0.min(frame_w), self.view.size.1.min(frame_h));
         if w == 0 || h == 0 {
@@ -395,8 +440,25 @@ impl State {
         // The window round the centre, moved as little as keeps it in the frame.
         let corner = |centre: f32, frame: usize, size: usize| ((centre * frame as f32) as usize).saturating_sub(size / 2).min(frame - size);
         let window = [corner(centre[0], frame_w, w), corner(centre[1], frame_h, h), w, h];
-        let key = ZoomKey { settings: settings.hash64(), window, full: (frame_w, frame_h), draft: self.view.dragging, clipping: self.view.clipping };
-        (self.zoomed != Some(key)).then(|| (path.clone(), full.clone(), stages.clone(), settings, key))
+        let key = ZoomKey { settings: settings.hash64(), window, full: (frame_w, frame_h), draft, clipping };
+        (last != Some(key)).then(|| (path.clone(), full.clone(), stages.clone(), settings, key))
+    }
+
+    /// The current frame with no edit, to fit the loupe, while it's
+    /// compared and it isn't what was last rendered: never a draft, as it
+    /// doesn't change under a drag, and without the clipping warnings,
+    /// which are the edit's.
+    fn next_before(&self) -> Option<(PathBuf, Arc<Source>, Arc<DevelopSettings>, Key)> {
+        if !self.view.compare || self.view.size.0 == 0 || self.view.size.1 == 0 {
+            return None;
+        }
+        let frame = self.wanted.first()?;
+        let source = self.sources.get(&frame.path).filter(|source| source.suits(frame))?;
+        let settings = source.fresh();
+        let (w, h) = (self.view.size.0.min(source.image.width), self.view.size.1.min(source.image.height));
+        let key = Key { settings: settings.hash64(), size: (w, h), draft: false, clipping: false };
+        let done = self.before.as_ref().is_some_and(|(path, last)| *path == frame.path && *last == key);
+        (!done).then(|| (frame.path.clone(), source.clone(), settings, key))
     }
 
     /// The render a frame should have: a draft of the current one while a
@@ -551,18 +613,31 @@ impl Shared {
         enum Job {
             Fit(Key),
             Zoom(ZoomKey),
+            /// The current frame with no edit, for the before/after views.
+            Before(Key),
+            ZoomBefore(ZoomKey),
         }
         let claim = |state: &mut State| {
             let current = state.wanted.first().map(|f| f.path.clone());
             let fit = state.next_render();
             // The current frame to fit first (it's what's shown until the
-            // window at 100% is in), then that window, then the neighbours.
-            let zoom = if fit.as_ref().is_some_and(|(frame, ..)| Some(&frame.path) == current.as_ref()) { None } else { state.next_zoom() };
+            // window at 100% is in), then that window, then the frame with
+            // no edit beside it, then the neighbours.
+            let first = fit.as_ref().is_some_and(|(frame, ..)| Some(&frame.path) == current.as_ref());
+            let zoom = if first { None } else { state.next_zoom() };
             state.rendering = true;
             let display = state.display.clone();
             if let Some((path, source, stages, settings, key)) = zoom {
                 state.zoomed = Some(key);
                 return Some((path, source, settings, Some(stages), display, Job::Zoom(key)));
+            }
+            if !first && let Some((path, source, settings, key)) = state.next_before() {
+                state.before = Some((path.clone(), key));
+                return Some((path, source, settings, None, display, Job::Before(key)));
+            }
+            if !first && let Some((path, source, _, settings, key)) = state.next_zoom_before() {
+                state.zoomed_before = Some(key);
+                return Some((path, source, settings, None, display, Job::ZoomBefore(key)));
             }
             let Some((frame, source, settings, key)) = fit else {
                 state.rendering = false;
@@ -584,8 +659,8 @@ impl Shared {
         };
         while let Some((path, source, settings, stages, display, job)) = self.next(claim) {
             let (draft, clipping, request) = match job {
-                Job::Fit(key) => (key.draft, key.clipping, RenderRequest::fit(key.size.0, key.size.1)),
-                Job::Zoom(key) => {
+                Job::Fit(key) | Job::Before(key) => (key.draft, key.clipping, RenderRequest::fit(key.size.0, key.size.1)),
+                Job::Zoom(key) | Job::ZoomBefore(key) => {
                     let [x, y, w, h] = key.window;
                     let request = RenderRequest { window: Some(PixelWindow { x, y, w, h }), ..RenderRequest::fit(key.full.0, key.full.1) };
                     (key.draft, key.clipping, request)
@@ -615,11 +690,20 @@ impl Shared {
             self.finish(&path, |state, wanted| {
                 state.rendering = false;
                 match job {
-                    Job::Fit(key) if wanted => state.done.push(Done::Rendered { path: path.clone(), key, image, histogram: rendered.histogram, settings, ms }),
+                    Job::Fit(key) if wanted => {
+                        state.done.push(Done::Rendered { path: path.clone(), key, before: false, image, histogram: rendered.histogram, settings, ms });
+                    }
+                    // Only if it's still the current frame's, and still compared.
+                    Job::Before(key) if state.before.as_ref().is_some_and(|(before, last)| *before == path && *last == key) => {
+                        state.done.push(Done::Rendered { path: path.clone(), key, before: true, image, histogram: rendered.histogram, settings, ms });
+                    }
                     // Only if it's still the current frame's, and still zoomed.
                     Job::Zoom(key) if state.zoomed == Some(key) && state.full.as_ref().is_some_and(|(full, ..)| *full == path) => {
                         log::debug!("{}: {}×{} at 100% in {ms:.0} ms", path.display(), key.window[2], key.window[3]);
-                        state.done.push(Done::Zoomed { path: path.clone(), key, image });
+                        state.done.push(Done::Zoomed { path: path.clone(), key, image, before: false });
+                    }
+                    Job::ZoomBefore(key) if state.zoomed_before == Some(key) && state.full.as_ref().is_some_and(|(full, ..)| *full == path) => {
+                        state.done.push(Done::Zoomed { path: path.clone(), key, image, before: true });
                     }
                     _ => {}
                 }
@@ -760,6 +844,48 @@ pub(crate) mod tests {
         let full = renders(&settle(&renderer));
         assert!(matches!(full[..], [(ref name, Key { draft: false, size: (40, 30), .. })] if name == "a.ARW"), "{full:?}");
         assert_eq!(full[0].1.settings, drafts[0].1.settings);
+    }
+
+    #[test]
+    fn compared_the_current_frame_is_rendered_once_with_no_edit_and_kept_under_a_drag() {
+        let folder = Folder::new("compare", &[("a.ARW", ""), ("b.ARW", "")]);
+        let renderer = Renderer::new(decoder(), false, || {});
+        let frames = |first: &str, exposure: f64| {
+            let mut settings = look::fresh(5200.0, 3.0);
+            settings.light.exposure = exposure;
+            let other = if first == "a.ARW" { "b.ARW" } else { "a.ARW" };
+            vec![Wanted { path: folder.0.join(first), settings: Some(Arc::new(settings)) }, wanted(&folder.0, other)]
+        };
+        let befores = |done: &[Done]| {
+            done.iter().filter_map(|d| if let Done::Rendered { path, key, before: true, settings, .. } = d { Some((path.clone(), *key, settings.clone())) } else { None }).collect::<Vec<_>>()
+        };
+        let view = View { size: (40, 30), compare: true, ..View::default() };
+        renderer.want(frames("a.ARW", 0.5), view);
+        let done = settle(&renderer);
+        let before = befores(&done);
+        assert_eq!(before.len(), 1, "one, of the current frame");
+        assert_eq!(before[0].0, folder.0.join("a.ARW"));
+        assert_eq!(*before[0].2, look::fresh(5200.0, 3.0), "with no edit");
+        assert!(!before[0].1.draft && !before[0].1.clipping);
+        assert_eq!(renders(&done).len(), 3, "and the frame and its neighbour as wanted");
+
+        // A drag: drafts of the edit, and before stays as it is.
+        renderer.want(frames("a.ARW", 0.8), View { dragging: true, clipping: true, ..view });
+        let done = settle(&renderer);
+        assert!(befores(&done).is_empty(), "{:?}", befores(&done));
+        // Stepped: the new current frame's.
+        renderer.want(frames("b.ARW", 0.0), view);
+        assert_eq!(befores(&settle(&renderer)).iter().map(|b| b.0.clone()).collect::<Vec<_>>(), [folder.0.join("b.ARW")]);
+        // Not compared, nothing of before's; compared again, it's made again.
+        renderer.want(frames("b.ARW", 0.0), View { compare: false, ..view });
+        assert!(befores(&settle(&renderer)).is_empty());
+        renderer.want(frames("b.ARW", 0.0), view);
+        assert_eq!(befores(&settle(&renderer)).len(), 1);
+
+        // At 100%, a window of each, the same window.
+        renderer.want(frames("b.ARW", 0.0), View { zoom: Some([0.5, 0.5]), ..view });
+        let zooms: Vec<(bool, [usize; 4])> = settle(&renderer).iter().filter_map(|d| if let Done::Zoomed { key, before, .. } = d { Some((*before, key.window)) } else { None }).collect();
+        assert_eq!(zooms, [(false, [76, 49, 40, 30]), (true, [76, 49, 40, 30])]);
     }
 
     #[test]

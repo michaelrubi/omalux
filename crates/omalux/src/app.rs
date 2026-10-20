@@ -28,7 +28,7 @@ use crate::develop::{self, PanelOut};
 use crate::filmstrip::{Click, Filmstrip, STRIP_HEIGHT};
 use crate::hotkeys::{self, format_shortcut};
 use crate::crop_panel;
-use crate::loupe::{Loupe, Mouse, News};
+use crate::loupe::{Compare, Loupe, Mouse, News};
 use crate::monitor;
 use crate::render::{Decoder, Renderer, View, Wanted};
 use crate::slider::SliderOut;
@@ -171,6 +171,9 @@ pub struct App {
     selector: bool,
     /// The loupe shows the current frame with no edit, until it's left.
     before: bool,
+    /// A before/after view (Y, Alt+Y, Shift+Y), until it's put away: it
+    /// stays from frame to frame, as Lightroom's does.
+    compare: Option<Compare>,
     /// The keyboard shortcuts legend is open.
     legend: bool,
     /// The info overlay shown over the loupe, if one is (I), and the one
@@ -297,6 +300,7 @@ impl App {
             dragging: false,
             selector: false,
             before: false,
+            compare: None,
             legend: false,
             info: None,
             info_last: Info::One,
@@ -548,9 +552,22 @@ impl App {
             Command::DecreaseMore => self.nudge(-5.0),
             Command::WhiteBalance => {
                 self.selector = !self.selector && self.shoot.is_some();
-                self.crop = None;
+                (self.crop, self.compare) = (None, None);
             }
+            // In a before/after view, back to the loupe.
+            Command::BeforeAfter if self.compare.is_some() => self.compare = None,
             Command::BeforeAfter => self.before = !self.before && self.shoot.is_some(),
+            Command::CompareSideBySide | Command::CompareTopBottom | Command::CompareSplit => {
+                let view = match command {
+                    Command::CompareSideBySide => Compare::SideBySide,
+                    Command::CompareTopBottom => Compare::TopBottom,
+                    _ => Compare::Split,
+                };
+                self.compare = (self.compare != Some(view) && self.shoot.is_some()).then_some(view);
+                if self.compare.is_some() {
+                    (self.before, self.selector, self.crop) = (false, false, None);
+                }
+            }
             Command::Clipping => self.clipping = !self.clipping,
             Command::Shortcuts => self.legend = !self.legend,
             // Lightroom's I: Info 1, Info 2, none, and round again.
@@ -571,7 +588,7 @@ impl App {
             }
             Command::Crop => {
                 self.crop = (self.crop.is_none() && self.shoot.is_some()).then(Default::default);
-                self.selector = false;
+                (self.selector, self.compare) = (false, None);
             }
             Command::RotateLeft => self.edit(|history, _| history.set(|settings| crop::turn(settings, false))),
             Command::RotateRight => self.edit(|history, _| history.set(|settings| crop::turn(settings, true))),
@@ -1093,7 +1110,9 @@ impl App {
         let wanted = self.wanted();
         let zoom = self.loupe.zoom().filter(|_| self.crop.is_none());
         self.loupe.retain(|path| wanted.iter().any(|w| w.path == path));
-        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom });
+        self.loupe.set_compare(self.compare);
+        let compare = self.compare.is_some();
+        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom, compare });
         for news in self.loupe.take(ctx, self.renderer.done()) {
             match news {
                 News::Decoded(path, info, camera) => {
@@ -3283,6 +3302,55 @@ mod tests {
         h.press(Modifiers::NONE, Key::Minus);
         h.press(Modifiers::NONE, Key::Minus);
         assert_eq!(h.settings().light.hdr, 0.0, "it stops at 0");
+    }
+
+    #[test]
+    fn y_alt_y_and_shift_y_are_lightrooms_before_after_views_with_one_zoom() {
+        let folder = Folder::new("compare", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let panes = |h: &mut Harness| {
+            h.frame(vec![]);
+            h.ctx.data(|d| d.get_temp::<[egui::Rect; 2]>(egui::Id::new("loupe panes")))
+        };
+        assert_eq!(panes(&mut h), None, "the loupe alone");
+        h.press(Modifiers::NONE, Key::Y);
+        h.settle();
+        let [before, after] = panes(&mut h).expect("side by side");
+        assert!(before.right() < after.left() && before.height() == after.height(), "{before:?} {after:?}");
+        let path = h.app.shoot.as_ref().unwrap().frame().path.clone();
+        assert!(h.app.loupe.shown(&path).is_some_and(|shown| shown.before.is_some()), "before is rendered");
+        assert_eq!(h.app.renderer.shared_view().size, ((after.width() * h.ctx.pixels_per_point()) as usize, (after.height() * h.ctx.pixels_per_point()) as usize), "each the size of its room");
+
+        h.press(Modifiers::ALT, Key::Y);
+        let [before, after] = panes(&mut h).expect("one above the other");
+        assert!(before.bottom() < after.top() && before.width() == after.width());
+        h.press(Modifiers::SHIFT, Key::Y);
+        let [before, after] = panes(&mut h).expect("split");
+        assert_eq!(before, after);
+
+        // One zoom for both: Z, and each gets its window at 100%.
+        h.press(Modifiers::NONE, Key::Y);
+        h.settle();
+        h.press(Modifiers::NONE, Key::Z);
+        h.frame(key_events(Modifiers::NONE, Key::Z, false));
+        h.settle();
+        let shown = h.app.loupe.shown(&path).unwrap();
+        let (after, before) = (shown.zoomed.as_ref().map(|z| z.key.window), shown.zoomed_before.as_ref().map(|z| z.key.window));
+        assert!(after.is_some() && after == before, "{after:?} {before:?}");
+
+        // Y again is the loupe; so are \, R and W.
+        h.press(Modifiers::NONE, Key::Y);
+        assert_eq!(panes(&mut h), None);
+        for key in [Key::Backslash, Key::R, Key::W] {
+            h.press(Modifiers::NONE, Key::Y);
+            assert!(panes(&mut h).is_some());
+            h.press(Modifiers::NONE, key);
+            assert_eq!(h.app.compare, None, "{key:?}");
+            assert!(!h.app.before, "{key:?} isn't Before as well");
+            (h.app.crop, h.app.selector) = (None, false);
+        }
     }
 
     #[test]

@@ -82,6 +82,12 @@ pub enum Command {
     InfoCycle,
     /// The loupe's info overlay shown, or hidden.
     InfoShow,
+    /// Before/after side by side, or back to the loupe.
+    CompareSideBySide,
+    /// Before above after, or back to the loupe.
+    CompareTopBottom,
+    /// The frame split, before at the left, or back to the loupe.
+    CompareSplit,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -143,6 +149,9 @@ impl Command {
         Command::Shortcuts,
         Command::InfoCycle,
         Command::InfoShow,
+        Command::CompareSideBySide,
+        Command::CompareTopBottom,
+        Command::CompareSplit,
     ];
 
     /// Look a command up by its name in code, e.g. "Open".
@@ -205,6 +214,9 @@ impl Command {
         Command::Shortcuts,
         Command::InfoShow,
         Command::InfoCycle,
+        Command::CompareSplit,
+        Command::CompareTopBottom,
+        Command::CompareSideBySide,
     ];
 
     pub fn label(self) -> &'static str {
@@ -262,6 +274,9 @@ impl Command {
             Command::Shortcuts => "Keyboard Shortcuts",
             Command::InfoCycle => "Cycle the Info Overlay",
             Command::InfoShow => "Show or Hide the Info Overlay",
+            Command::CompareSideBySide => "Before/After Left/Right",
+            Command::CompareTopBottom => "Before/After Top/Bottom",
+            Command::CompareSplit => "Before/After Split",
         }
     }
 
@@ -331,6 +346,10 @@ impl Command {
             // Lightroom's loupe info.
             Command::InfoCycle => s(Modifiers::NONE, Key::I),
             Command::InfoShow => s(CMD, Key::I),
+            // Lightroom's before/after views.
+            Command::CompareSideBySide => s(Modifiers::NONE, Key::Y),
+            Command::CompareTopBottom => s(Modifiers::ALT, Key::Y),
+            Command::CompareSplit => s(Modifiers::SHIFT, Key::Y),
         }
     }
 
@@ -468,6 +487,9 @@ mod tests {
         assert_eq!(press(&ctx, CMD, Key::Slash), [Command::Shortcuts]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::I), [Command::InfoCycle]);
         assert_eq!(press(&ctx, CMD, Key::I), [Command::InfoShow], "not mistaken for a cycle");
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::Y), [Command::CompareSideBySide]);
+        assert_eq!(press(&ctx, Modifiers::ALT, Key::Y), [Command::CompareTopBottom]);
+        assert_eq!(press(&ctx, Modifiers::SHIFT, Key::Y), [Command::CompareSplit]);
     }
 
     #[test]

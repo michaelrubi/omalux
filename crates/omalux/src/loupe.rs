@@ -7,6 +7,10 @@
 //! pixels to one of the screen's. What's on screen is rendered from the
 //! raw at full size; until that's in, the render that fits is shown
 //! enlarged. The zoom's behaviour is Omacull's (`omacull/src/loupe.rs`).
+//!
+//! Lightroom's before/after views (Y, Alt+Y, Shift+Y) show the frame with
+//! no edit beside its edit, one above the other, or as the two halves of
+//! one frame, with one zoom and one pan for both.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -56,6 +60,20 @@ pub struct Render {
     pub settings: Arc<DevelopSettings>,
 }
 
+/// Lightroom's before/after views.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compare {
+    /// Before at the left, after at the right (Y).
+    SideBySide,
+    /// Before above, after below (Alt+Y).
+    TopBottom,
+    /// One frame, its left half before and its right half after (Shift+Y).
+    Split,
+}
+
+/// The room between the two frames side by side, or one above the other.
+const GAP: f32 = 8.0;
+
 /// What the mouse does on the loupe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mouse {
@@ -85,6 +103,10 @@ pub struct Shown {
     /// How large the frame is at 100%, in pixels.
     pub full: Option<(usize, usize)>,
     pub zoomed: Option<Zoomed>,
+    /// The frame with no edit, and its window at 100%, for the
+    /// before/after views.
+    pub before: Option<Render>,
+    pub zoomed_before: Option<Zoomed>,
 }
 
 pub struct Loupe {
@@ -104,12 +126,30 @@ pub struct Loupe {
     area: Rect,
     fit: Rect,
     full: Vec2,
+    /// The before/after view shown, if one is.
+    compare: Option<Compare>,
 }
 
 impl Default for Loupe {
     fn default() -> Self {
         let (shown, hold, nowhere) = (HashMap::new(), None, Rect::NOTHING);
-        Self { shown, size: (0, 0), zoomed: false, centre: [0.5, 0.5], hold, area: nowhere, fit: nowhere, full: Vec2::ZERO }
+        Self { shown, size: (0, 0), zoomed: false, centre: [0.5, 0.5], hold, area: nowhere, fit: nowhere, full: Vec2::ZERO, compare: None }
+    }
+}
+
+/// The room each frame of a before/after view has in `area`: before's,
+/// then after's (the same, for the split).
+fn panes(compare: Compare, area: Rect) -> [Rect; 2] {
+    match compare {
+        Compare::SideBySide => {
+            let w = (area.width() - GAP) / 2.0;
+            [Rect::from_min_size(area.min, vec2(w, area.height())), Rect::from_min_size(area.min + vec2(w + GAP, 0.0), vec2(w, area.height()))]
+        }
+        Compare::TopBottom => {
+            let h = (area.height() - GAP) / 2.0;
+            [Rect::from_min_size(area.min, vec2(area.width(), h)), Rect::from_min_size(area.min + vec2(0.0, h + GAP), vec2(area.width(), h))]
+        }
+        Compare::Split => [area, area],
     }
 }
 
@@ -122,6 +162,11 @@ fn fit(size: Vec2, area: Rect) -> Rect {
 impl Loupe {
     pub fn size(&self) -> (usize, usize) {
         self.size
+    }
+
+    /// Show a before/after view from now on, or the frame alone.
+    pub fn set_compare(&mut self, compare: Option<Compare>) {
+        self.compare = compare;
     }
 
     /// The point in the middle of the loupe while it's at 100%.
@@ -183,11 +228,18 @@ impl Loupe {
     /// The mouse on the loupe: press to zoom in at the pointer, hold for a
     /// look, drag to pan, click again to zoom out; the wheel pans.
     fn pointer(&mut self, ui: &Ui, response: &Response) {
+        self.pointer_at(ui, response, response.interact_pointer_pos());
+    }
+
+    /// [`Self::pointer`], zooming in at `at` rather than where the pointer
+    /// is: before's frame in a before/after view zooms to the same spot of
+    /// after's.
+    fn pointer_at(&mut self, ui: &Ui, response: &Response, at: Option<Pos2>) {
         let (pressed, released, time, scroll) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.time, i.smooth_scroll_delta));
         if pressed && response.is_pointer_button_down_on() {
             let from_fit = !self.zoomed;
             if from_fit {
-                self.zoom_in(response.interact_pointer_pos());
+                self.zoom_in(at);
             }
             self.hold = Some(Hold { since: time, from_fit, dragged: false, key: false });
         }
@@ -213,8 +265,14 @@ impl Loupe {
     /// Where the whole frame is when it's at 100%, on whole pixels so it's
     /// sharp.
     fn zoomed_rect(&self, pixels_per_point: f32) -> Rect {
+        self.zoomed_in(self.area, pixels_per_point)
+    }
+
+    /// Where the whole frame is at 100% in a room the size of the loupe's,
+    /// at `area`.
+    fn zoomed_in(&self, area: Rect, pixels_per_point: f32) -> Rect {
         let [u, v] = self.clamped(self.centre);
-        let min = self.area.center() - vec2(u * self.full.x, v * self.full.y);
+        let min = area.center() - vec2(u * self.full.x, v * self.full.y);
         let min = (min.to_vec2() * pixels_per_point).round() / pixels_per_point;
         Rect::from_min_size(min.to_pos2(), self.full)
     }
@@ -244,19 +302,24 @@ impl Loupe {
                     let texture = ctx.load_texture(format!("preview {}", path.display()), image, TextureOptions::LINEAR);
                     self.shown.entry(path).or_default().preview = Some(texture);
                 }
-                Done::Rendered { path, key, image, histogram, settings, ms } => {
+                Done::Rendered { path, key, before, image, histogram, settings, ms } => {
                     log::debug!("{}: {}×{}{} in {ms:.0} ms", path.display(), image.size[0], image.size[1], if key.draft { " draft" } else { "" });
-                    let texture = ctx.load_texture(format!("render {}", path.display()), image, TextureOptions::LINEAR);
-                    self.shown.entry(path).or_default().render = Some(Render { texture, key, histogram, settings });
+                    let name = if before { "before" } else { "render" };
+                    let texture = ctx.load_texture(format!("{name} {}", path.display()), image, TextureOptions::LINEAR);
+                    let render = Some(Render { texture, key, histogram, settings });
+                    let shown = self.shown.entry(path).or_default();
+                    if before { shown.before = render } else { shown.render = render }
                 }
                 Done::Decoded { path, info, camera, full } => {
                     self.shown.entry(path.clone()).or_default().full = Some(full);
                     news.push(News::Decoded(path, info, camera));
                 }
-                Done::Zoomed { path, key, image } => {
-                    let texture = ctx.load_texture(format!("100% {}", path.display()), image, TextureOptions::NEAREST);
+                Done::Zoomed { path, key, image, before } => {
+                    let name = if before { "100% before" } else { "100%" };
+                    let texture = ctx.load_texture(format!("{name} {}", path.display()), image, TextureOptions::NEAREST);
                     let shown = self.shown.entry(path).or_default();
-                    (shown.full, shown.zoomed) = (Some(key.full), Some(Zoomed { texture, key }));
+                    shown.full = Some(key.full);
+                    if before { shown.zoomed_before = Some(Zoomed { texture, key }) } else { shown.zoomed = Some(Zoomed { texture, key }) }
                 }
                 Done::Failed { path, error } => news.push(News::Failed(path, error)),
             }
@@ -291,6 +354,11 @@ impl Loupe {
         if mouse == Mouse::Tool {
             (self.zoomed, self.hold) = (false, None);
             return (None, None);
+        }
+        #[cfg(test)]
+        ui.data_mut(|d| d.remove::<[Rect; 2]>(egui::Id::new("loupe panes")));
+        if let Some(compare) = self.compare.filter(|_| mouse == Mouse::Zoom) {
+            return (None, self.show_compare(ui, path, compare));
         }
         let menu = || ui.interact(self.area, ui.id().with("loupe menu"), egui::Sense::click());
         let texture = self.shown.get(path).and_then(|shown| shown.render.as_ref().map(|r| &r.texture).or(shown.preview.as_ref()));
@@ -332,6 +400,96 @@ impl Loupe {
             return (None, Some(response));
         }
         (None, Some(menu()))
+    }
+
+    /// A before/after view of `path`'s frame: the frame with no edit (the
+    /// camera's JPEG until that's rendered) and with its edit, whole or at
+    /// 100%, with one zoom and one pan for both. Returns the response for
+    /// the right-click menu.
+    fn show_compare(&mut self, ui: &mut Ui, path: &Path, compare: Compare) -> Option<egui::Response> {
+        let pixels_per_point = ui.ctx().pixels_per_point();
+        let whole = self.area;
+        let [before_pane, after_pane] = panes(compare, whole);
+        let pixels = after_pane.size() * pixels_per_point;
+        self.size = (pixels.x.max(0.0) as usize, pixels.y.max(0.0) as usize);
+        let menu = ui.interact(whole, ui.id().with("loupe menu"), egui::Sense::click());
+        let Some(shown) = self.shown.get(path) else {
+            (self.fit, self.full) = (Rect::NOTHING, Vec2::ZERO);
+            return Some(menu);
+        };
+        let after = shown.render.as_ref().map(|r| &r.texture).or(shown.preview.as_ref());
+        let before = shown.before.as_ref().map(|r| &r.texture).or(shown.preview.as_ref());
+        let (Some(after), Some(before)) = (after.cloned(), before.cloned()) else {
+            (self.fit, self.full) = (Rect::NOTHING, Vec2::ZERO);
+            return Some(menu);
+        };
+        let (zoomed, zoomed_before) = (shown.zoomed.as_ref().map(|z| (z.texture.clone(), z.key)), shown.zoomed_before.as_ref().map(|z| (z.texture.clone(), z.key)));
+        self.full = shown.full.map_or(Vec2::ZERO, |(w, h)| vec2(w as f32, h as f32) / pixels_per_point);
+        // The zoom and the pan are worked out in after's room; before's is
+        // the same size, so the same centre puts the same spot in its middle.
+        self.area = after_pane;
+        self.fit = fit(after.size_vec2(), after_pane);
+        let zoomed_in = self.zoomed && self.full.x > 0.0;
+        let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        let draw = |pane: Rect, clip: Rect, texture: &TextureHandle, window: Option<&(TextureHandle, crate::render::ZoomKey)>| {
+            let painter = ui.painter_at(clip.intersect(pane));
+            if zoomed_in {
+                let frame = self.zoomed_in(pane, pixels_per_point);
+                painter.image(texture.id(), frame, uv, egui::Color32::WHITE);
+                if let Some((texture, key)) = window {
+                    let [x, y, w, h] = key.window.map(|v| v as f32 / pixels_per_point);
+                    painter.image(texture.id(), Rect::from_min_size(frame.min + vec2(x, y), vec2(w, h)), uv, egui::Color32::WHITE);
+                }
+                frame
+            } else {
+                let frame = fit(texture.size_vec2(), pane);
+                painter.image(texture.id(), frame, uv, egui::Color32::WHITE);
+                frame
+            }
+        };
+        let font = egui::FontId::proportional(13.0);
+        let label = |at: egui::Pos2, align: egui::Align2, text: &str| {
+            let painter = ui.painter();
+            let galley = painter.layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE);
+            let rect = align.anchor_size(at, galley.size()).expand2(vec2(6.0, 3.0));
+            painter.rect_filled(rect, 4.0, egui::Color32::from_black_alpha(160));
+            painter.galley(rect.min + vec2(6.0, 3.0), galley, egui::Color32::WHITE);
+        };
+        if compare == Compare::Split {
+            // One frame, cut down the middle of where it's drawn.
+            let frame = if zoomed_in { self.zoomed_in(whole, pixels_per_point) } else { fit(after.size_vec2(), whole) };
+            let middle = frame.intersect(whole).center().x;
+            let (left, right) = (Rect::from_min_max(whole.min, egui::pos2(middle, whole.max.y)), Rect::from_min_max(egui::pos2(middle, whole.min.y), whole.max));
+            draw(whole, left, &before, zoomed_before.as_ref());
+            draw(whole, right, &after, zoomed.as_ref());
+            let shown_frame = frame.intersect(whole);
+            ui.painter().vline(middle, shown_frame.y_range(), egui::Stroke::new(1.0, egui::Color32::WHITE));
+            label(egui::pos2(middle - 8.0, shown_frame.top() + 8.0), egui::Align2::RIGHT_TOP, "Before");
+            label(egui::pos2(middle + 8.0, shown_frame.top() + 8.0), egui::Align2::LEFT_TOP, "After");
+        } else {
+            for (pane, texture, window, text) in [(before_pane, &before, zoomed_before.as_ref(), "Before"), (after_pane, &after, zoomed.as_ref(), "After")] {
+                let frame = draw(pane, pane, texture, window).intersect(pane);
+                label(frame.center_bottom() - vec2(0.0, 8.0), egui::Align2::CENTER_BOTTOM, text);
+            }
+        }
+        #[cfg(test)]
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("loupe panes"), [before_pane, after_pane]));
+        if self.full.x <= 0.0 {
+            return Some(menu);
+        }
+        // Each frame zooms and pans both, as if it were after's.
+        let mut last = None;
+        for (i, pane) in [before_pane, after_pane].into_iter().enumerate() {
+            if compare == Compare::Split && i == 0 {
+                continue;
+            }
+            let response = ui.interact(pane, ui.id().with(("loupe", i)), egui::Sense::click_and_drag());
+            // A click on before's frame zooms to the same spot of after's.
+            let offset = after_pane.min - pane.min;
+            self.pointer_at(ui, &response, response.interact_pointer_pos().map(|p| p + offset));
+            last = Some(response);
+        }
+        last
     }
 }
 
