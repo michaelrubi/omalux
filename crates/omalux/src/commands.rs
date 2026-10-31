@@ -78,6 +78,24 @@ pub enum Command {
     Flat,
     /// The legend of every command and its key, or put it away.
     Shortcuts,
+    /// The loupe's info overlay: Info 1, Info 2, none.
+    InfoCycle,
+    /// The loupe's info overlay shown, or hidden.
+    InfoShow,
+    /// Before/after side by side, or back to the loupe.
+    CompareSideBySide,
+    /// Before above after, or back to the loupe.
+    CompareTopBottom,
+    /// The frame split, before at the left, or back to the loupe.
+    CompareSplit,
+    /// Guided Upright's tool: draw lines along what should be upright or
+    /// level. Or put it away.
+    GuidedUpright,
+    /// Lightroom's Auto Sync: a change to the current frame is made on
+    /// every selected frame as it's made. Or not.
+    AutoSync,
+    /// Spot Removal, for sensor dust: open the tool, or put it away.
+    SpotRemoval,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -137,6 +155,14 @@ impl Command {
         Command::AutoLevel,
         Command::Flat,
         Command::Shortcuts,
+        Command::InfoCycle,
+        Command::InfoShow,
+        Command::CompareSideBySide,
+        Command::CompareTopBottom,
+        Command::CompareSplit,
+        Command::GuidedUpright,
+        Command::AutoSync,
+        Command::SpotRemoval,
     ];
 
     /// Look a command up by its name in code, e.g. "Open".
@@ -148,6 +174,7 @@ impl Command {
     /// Ctrl+Z even when Shift is also held, so Ctrl+Shift+Z has to be
     /// checked before it.
     pub const KEYBOARD_ORDER: &[Command] = &[
+        Command::AutoSync,
         Command::Redo,
         Command::Reset,
         Command::Undo,
@@ -197,6 +224,13 @@ impl Command {
         Command::AutoTone,
         Command::Flat,
         Command::Shortcuts,
+        Command::InfoShow,
+        Command::InfoCycle,
+        Command::CompareSplit,
+        Command::CompareTopBottom,
+        Command::CompareSideBySide,
+        Command::GuidedUpright,
+        Command::SpotRemoval,
     ];
 
     pub fn label(self) -> &'static str {
@@ -252,6 +286,14 @@ impl Command {
             Command::AutoLevel => "Auto Level",
             Command::Flat => "Flat Profile, or Camera Match",
             Command::Shortcuts => "Keyboard Shortcuts",
+            Command::InfoCycle => "Cycle the Info Overlay",
+            Command::InfoShow => "Show or Hide the Info Overlay",
+            Command::CompareSideBySide => "Before/After Left/Right",
+            Command::CompareTopBottom => "Before/After Top/Bottom",
+            Command::CompareSplit => "Before/After Split",
+            Command::GuidedUpright => "Guided Upright Tool",
+            Command::AutoSync => "Auto Sync",
+            Command::SpotRemoval => "Spot Removal",
         }
     }
 
@@ -318,6 +360,18 @@ impl Command {
             Command::Flat => s(Modifiers::NONE, Key::F),
             // Lightroom's Develop Shortcuts.
             Command::Shortcuts => s(CMD, Key::Slash),
+            // Lightroom's loupe info.
+            Command::InfoCycle => s(Modifiers::NONE, Key::I),
+            Command::InfoShow => s(CMD, Key::I),
+            // Lightroom's before/after views.
+            Command::CompareSideBySide => s(Modifiers::NONE, Key::Y),
+            Command::CompareTopBottom => s(Modifiers::ALT, Key::Y),
+            Command::CompareSplit => s(Modifiers::SHIFT, Key::Y),
+            Command::GuidedUpright => s(Modifiers::SHIFT, Key::T),
+            // Lightroom's Enable Auto Sync.
+            Command::AutoSync => s(Modifiers { alt: true, shift: true, ..CMD }, Key::A),
+            // Lightroom's.
+            Command::SpotRemoval => s(Modifiers::NONE, Key::Q),
         }
     }
 
@@ -453,6 +507,15 @@ mod tests {
         assert_eq!(press(&ctx, Modifiers::NONE, Key::W), [Command::WhiteBalance]);
         assert_eq!(press(&ctx, Modifiers::NONE, Key::Backslash), [Command::BeforeAfter]);
         assert_eq!(press(&ctx, CMD, Key::Slash), [Command::Shortcuts]);
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::I), [Command::InfoCycle]);
+        assert_eq!(press(&ctx, CMD, Key::I), [Command::InfoShow], "not mistaken for a cycle");
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::Y), [Command::CompareSideBySide]);
+        assert_eq!(press(&ctx, Modifiers::ALT, Key::Y), [Command::CompareTopBottom]);
+        assert_eq!(press(&ctx, Modifiers::SHIFT, Key::Y), [Command::CompareSplit]);
+        assert_eq!(press(&ctx, Modifiers::SHIFT, Key::T), [Command::GuidedUpright]);
+        assert_eq!(press(&ctx, Modifiers { alt: true, shift: true, ..CMD }, Key::A), [Command::AutoSync], "not Select All");
+        assert_eq!(press(&ctx, Modifiers::NONE, Key::Q), [Command::SpotRemoval]);
+        assert_eq!(press(&ctx, CMD, Key::Q), [Command::Quit], "not Spot Removal");
     }
 
     #[test]

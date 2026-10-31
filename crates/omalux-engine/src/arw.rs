@@ -24,6 +24,9 @@ pub struct RawFile {
     /// When the shutter fired, as Exif writes it (`2026:10:04 15:43:16`),
     /// with the fraction of a second after a dot if the camera recorded it.
     pub captured: Option<String>,
+    /// How the camera was held, as Exif writes it (1 level, 6 and 8 a
+    /// quarter turn either way), from the first directory.
+    pub orientation: Option<u16>,
 }
 
 const JPEG_OFFSET: u16 = 0x0201;
@@ -31,6 +34,7 @@ const JPEG_LENGTH: u16 = 0x0202;
 const SUB_IFDS: u16 = 0x014a;
 const EXIF_IFD: u16 = 0x8769;
 const DATE_TIME_ORIGINAL: u16 = 0x9003;
+const ORIENTATION: u16 = 0x0112;
 const SUB_SEC_TIME_ORIGINAL: u16 = 0x9291;
 
 fn invalid(what: &str) -> io::Error {
@@ -56,6 +60,7 @@ struct Found {
     jpegs: Vec<Embedded>,
     date: Option<String>,
     fraction: Option<String>,
+    orientation: Option<u16>,
 }
 
 impl<'a> Tiff<'a> {
@@ -98,6 +103,8 @@ impl<'a> Tiff<'a> {
                     EXIF_IFD => pending.push(u64::from(self.u32(&e.value))),
                     DATE_TIME_ORIGINAL if found.date.is_none() => found.date = self.text(e).ok(),
                     SUB_SEC_TIME_ORIGINAL if found.fraction.is_none() => found.fraction = self.text(e).ok(),
+                    // The first directory's, which is read first: the raw's own.
+                    ORIENTATION if found.orientation.is_none() => found.orientation = u16::try_from(self.number(e)).ok(),
                     _ => {}
                 }
             }
@@ -174,7 +181,7 @@ impl RawFile {
             Some(f) if !f.is_empty() => format!("{date}.{f}"),
             _ => date,
         });
-        Ok(Self { file, jpegs: found.jpegs, captured })
+        Ok(Self { file, jpegs: found.jpegs, captured, orientation: found.orientation })
     }
 
     /// The smallest embedded JPEG: the camera's own thumbnail.

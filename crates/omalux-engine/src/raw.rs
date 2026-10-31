@@ -316,7 +316,14 @@ fn load_now(bytes: &[u8], max_edge: usize, profile: Profile, process: u32) -> Re
     // before there were any) the one fitted to this frame's own JPEG.
     let shot = crate::sony::settings(bytes);
     let fixed = if profile.fitted() { None } else { fixed_look(&raw, shot.creative_style.as_deref().unwrap_or_default(), process) };
-    let camera = Camera { style: shot.creative_style, dro: shot.dro, lift: 0.0, fixed: fixed.is_some(), lens: lens.as_ref().map(|found| found.name.clone()) };
+    let camera = Camera {
+        style: shot.creative_style,
+        dro: shot.dro,
+        lift: 0.0,
+        fixed: fixed.is_some(),
+        lens: lens.as_ref().map(|found| found.name.clone()),
+        capture: crate::look::Capture { size: Some(info.developed_size()), ..crate::look::Capture::of(&raw.metadata) },
+    };
     // (through the lens warp from process version 3: see above)
     let (xy, transform, camera_look) = fixed.unwrap_or_else(|| crate::camera_preview::starting_colour(&mut raw, bytes, warp.as_ref()));
     // What DRO did to the camera's JPEG that the raw doesn't have, for Camera match to put back.

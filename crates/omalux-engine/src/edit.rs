@@ -6,7 +6,7 @@
 //! once and is one step to undo: its step on each frame carries the
 //! paste's number, so whoever undoes it on one can undo it on the rest.
 
-use lightcraft_develop::{DevelopSettings, WbMode, controls};
+use lightcraft_develop::{DevelopSettings, Upright, WbMode, controls};
 use lightcraft_pipeline::SourceInfo;
 use lightcraft_raster::Rgb32f;
 
@@ -118,6 +118,20 @@ impl History {
         changed
     }
 
+    /// What the settings were before the last step: what it changed is
+    /// what Auto Sync makes on the other frames.
+    pub fn last_before(&self) -> Option<&DevelopSettings> {
+        self.undo.last().map(|(settings, _)| settings)
+    }
+
+    /// Make the last step part of paste (or Auto Sync) number `paste`, so
+    /// undoing it here undoes it on every frame it reached.
+    pub fn tag_last(&mut self, paste: u64) {
+        if let Some((_, tag)) = self.undo.last_mut() {
+            *tag = Some(paste);
+        }
+    }
+
     /// The paste the next undo would take back, if it's one.
     pub fn undoes(&self) -> Option<u64> {
         if self.before.as_ref().is_some_and(|before| *before != self.settings) {
@@ -132,6 +146,21 @@ impl History {
             return None;
         }
         self.redo.last().and_then(|(_, paste)| *paste)
+    }
+
+    /// Whether paste number `paste` is among the steps made, and hasn't
+    /// been undone.
+    pub fn stands(&self, paste: u64) -> bool {
+        self.undo.iter().any(|(_, tag)| *tag == Some(paste))
+    }
+
+    /// Change the settings as they stand, without a step: for what's
+    /// filled in once the frame's raw is decoded (an automatic Upright
+    /// pasted onto it before), which undo has no reason to take back.
+    pub fn amend(&mut self, change: impl FnOnce(&mut DevelopSettings)) -> bool {
+        let before = self.settings.clone();
+        change(&mut self.settings);
+        before != self.settings
     }
 
     /// Change the settings in one step.
@@ -199,6 +228,42 @@ pub fn as_shot(settings: &mut DevelopSettings, info: &SourceInfo) {
     (settings.wb.mode, settings.wb.temp, settings.wb.tint) = (WbMode::AsShot, info.as_shot_temp, info.as_shot_tint);
 }
 
+/// Whether an Upright mode is one found from the frame (Auto, Level,
+/// Vertical, Full), not Off or Guided's lines.
+pub fn upright_is_auto(mode: Upright) -> bool {
+    !matches!(mode, Upright::Off | Upright::Guided)
+}
+
+/// Lightroom's Upright: `mode`, with its transform found on `source` and
+/// kept in the settings, so the loupe and the export use the same one
+/// (Lightcraft's `upright::auto_transform`, which reads the frame through
+/// its lens corrections).
+pub fn upright(settings: &mut DevelopSettings, info: &SourceInfo, source: &Rgb32f, mode: Upright) {
+    settings.geometry.upright = mode;
+    settings.geometry.upright_transform =
+        upright_is_auto(mode).then(|| lightcraft_pipeline::upright::auto_transform(source, info, settings, mode));
+}
+
+/// An automatic Upright found again on `source`: after the lens
+/// corrections it was found through change, or where it was pasted from
+/// another frame. Nothing for Off or Guided.
+pub fn refresh_upright(settings: &mut DevelopSettings, info: &SourceInfo, source: &Rgb32f) {
+    if upright_is_auto(settings.geometry.upright) {
+        upright(settings, info, source, settings.geometry.upright);
+    }
+}
+
+/// One of Lightroom's white balance presets (Daylight, Cloudy, Shade,
+/// Tungsten, Fluorescent, Flash): its Kelvin and tint, as Lightcraft's
+/// `WbMode::preset` has them, which is what the pipeline renders a preset
+/// with. False for a mode that isn't a preset.
+pub fn preset_white_balance(settings: &mut DevelopSettings, info: &SourceInfo, mode: WbMode) -> bool {
+    let Some((temp, tint)) = mode.preset() else { return false };
+    lightcraft_pipeline::local::normalize_wb(settings, info);
+    (settings.wb.mode, settings.wb.temp, settings.wb.tint) = (mode, temp, tint);
+    true
+}
+
 /// The white balance that makes the source's pixels round a point
 /// neutral: Lightroom's White Balance Selector. `at` is the point as a
 /// share of the frame's width and height. As Lightcraft's `develop.wbPick`
@@ -251,6 +316,42 @@ mod tests {
         assert_eq!(neutral.wb.mode, WbMode::Custom);
         assert!((neutral.wb.temp - 6500.0).abs() < 100.0 && neutral.wb.tint.abs() < 2.0, "grey is neutral already: {:?}", neutral.wb);
         assert!(warm.wb.temp < neutral.wb.temp - 500.0, "a warm cast is cooled: {:?}", warm.wb);
+    }
+
+    #[test]
+    fn an_automatic_upright_keeps_its_transform_and_off_and_guided_have_none() {
+        let info = SourceInfo { raw: true, ..SourceInfo::default() };
+        // A frame with one tilted upright: a bright bar leaning right.
+        let source = Rgb32f::from_fn(300, 200, |x, y| {
+            let lean = 150.0 + (y as f32 - 100.0) * 0.08;
+            let v = if (x as f32 - lean).abs() < 4.0 { 0.9 } else { 0.1 };
+            [v; 3]
+        });
+        let mut s = DevelopSettings::default();
+        upright(&mut s, &info, &source, Upright::Vertical);
+        assert_eq!(s.geometry.upright, Upright::Vertical);
+        assert!(s.geometry.upright_transform.is_some(), "found and kept");
+        let mut history = History::new(DevelopSettings::default(), Some(s.clone()));
+        assert!(!history.amend(|settings| refresh_upright(settings, &info, &source)), "found the same again");
+        for mode in [Upright::Off, Upright::Guided] {
+            upright(&mut s, &info, &source, mode);
+            assert_eq!((s.geometry.upright, s.geometry.upright_transform), (mode, None));
+        }
+        assert!(!history.can_undo(), "amending is no step");
+    }
+
+    #[test]
+    fn a_preset_is_its_kelvin_and_tint_and_as_shot_isnt_one() {
+        let info = SourceInfo { raw: true, as_shot_temp: 5200.0, as_shot_tint: 3.0, ..SourceInfo::default() };
+        let mut s = DevelopSettings::default();
+        assert!(preset_white_balance(&mut s, &info, WbMode::Tungsten));
+        assert_eq!((s.wb.mode, s.wb.temp, s.wb.tint), (WbMode::Tungsten, 2850.0, 0.0));
+        assert!(preset_white_balance(&mut s, &info, WbMode::Shade));
+        assert_eq!((s.wb.mode, s.wb.temp, s.wb.tint), (WbMode::Shade, 7500.0, 10.0));
+        let was = s.clone();
+        assert!(!preset_white_balance(&mut s, &info, WbMode::AsShot));
+        assert!(!preset_white_balance(&mut s, &info, WbMode::Custom));
+        assert_eq!(s, was, "and changes nothing");
     }
 
     #[test]

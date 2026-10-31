@@ -559,7 +559,7 @@ mod tests {
             let file_name = raw_src.file_name().expect("file name");
             let raw_dest = temp.join(file_name);
             std::fs::copy(raw_src, &raw_dest).expect("copy raw");
-            assert!(export::export(&raw_dest, &temp, None).expect("export raw"));
+            assert!(matches!(export::export(&raw_dest, &temp, None, None).expect("export raw"), export::Exported::Written { .. }));
             let stem = raw_dest.file_stem().expect("stem").to_string_lossy();
             let generated_tif = temp.join(format!("{stem}.tif"));
             let lr_tif = temp.join(format!("{stem}.lightroom-camera.tif"));

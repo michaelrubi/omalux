@@ -6,12 +6,14 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use egui::{Align2, FontId, RichText, Ui};
 use lightcraft_codecs::display::DisplayProfile;
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::SourceInfo;
+use lightcraft_raster::Rgb32f;
 use omalux_engine::auto::{self, Auto};
 use omalux_engine::copy::{self, Copied, Group};
 use omalux_engine::crop;
@@ -21,6 +23,7 @@ use omalux_engine::look::{self, Camera, Profile};
 use omalux_engine::shoot::{Filter, Shoot, Step, stars};
 use omalux_engine::sidecar;
 
+use crate::autos::{Autos, Found};
 use crate::checklist::{Checklist, Outcome};
 use crate::commands::Command;
 use crate::config::Config;
@@ -28,7 +31,7 @@ use crate::develop::{self, PanelOut};
 use crate::filmstrip::{Click, Filmstrip, STRIP_HEIGHT};
 use crate::hotkeys::{self, format_shortcut};
 use crate::crop_panel;
-use crate::loupe::{Loupe, Mouse, News};
+use crate::loupe::{Compare, Loupe, Mouse, News};
 use crate::monitor;
 use crate::render::{Decoder, Renderer, View, Wanted};
 use crate::slider::SliderOut;
@@ -42,6 +45,15 @@ const PANEL_WIDTH: f32 = 300.0;
 const AHEAD: usize = 2;
 const BEHIND: usize = 1;
 
+/// Lightroom's loupe info overlays: what each shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Info {
+    /// The file name, when it was shot, and its size cropped.
+    One,
+    /// The file name, the exposure, and the lens.
+    Two,
+}
+
 /// A frame whose raw has been decoded this session, or that's been pasted
 /// onto: its edit, and what its settings are read against.
 struct Editing {
@@ -53,13 +65,27 @@ struct Editing {
     camera: Arc<Camera>,
     /// The history's settings, as the renderer is handed them.
     settings: Arc<DevelopSettings>,
+    /// Which edit it is, as an export records it ([`sidecar::export_key`]):
+    /// what tells a frame edited since its export.
+    key: String,
+    /// What Auto Sync asked to be set automatically before the frame's
+    /// raw was decoded, and the step that asked: set once it's decoded,
+    /// while that step stands.
+    pending: Vec<(u64, Auto)>,
+}
+
+/// [`sidecar::export_key`] of a frame's edit: `fresh` for one that's a
+/// fresh raw's, as an export names it.
+fn key_of(history: &History) -> String {
+    sidecar::export_key(history.edited().then_some(history.settings()))
 }
 
 impl Editing {
     fn new(history: History, decoded: Option<(Arc<SourceInfo>, Arc<Camera>)>) -> Self {
         let settings = Arc::new(history.settings().clone());
         let (info, camera) = decoded.unzip();
-        Self { history, info, camera: camera.unwrap_or_default(), settings }
+        let key = key_of(&history);
+        Self { history, info, camera: camera.unwrap_or_default(), settings, key, pending: Vec::new() }
     }
 
     /// Change the edit with `change`, which says whether it did. Nothing
@@ -71,12 +97,27 @@ impl Editing {
         changed
     }
 
+    /// Whether Auto Sync is still to set something here, by a step that
+    /// hasn't been undone.
+    fn waiting(&self) -> bool {
+        self.pending.iter().any(|(paste, _)| self.history.stands(*paste))
+    }
+
+    /// What Auto Sync is still to set here; what an undone step asked for
+    /// stays, for if it's made again.
+    fn take_waiting(&mut self) -> Vec<Auto> {
+        let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending).into_iter().partition(|(paste, _)| self.history.stands(*paste));
+        self.pending = later;
+        now.into_iter().map(|(_, what)| what).collect()
+    }
+
     /// Take up the history's settings after a step. True if they're not
     /// what they were: there's something to save.
     fn stepped(&mut self) -> bool {
         let changed = *self.settings != *self.history.settings();
         if changed {
             self.settings = Arc::new(self.history.settings().clone());
+            self.key = key_of(&self.history);
         }
         changed
     }
@@ -96,13 +137,14 @@ pub struct Paths {
 /// test gives it.
 pub struct Workers {
     pub renderer: Renderer,
+    pub autos: Autos,
     pub disk: Disk,
 }
 
 /// Frames being exported to a folder, and how it's gone so far.
 struct Exporting {
     to: PathBuf,
-    /// The TIFF files that were asked for, including those already present.
+    /// The TIFFs written, or there already, as each frame is dealt with.
     tiffs: Vec<PathBuf>,
     total: usize,
     exported: usize,
@@ -112,8 +154,10 @@ struct Exporting {
     failed: Vec<String>,
     /// Whether to open in the configured program once done.
     edit: bool,
-    /// Whether each was exported, as it's dealt with.
-    results: Receiver<Result<bool, String>>,
+    /// What each frame's export did, as it's dealt with.
+    results: Receiver<(PathBuf, Result<omalux_engine::export::Exported, String>)>,
+    /// Set on quitting: no more frames are started.
+    stop: Arc<AtomicBool>,
 }
 
 impl Exporting {
@@ -166,8 +210,15 @@ pub struct App {
     selector: bool,
     /// The loupe shows the current frame with no edit, until it's left.
     before: bool,
+    /// A before/after view (Y, Alt+Y, Shift+Y), until it's put away: it
+    /// stays from frame to frame, as Lightroom's does.
+    compare: Option<Compare>,
     /// The keyboard shortcuts legend is open.
     legend: bool,
+    /// The info overlay shown over the loupe, if one is (I), and the one
+    /// Ctrl+I shows again.
+    info: Option<Info>,
+    info_last: Info,
     /// The groups of settings whose panels are switched off: the loupe
     /// shows every frame without them, until they're on again or another
     /// shoot is opened. Never saved.
@@ -176,6 +227,10 @@ pub struct App {
     picking: Option<Receiver<Option<PathBuf>>>,
     /// Frames being exported, while the export runs.
     exporting: Option<Exporting>,
+    /// An export asked for while Auto Sync has yet to set something on
+    /// its frames (and whether to open them after): started once it has.
+    export_next: Option<(Vec<PathBuf>, bool)>,
+    autos: Autos,
     /// The last thing to tell the user, and whether it's a problem.
     message: Option<(String, bool)>,
     title: String,
@@ -189,6 +244,12 @@ pub struct App {
     /// Whether V is held, between frames: how Ctrl+V is told (see
     /// [`Command::pressed`]).
     v_down: bool,
+    /// The frames exported this session: each one's last export, as its
+    /// sidecar now holds it (the shoot has what they held at open).
+    exports: HashMap<PathBuf, sidecar::Exported>,
+    /// Lightroom's Auto Sync is on: with a selection, a change to the
+    /// current frame is made on the rest of it too.
+    auto_sync: bool,
     /// The settings last copied, for the session.
     clipboard: Option<Copied>,
     /// How many pastes there have been: each one's number is on its step
@@ -203,6 +264,12 @@ pub struct App {
     /// The Crop & Straighten tool, while it's open: the loupe shows the
     /// current frame whole, with its crop drawn over it.
     crop: Option<crate::crop::Tool>,
+    /// Guided Upright's tool, while it's open: the loupe shows the current
+    /// frame through its lens corrections alone, with its lines over it.
+    guided: Option<crate::guided::Tool>,
+    /// Spot Removal, while it's open: the loupe shows the current frame
+    /// before its lens corrections, crop and transform, with its spots.
+    spot: Option<crate::spot::Tool>,
     /// The crop keeps its shape when it's dragged (Lightroom's lock, A),
     /// from one frame and one opening of the tool to the next.
     crop_locked: bool,
@@ -243,13 +310,15 @@ impl App {
         let wake = ctx.clone();
         let renderer = Renderer::new(Decoder::raw(), gpu, move || wake.request_repaint());
         let wake = ctx.clone();
+        let autos = Autos::new(Decoder::raw(), move || wake.request_repaint());
+        let wake = ctx.clone();
         let disk = Disk::new(move || wake.request_repaint());
         let paths = Paths {
             state: hotkeys::config_dir().map(|dir| dir.join("state.toml")),
             thumbnails: omalux_engine::thumbs::default_dir(),
             monitors: hotkeys::config_dir().map(|dir| dir.join("monitors.toml")),
         };
-        let mut app = Self::build(theme, theme::watch(ctx.clone()), config, warnings, script, Workers { renderer, disk }, paths);
+        let mut app = Self::build(theme, theme::watch(ctx.clone()), config, warnings, script, Workers { renderer, autos, disk }, paths);
         if let Some(path) = open {
             app.open(path);
         }
@@ -289,10 +358,15 @@ impl App {
             dragging: false,
             selector: false,
             before: false,
+            compare: None,
             legend: false,
+            info: None,
+            info_last: Info::One,
             off: Vec::new(),
             picking: None,
             exporting: None,
+            export_next: None,
+            autos: workers.autos,
             message: None,
             title: String::new(),
             disk: workers.disk,
@@ -301,12 +375,16 @@ impl App {
             watch,
             display,
             v_down: false,
+            exports: HashMap::new(),
+            auto_sync: false,
             clipboard: None,
             pastes: 0,
             at: None,
             previous: None,
             choosing: None,
             crop: None,
+            guided: None,
+            spot: None,
             crop_locked: true,
         }
     }
@@ -363,14 +441,17 @@ impl App {
     /// Forget what was held of the shoot that was open. What was copied
     /// stays: it can be pasted in the next shoot.
     fn forget(&mut self) {
+        self.finish_autos();
+        self.export_next = None;
         self.saved.clear();
         self.processes.clear();
         self.unreadable.clear();
         self.edits.clear();
+        self.exports.clear();
         self.filmstrip.reset();
         (self.at, self.previous) = (None, None);
         self.choosing = None;
-        self.crop = None;
+        (self.crop, self.guided, self.spot) = (None, None, None);
         self.off.clear();
         self.leave();
     }
@@ -418,7 +499,7 @@ impl App {
     fn copy(&mut self, groups: &[Group]) {
         let Some(shoot) = &self.shoot else { return };
         let Some(editing) = self.edits.get(&shoot.frame().path) else { return };
-        self.clipboard = Some(Copied::new(editing.history.settings(), groups));
+        self.clipboard = Some(Copied::new(editing.history.settings(), groups).held(shoot.frame().held));
         let what = if groups == Group::ALL { "every setting".to_owned() } else { listed(groups) };
         self.message = Some((format!("Copied {what} of {}", shoot.frame().name()), false));
     }
@@ -428,42 +509,51 @@ impl App {
         if frames.is_empty() || self.exporting.is_some() {
             return;
         }
+        // An export is of the edit as it'll stand.
+        if frames.iter().any(|frame| self.edits.get(frame).is_some_and(Editing::waiting)) {
+            self.message = Some(("Setting Auto Sync's Autos before exporting…".to_owned(), false));
+            self.export_next = Some((frames, edit));
+            return;
+        }
         let to = shoot.dir().join(&self.config.export_folder);
-        let tiffs: Vec<PathBuf> = frames
-            .iter()
-            .map(|f| {
-                let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                to.join(format!("{stem}.tif"))
-            })
-            .collect();
         let (tx, rx) = channel();
         // Each with its edit as it stands, where it's been opened this
         // session; the rest are exported with what their sidecars hold.
-        let to_export: Vec<(PathBuf, Option<sidecar::Edit>)> = frames
+        // And each with its last export, to tell whether it's to be done
+        // again. A frame reset to a fresh raw's has its sidecar written
+        // first, so it's read as it stands.
+        self.disk.flush();
+        let last =|frame: &PathBuf| self.exports.get(frame).cloned().or_else(|| shoot.frames().iter().find(|f| f.path == *frame).and_then(|f| f.exported.clone()));
+        let to_export: Vec<(PathBuf, Option<sidecar::Edit>, Option<sidecar::Exported>)> = frames
             .iter()
             .map(|frame| {
-                let edit = self.edits.get(frame).map(|editing| sidecar::Edit { process: self.process_of(frame), settings: (*editing.settings).clone() });
-                (frame.clone(), edit)
+                let edit = self.edits.get(frame).filter(|editing| editing.history.edited()).map(|editing| sidecar::Edit { process: self.process_of(frame), settings: (*editing.settings).clone() });
+                (frame.clone(), edit, last(frame))
             })
             .collect();
         let (ctx, target) = (ctx.clone(), to.clone());
         let total = frames.len();
+        let stop = Arc::new(AtomicBool::new(false));
         self.message = Some((format!("Exporting 1 of {total}…"), false));
         self.exporting = Some(Exporting {
             to,
-            tiffs,
+            tiffs: Vec::new(),
             total,
             exported: 0,
             there: 0,
             failed: Vec::new(),
             edit,
             results: rx,
+            stop: stop.clone(),
         });
         std::thread::spawn(move || {
-            for (frame, edit) in to_export {
-                let res = omalux_engine::export::export(&frame, &target, edit.as_ref())
+            for (frame, edit, last) in to_export {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let res =omalux_engine::export::export(&frame, &target, edit.as_ref(), last.as_ref())
                     .map_err(|e| format!("{}: {e}", file_name(&frame)));
-                if tx.send(res).is_err() {
+                if tx.send((frame, res)).is_err() {
                     return;
                 }
                 ctx.request_repaint();
@@ -471,14 +561,34 @@ impl App {
         });
     }
 
+    /// Quitting: no more frames, and the ones done or under way recorded
+    /// in their sidecars, or a TIFF would be there with no record of it.
+    fn stop_exporting(&mut self) {
+        let Some(exporting) = self.exporting.take() else { return };
+        exporting.stop.store(true, Ordering::Relaxed);
+        for (frame, result) in exporting.results {
+            if let Ok(omalux_engine::export::Exported::Written { record, .. }) = result {
+                self.disk.exported(frame, record);
+            }
+        }
+    }
+
     fn finish_exporting(&mut self) {
         let Some(exporting) = &mut self.exporting else { return };
         let mut more = false;
         loop {
             match exporting.results.try_recv() {
-                Ok(Ok(true)) => exporting.exported += 1,
-                Ok(Ok(false)) => exporting.there += 1,
-                Ok(Err(why)) => exporting.failed.push(why),
+                Ok((frame, Ok(omalux_engine::export::Exported::Written { tiff, record }))) => {
+                    exporting.exported += 1;
+                    exporting.tiffs.push(tiff);
+                    self.disk.exported(frame.clone(), record.clone());
+                    self.exports.insert(frame, record);
+                }
+                Ok((_, Ok(omalux_engine::export::Exported::There(tiff)))) => {
+                    exporting.there += 1;
+                    exporting.tiffs.push(tiff);
+                }
+                Ok((_, Err(why))) => exporting.failed.push(why),
                 Err(TryRecvError::Empty) if more => {
                     let done = exporting.exported + exporting.there + exporting.failed.len();
                     if done < exporting.total {
@@ -544,11 +654,46 @@ impl App {
             Command::DecreaseMore => self.nudge(-5.0),
             Command::WhiteBalance => {
                 self.selector = !self.selector && self.shoot.is_some();
-                self.crop = None;
+                (self.crop, self.guided, self.spot, self.compare) = (None, None, None, None);
             }
+            // In a before/after view, back to the loupe.
+            Command::BeforeAfter if self.compare.is_some() => self.compare = None,
             Command::BeforeAfter => self.before = !self.before && self.shoot.is_some(),
+            Command::CompareSideBySide | Command::CompareTopBottom | Command::CompareSplit => {
+                let view = match command {
+                    Command::CompareSideBySide => Compare::SideBySide,
+                    Command::CompareTopBottom => Compare::TopBottom,
+                    _ => Compare::Split,
+                };
+                self.compare = (self.compare != Some(view) && self.shoot.is_some()).then_some(view);
+                if self.compare.is_some() {
+                    (self.before, self.selector, self.crop, self.guided, self.spot) = (false, false, None, None, None);
+                }
+            }
+            Command::GuidedUpright => self.guided_tool(self.guided.is_none()),
+            Command::SpotRemoval => {
+                self.spot = (self.spot.is_none() && self.shoot.is_some()).then(Default::default);
+                if self.spot.is_some() {
+                    (self.crop, self.guided, self.selector, self.compare, self.before) = (None, None, false, None, false);
+                }
+            }
             Command::Clipping => self.clipping = !self.clipping,
             Command::Shortcuts => self.legend = !self.legend,
+            Command::AutoSync => {
+                self.auto_sync = !self.auto_sync;
+                let text = if self.auto_sync { "Auto Sync is on: a change to this frame is made on every selected frame" } else { "Auto Sync is off" };
+                self.message = Some((text.to_owned(), false));
+            }
+            // Lightroom's I: Info 1, Info 2, none, and round again.
+            Command::InfoCycle => {
+                self.info = match self.info {
+                    None => Some(Info::One),
+                    Some(Info::One) => Some(Info::Two),
+                    Some(Info::Two) => None,
+                };
+                self.info_last = self.info.unwrap_or(self.info_last);
+            }
+            Command::InfoShow => self.info = if self.info.is_some() { None } else { Some(self.info_last) },
             // The crop tool shows the frame whole.
             Command::Zoom if self.crop.is_some() => {}
             Command::Zoom => {
@@ -557,7 +702,7 @@ impl App {
             }
             Command::Crop => {
                 self.crop = (self.crop.is_none() && self.shoot.is_some()).then(Default::default);
-                self.selector = false;
+                (self.selector, self.compare, self.guided, self.spot) = (false, None, None, None);
             }
             Command::RotateLeft => self.edit(|history, _| history.set(|settings| crop::turn(settings, false))),
             Command::RotateRight => self.edit(|history, _| history.set(|settings| crop::turn(settings, true))),
@@ -665,6 +810,13 @@ impl App {
         self.message = Some(pasted.said("Pasted onto"));
     }
 
+    /// How the camera was held for a frame of the shoot (its raw's Exif
+    /// orientation): where its sensor's dust is.
+    fn held_of(&self, path: &Path) -> crop::Orientation {
+        let frame = self.shoot.as_ref().and_then(|shoot| shoot.frames().iter().find(|f| f.path == path));
+        frame.map_or_else(Default::default, |f| f.held)
+    }
+
     /// Ctrl+Alt+V, Lightroom's Paste from Previous: every setting of the
     /// frame the cursor came from, onto the current frame alone.
     fn paste_previous(&mut self) {
@@ -674,7 +826,8 @@ impl App {
         };
         // A frame with no edit is pasted as a fresh raw.
         let settings = self.settings_of(&from).map_or_else(|| History::unseen(None).settings().clone(), |settings| (*settings).clone());
-        let pasted = self.paste_onto(&Copied::new(&settings, Group::ALL), &[to]);
+        let held = self.held_of(&from);
+        let pasted = self.paste_onto(&Copied::new(&settings, Group::ALL).held(held), &[to]);
         self.message = Some(pasted.said(&format!("Pasted {}'s settings onto", file_name(&from))));
     }
 
@@ -696,12 +849,17 @@ impl App {
             }
             match self.edits.get(path) {
                 Some(editing) if !self.unreadable.contains(path) => {
-                    let mut becomes = copied.paste(editing.history.settings(), editing.history.fresh());
+                    let held = self.shoot.as_ref().and_then(|shoot| shoot.frames().iter().find(|f| f.path == *path)).map(|f| f.held);
+                    let mut becomes = copied.paste_held(editing.history.settings(), editing.history.fresh(), held);
                     // A crop from a frame of another shape, kept inside this
                     // one: where the frame's raw is decoded, so its shape is known.
                     if let Some(source) = self.renderer.source(path) {
                         let dims = crop::dims((source.width, source.height), &becomes);
                         crop::constrain(&mut becomes, dims);
+                        // An automatic Upright, found on this frame.
+                        if let Some(info) = editing.info.as_deref().filter(|_| becomes.geometry.upright_transform.is_none()) {
+                            edit::refresh_upright(&mut becomes, info, &source);
+                        }
                     }
                     if becomes != *editing.history.settings() {
                         changes.push((path.clone(), becomes));
@@ -794,12 +952,148 @@ impl App {
     /// says whether it changed anything. Nothing happens until the frame's
     /// raw has been decoded.
     fn edit(&mut self, change: impl FnOnce(&mut History, &SourceInfo) -> bool) {
+        self.edit_with(change, &[]);
+    }
+
+    /// [`Self::edit`], with what Auto Sync sets automatically on each
+    /// frame for itself rather than making the same change.
+    fn edit_with(&mut self, change: impl FnOnce(&mut History, &SourceInfo) -> bool, autos: &[Auto]) {
         let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
         if self.locked(&path) {
             return;
         }
         if self.edits.get_mut(&path).is_some_and(|editing| editing.edit(change)) {
             self.save(&path);
+            self.synced(autos);
+        }
+    }
+
+    /// Auto Sync: the current frame's last step made on the rest of the
+    /// selection too, each frame's white balance as shot its own, its crop
+    /// inside its shape, and `autos` (and an automatic Upright) found on
+    /// it for itself. One step to undo on all of them, as a paste is.
+    fn synced(&mut self, autos: &[Auto]) {
+        let Some(shoot) = self.shoot.as_ref().filter(|_| self.auto_sync) else { return };
+        let current = shoot.frame().path.clone();
+        let others: Vec<PathBuf> = shoot.selection().into_iter().map(|i| shoot.frames()[i].path.clone()).filter(|path| *path != current).collect();
+        let Some(editing) = self.edits.get(&current).filter(|_| !others.is_empty()) else { return };
+        let Some(before) = editing.history.last_before() else { return };
+        let changes = copy::changes(before, editing.history.settings());
+        // Spots go where the same dust is on each frame.
+        let spots = changes.touches("spots").then(|| {
+            let way = omalux_engine::dust::Way { held: shoot.frame().held, turned: editing.history.settings().orientation };
+            (editing.history.settings().spots.clone(), way)
+        });
+        let helds: HashMap<PathBuf, crop::Orientation> = shoot.frames().iter().map(|f| (f.path.clone(), f.held)).collect();
+        if changes.is_empty() && autos.is_empty() {
+            return;
+        }
+        self.pastes += 1;
+        let number = self.pastes;
+        if let Some(editing) = self.edits.get_mut(&current) {
+            editing.history.tag_last(number);
+        }
+        for path in others {
+            if !self.edits.contains_key(&path) {
+                // Not decoded this session: its edit is what its sidecar holds.
+                let saved = self.settings_of(&path).map(|settings| (*settings).clone());
+                if !self.unreadable.contains(&path) {
+                    self.edits.insert(path.clone(), Editing::new(History::unseen(saved), None));
+                }
+            }
+            if self.unreadable.contains(&path) {
+                continue;
+            }
+            let source = self.renderer.source(&path);
+            let Some(editing) = self.edits.get_mut(&path) else { continue };
+            let mut becomes = changes.apply(editing.history.settings(), editing.history.fresh());
+            if let Some((spots, from)) = &spots {
+                let to = omalux_engine::dust::Way { held: helds.get(&path).copied().unwrap_or_default(), turned: becomes.orientation };
+                becomes.spots = omalux_engine::dust::carry(spots, *from, to);
+            }
+            match (&source, editing.info.clone()) {
+                (Some(source), Some(info)) => {
+                    let dims = crop::dims((source.width, source.height), &becomes);
+                    crop::constrain(&mut becomes, dims);
+                    for &what in autos {
+                        auto::apply(&mut becomes, &info, &editing.camera, source, what);
+                    }
+                    if becomes.geometry.upright_transform.is_none() {
+                        edit::refresh_upright(&mut becomes, &info, source);
+                    }
+                }
+                // Found on it once its raw is decoded.
+                _ => editing.pending.extend(autos.iter().map(|&what| (number, what))),
+            }
+            editing.history.paste(number, becomes);
+            if editing.stepped() {
+                self.save(&path);
+            }
+        }
+    }
+
+    /// What Auto Sync asked to be set automatically on a frame before its
+    /// raw was decoded, set now it is: no step, as the sync was the step.
+    fn apply_pending(&mut self, path: &Path, source: &Arc<Rgb32f>) {
+        let Some(editing) = self.edits.get_mut(path) else { return };
+        let Some(info) = editing.info.clone() else { return };
+        let (pending, camera) = (editing.take_waiting(), editing.camera.clone());
+        if editing.history.amend(|settings| {
+            for what in pending {
+                auto::apply(settings, &info, &camera, source, what);
+            }
+        }) {
+            editing.stepped();
+            self.save(path);
+        }
+    }
+
+    /// Set what Auto Sync is waiting to set on the frames whose raws are
+    /// here, and ask for the rest: they may never be stepped to.
+    fn find_autos(&mut self) {
+        while let Some(found) = self.autos.found() {
+            self.found_auto(found);
+        }
+        let waiting: Vec<PathBuf> = self.edits.iter().filter(|(_, editing)| editing.waiting()).map(|(path, _)| path.clone()).collect();
+        for path in waiting {
+            let decoded = self.edits.get(&path).is_some_and(|editing| editing.info.is_some());
+            match self.renderer.source(&path).filter(|_| decoded) {
+                Some(source) => self.apply_pending(&path, &source),
+                None => {
+                    let profile = self.edits.get(&path).map_or(Profile::Camera, |editing| Profile::of(&editing.settings));
+                    self.autos.ask(&path, (profile, self.process_of(&path)));
+                }
+            }
+        }
+    }
+
+    /// A raw decoded for what Auto Sync is waiting to set on it.
+    fn found_auto(&mut self, (path, loaded): Found) {
+        match loaded {
+            Ok(loaded) => {
+                if self.edits.contains_key(&path) {
+                    self.decoded(&path, Arc::new(loaded.info), Arc::new(loaded.camera));
+                    self.apply_pending(&path, &Arc::new(loaded.image));
+                }
+            }
+            Err(error) => {
+                if let Some(editing) = self.edits.get_mut(&path) {
+                    editing.take_waiting();
+                }
+                self.message = Some((format!("Couldn't set Auto on {}: {error}", file_name(&path)), true));
+            }
+        }
+    }
+
+    /// Wait for what Auto Sync is waiting to set: it's held nowhere but
+    /// here, so it's done before a shoot is closed or OmaLux quits.
+    fn finish_autos(&mut self) {
+        loop {
+            self.find_autos();
+            match self.autos.wait() {
+                Some(found) => self.found_auto(found),
+                None => return,
+            }
         }
     }
 
@@ -838,6 +1132,9 @@ impl App {
                 edit::set_control(settings, info, spec.id, crate::slider::nudged(&spec, value, steps));
             })
         });
+        if spec.id.starts_with("optics.") {
+            self.refresh_upright();
+        }
     }
 
     /// Set `what` on the current frame from the frame itself, as one step.
@@ -846,10 +1143,14 @@ impl App {
         let Some(source) = self.renderer.source(&path) else { return };
         let camera = self.edits.get(&path).map(|editing| editing.camera.clone()).unwrap_or_default();
         let (mut found, mut changed, started) = (true, false, std::time::Instant::now());
-        self.edit(|history, info| {
-            changed = history.set(|settings| found = auto::apply(settings, info, &camera, &source, what));
-            changed
-        });
+        // Auto Sync sets it on each frame for itself.
+        self.edit_with(
+            |history, info| {
+                changed = history.set(|settings| found = auto::apply(settings, info, &camera, &source, what));
+                changed
+            },
+            &[what],
+        );
         log::debug!("{what:?} in {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
         // A press that changes nothing says why.
         let text = match what {
@@ -886,6 +1187,7 @@ impl App {
         }
         if stopped && editing.edit(|history, _| history.commit()) {
             self.save(&path);
+            self.synced(&[]);
         }
     }
 
@@ -915,6 +1217,68 @@ impl App {
         self.dragged(change, out.stopped);
     }
 
+    /// Open Guided Upright's tool, which sets the frame's Upright to
+    /// Guided, or put it away.
+    fn guided_tool(&mut self, open: bool) {
+        if !open || self.shoot.is_none() {
+            self.guided = None;
+            return;
+        }
+        // What Esc goes back to is the frame before the tool set Guided.
+        let mut tool = crate::guided::Tool::default();
+        if let Some(shoot) = &self.shoot
+            && let Some(editing) = self.edits.get(&shoot.frame().path)
+        {
+            tool.on(&shoot.frame().path, editing.history.settings());
+        }
+        self.guided = Some(tool);
+        (self.crop, self.spot, self.selector, self.compare, self.before) = (None, None, false, None, false);
+        self.edit(|history, _| history.set(|settings| settings.geometry.upright = lightcraft_develop::Upright::Guided));
+    }
+
+    /// Set the current frame's Upright to `mode`, found on its source, as
+    /// one step. Guided opens its tool.
+    fn upright(&mut self, mode: lightcraft_develop::Upright) {
+        if mode == lightcraft_develop::Upright::Guided {
+            return self.guided_tool(true);
+        }
+        self.guided = None;
+        let Some(source) = self.shoot.as_ref().and_then(|shoot| self.renderer.source(&shoot.frame().path)) else { return };
+        let started = std::time::Instant::now();
+        self.edit(|history, info| history.set(|settings| edit::upright(settings, info, &source, mode)));
+        log::debug!("Upright {mode:?} in {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
+    }
+
+    /// An automatic Upright on the current frame found again, after the
+    /// lens corrections it reads the frame through have changed: part of
+    /// the change, not a step of its own.
+    fn refresh_upright(&mut self) {
+        let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
+        let Some(source) = self.renderer.source(&path) else { return };
+        let Some(editing) = self.edits.get_mut(&path) else { return };
+        let Some(info) = editing.info.clone() else { return };
+        if editing.history.amend(|settings| edit::refresh_upright(settings, &info, &source)) {
+            editing.stepped();
+            self.save(&path);
+        }
+    }
+
+    /// An automatic Upright pasted onto a frame before its raw was
+    /// decoded, found on it now it is: no step, as the paste was the step.
+    fn fill_upright(&mut self, path: &Path) {
+        let Some(source) = self.renderer.source(path) else { return };
+        let Some(editing) = self.edits.get_mut(path) else { return };
+        let geometry = &editing.history.settings().geometry;
+        if !edit::upright_is_auto(geometry.upright) || geometry.upright_transform.is_some() || self.unreadable.contains(path) {
+            return;
+        }
+        let Some(info) = editing.info.clone() else { return };
+        if editing.history.amend(|settings| edit::refresh_upright(settings, &info, &source)) {
+            editing.stepped();
+            self.save(path);
+        }
+    }
+
     /// What was done in the develop panel.
     fn panel(&mut self, out: PanelOut) {
         if let Some((groups, on)) = out.switch {
@@ -926,17 +1290,28 @@ impl App {
         if let Some(profile) = out.profile {
             self.edit(|history, _| history.set(|settings| profile.set(settings)));
         }
-        if out.as_shot {
-            self.edit(|history, info| history.set(|settings| edit::as_shot(settings, info)));
+        match out.wb {
+            Some(lightcraft_develop::WbMode::AsShot) => self.edit(|history, info| history.set(|settings| edit::as_shot(settings, info))),
+            Some(lightcraft_develop::WbMode::Auto) => self.auto(Auto::WhiteBalance),
+            Some(preset) => self.edit(|history, info| history.set(|settings| _ = edit::preset_white_balance(settings, info, preset))),
+            None => {}
         }
         if let Some(what) = out.auto {
             self.auto(what);
         }
         if let Some(on) = out.remove_ca {
             self.edit(|history, _| history.set(|settings| settings.optics.remove_ca = on));
+            self.refresh_upright();
         }
         if let Some(on) = out.lens_profile {
             self.edit(|history, _| history.set(|settings| settings.optics.lens_profile = on));
+            self.refresh_upright();
+        }
+        if let Some(mode) = out.upright {
+            self.upright(mode);
+        }
+        if let Some(on) = out.constrain_crop {
+            self.edit(|history, _| history.set(|settings| settings.geometry.constrain_crop = on));
         }
         let Some((index, slid)) = out.slider else { return };
         let Some(spec) = develop::sliders().nth(index) else { return };
@@ -949,6 +1324,9 @@ impl App {
         self.slide(slid, |settings, info, value| {
             edit::set_control(settings, info, spec.id, value);
         });
+        if spec.id.starts_with("optics.") && !self.dragging && (slid.value.is_some() || slid.drag_stopped) {
+            self.refresh_upright();
+        }
     }
 
     /// What was done in the crop tool's panel.
@@ -1002,6 +1380,158 @@ impl App {
         }
     }
 
+    /// What was done to the spots on the frame, with the mouse.
+    fn spot_gesture(&mut self, out: crate::spot::Out) {
+        if let Some(at) = out.added {
+            let size = self.spot.as_ref().map_or(omalux_engine::dust::SIZE, |tool| tool.size);
+            self.edit(|history, _| history.set(|settings| settings.spots.push(omalux_engine::dust::heal(at, size))));
+        }
+        let change = out.moved.map(|(index, to)| {
+            move |settings: &mut DevelopSettings, _: &SourceInfo| {
+                if let Some(at) = settings.spots.get_mut(index).and_then(|spot| spot.points.first_mut()) {
+                    *at = to;
+                }
+            }
+        });
+        self.dragged(change, out.stopped);
+    }
+
+    /// What was done in Spot Removal's panel.
+    fn spot_panel(&mut self, out: crate::spot::PanelOut) {
+        let held = self.spot.as_ref().and_then(|tool| tool.held);
+        let current_spots = self.shoot.as_ref().and_then(|shoot| self.edits.get(&shoot.frame().path)).map_or(0, |e| e.history.settings().spots.len());
+        match held.filter(|i| *i < current_spots) {
+            Some(i) => {
+                for (slid, field) in [(out.size, 0), (out.feather, 1), (out.opacity, 2)] {
+                    if slid != SliderOut::default() {
+                        self.slide(slid, move |settings, _, value| {
+                            if let Some(spot) = settings.spots.get_mut(i) {
+                                match field {
+                                    0 => spot.size = value.clamp(omalux_engine::dust::SIZES.0, omalux_engine::dust::SIZES.1),
+                                    1 => spot.feather = value,
+                                    _ => spot.opacity = value,
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            // With none held, Size is the next spot's.
+            None => {
+                if let (Some(value), Some(tool)) = (out.size.value, &mut self.spot) {
+                    tool.size = value.clamp(omalux_engine::dust::SIZES.0, omalux_engine::dust::SIZES.1);
+                }
+            }
+        }
+        if out.find {
+            self.find_dust();
+        }
+        if out.clear {
+            self.edit(|history, _| history.set(|settings| settings.spots.clear()));
+            if let Some(tool) = &mut self.spot {
+                tool.held = None;
+            }
+        }
+        if out.done {
+            self.spot = None;
+        }
+    }
+
+    /// Find Dust: a heal circle on each speck found on the current frame,
+    /// as one step.
+    fn find_dust(&mut self) {
+        let Some(path) = self.shoot.as_ref().map(|shoot| shoot.frame().path.clone()) else { return };
+        let Some(source) = self.renderer.source(&path) else { return };
+        let mut found = 0;
+        self.edit(|history, _| {
+            let settings = history.settings();
+            let spots = omalux_engine::dust::find(&source, settings.orientation, crate::spot::SENSITIVITY, &settings.spots);
+            found = spots.len();
+            history.set(|settings| settings.spots.extend(spots))
+        });
+        let text = match found {
+            0 => "Found no dust".to_owned(),
+            1 => "Found 1 speck of dust".to_owned(),
+            n => format!("Found {n} specks of dust"),
+        };
+        self.message = Some((text, false));
+    }
+
+    /// The keys that are Spot Removal's while it's open, Lightroom's: `[`
+    /// and `]` size the held spot (or the next), Delete takes the held one
+    /// (or else the last) away, A is Visualize Spots, Return puts the tool
+    /// away and Esc puts it away with the spots as they were.
+    fn spot_keys(&mut self, ctx: &egui::Context) {
+        let pressed = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+        if pressed(egui::Key::A)
+            && let Some(tool) = &mut self.spot
+        {
+            tool.toggle_visualize();
+        }
+        for (key, by) in [(egui::Key::OpenBracket, 1.0 / crate::spot::STEP), (egui::Key::CloseBracket, crate::spot::STEP)] {
+            if !pressed(key) {
+                continue;
+            }
+            let held = self.spot.as_ref().and_then(|tool| tool.held);
+            let (min, max) = omalux_engine::dust::SIZES;
+            let mut sized = false;
+            if let Some(i) = held {
+                self.edit(|history, _| {
+                    if i >= history.settings().spots.len() {
+                        return false;
+                    }
+                    sized = true;
+                    history.set(|settings| settings.spots[i].size = (settings.spots[i].size * by).clamp(min, max))
+                });
+            }
+            if !sized && let Some(tool) = &mut self.spot {
+                tool.size = (tool.size * by).clamp(min, max);
+            }
+        }
+        if pressed(egui::Key::Delete) || pressed(egui::Key::Backspace) {
+            let held = self.spot.as_mut().and_then(|tool| tool.held.take());
+            self.edit(|history, _| {
+                let count = history.settings().spots.len();
+                let Some(index) = held.filter(|i| *i < count).or(count.checked_sub(1)) else { return false };
+                history.set(|settings| _ = settings.spots.remove(index))
+            });
+        }
+        if pressed(egui::Key::Enter) {
+            self.spot = None;
+        }
+        if pressed(egui::Key::Escape) {
+            let was = self.shoot.as_ref().zip(self.spot.take()).and_then(|(shoot, tool)| tool.was(&shoot.frame().path));
+            if let Some(spots) = was {
+                self.edit(|history, _| history.set(|settings| settings.spots = spots));
+            }
+        }
+    }
+
+    /// The keys that are Guided Upright's tool's while it's open: Delete
+    /// takes the line held, or else the last, away; Return puts the tool
+    /// away, and Esc puts it away with the lines as they were when the
+    /// tool came to the frame.
+    fn guided_keys(&mut self, ctx: &egui::Context) {
+        let pressed = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+        if pressed(egui::Key::Delete) || pressed(egui::Key::Backspace) {
+            let held = self.guided.as_mut().and_then(|tool| tool.held.take());
+            self.edit(|history, _| {
+                let count = history.settings().geometry.guides.len();
+                let Some(index) = held.filter(|i| *i < count).or(count.checked_sub(1)) else { return false };
+                history.set(|settings| _ = settings.geometry.guides.remove(index))
+            });
+        }
+        if pressed(egui::Key::Enter) {
+            self.guided = None;
+        }
+        if pressed(egui::Key::Escape) {
+            let was = self.shoot.as_ref().zip(self.guided.take()).and_then(|(shoot, tool)| tool.was(&shoot.frame().path));
+            if let Some(geometry) = was {
+                self.edit(|history, _| history.set(|settings| settings.geometry = geometry));
+            }
+        }
+    }
+
     /// The script's next command, once everything wanted has been
     /// developed: so a script sees what its last command led to, and
     /// `Next,Zoom,Quit` on real raws renders each step before the next.
@@ -1035,12 +1565,22 @@ impl App {
         }
         self.finish_picking();
         self.develop(ctx);
+        self.find_autos();
+        if let Some((frames, edit)) = self.export_next.take() {
+            self.export_frames(frames, edit, ctx);
+        }
         self.finish_exporting();
         self.disk_problems();
         if !ctx.egui_wants_keyboard_input() && self.choosing.is_none() {
             // The crop tool's own keys first: its X isn't a reject.
             if self.crop.is_some() && !self.legend {
                 self.crop_keys(ctx);
+            }
+            if self.guided.is_some() && !self.legend {
+                self.guided_keys(ctx);
+            }
+            if self.spot.is_some() && !self.legend {
+                self.spot_keys(ctx);
             }
             // Under the legend, only its own key, to put it away.
             for command in Command::pressed(ctx, &mut self.v_down) {
@@ -1065,6 +1605,12 @@ impl App {
             if let (Some(tool), Some(editing)) = (&mut self.crop, self.edits.get(&shoot.frame().path)) {
                 tool.on(&shoot.frame().path, editing.history.settings());
             }
+            if let (Some(tool), Some(editing)) = (&mut self.guided, self.edits.get(&shoot.frame().path)) {
+                tool.on(&shoot.frame().path, editing.history.settings());
+            }
+            if let (Some(tool), Some(editing)) = (&mut self.spot, self.edits.get(&shoot.frame().path)) {
+                tool.on(&shoot.frame().path, editing.history.settings());
+            }
         }
         let title = match &self.shoot {
             Some(shoot) => format!("{} — OmaLux", file_name(shoot.dir())),
@@ -1080,29 +1626,38 @@ impl App {
     /// take in what's been finished.
     fn develop(&mut self, ctx: &egui::Context) {
         let wanted = self.wanted();
-        let zoom = self.loupe.zoom().filter(|_| self.crop.is_none());
+        let zoom = self.loupe.zoom().filter(|_| self.crop.is_none() && self.guided.is_none() && self.spot.is_none());
         self.loupe.retain(|path| wanted.iter().any(|w| w.path == path));
-        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom });
+        self.loupe.set_compare(self.compare);
+        let compare = self.compare.is_some();
+        let spots = self.spot.as_ref().and_then(|tool| tool.visualize);
+        self.renderer.want(wanted, View { size: self.loupe.size(), dragging: self.dragging, clipping: self.clipping, zoom, compare, spots });
         for news in self.loupe.take(ctx, self.renderer.done()) {
             match news {
                 News::Decoded(path, info, camera) => {
-                    // Its edit starts from what its sidecar held, or as a fresh raw.
-                    let fresh = look::fresh(info.as_shot_temp, info.as_shot_tint);
-                    let saved = self.saved.remove(&path).flatten().map(|settings| (*settings).clone());
-                    match self.edits.get_mut(&path) {
-                        // Pasted onto before it was decoded.
-                        Some(editing) if editing.info.is_none() => {
-                            editing.history.decoded(fresh);
-                            (editing.info, editing.camera) = (Some(info), camera);
-                            editing.stepped();
-                        }
-                        // Decoded again, for another profile's look.
-                        Some(editing) => (editing.info, editing.camera) = (Some(info), camera),
-                        None => _ = self.edits.insert(path, Editing::new(History::new(fresh, saved), Some((info, camera)))),
-                    }
+                    self.decoded(&path, info, camera);
+                    self.fill_upright(&path);
                 }
                 News::Failed(path, error) => self.message = Some((format!("Couldn't develop {}: {error}", file_name(&path)), true)),
             }
+        }
+    }
+
+    /// A frame's raw has been decoded: its edit starts from what its
+    /// sidecar held, or as a fresh raw.
+    fn decoded(&mut self, path: &Path, info: Arc<SourceInfo>, camera: Arc<Camera>) {
+        let fresh = look::fresh(info.as_shot_temp, info.as_shot_tint);
+        let saved = self.saved.remove(path).flatten().map(|settings| (*settings).clone());
+        match self.edits.get_mut(path) {
+            // Pasted onto before it was decoded.
+            Some(editing) if editing.info.is_none() => {
+                editing.history.decoded(fresh);
+                (editing.info, editing.camera) = (Some(info), camera);
+                editing.stepped();
+            }
+            // Decoded again, for another profile's look.
+            Some(editing) => (editing.info, editing.camera) = (Some(info), camera),
+            None => _ = self.edits.insert(path.to_path_buf(), Editing::new(History::new(fresh, saved), Some((info, camera)))),
         }
     }
 
@@ -1139,6 +1694,24 @@ impl App {
             && let Some(settings) = current.settings.as_mut().filter(|settings| settings.crop != Default::default())
         {
             Arc::make_mut(settings).crop = Default::default();
+        }
+        // Spot Removal's spots are put on the frame before its lens
+        // corrections, crop and transform.
+        if self.spot.is_some()
+            && let Some(current) = wanted.first_mut()
+            && let Some(settings) = current.settings.as_mut()
+        {
+            let settings = Arc::make_mut(settings);
+            (settings.crop, settings.geometry, settings.optics) = (Default::default(), Default::default(), Default::default());
+        }
+        // Guided Upright's lines are drawn on the frame through its lens
+        // corrections alone.
+        if self.guided.is_some()
+            && let Some(current) = wanted.first_mut()
+            && let Some(settings) = current.settings.as_mut()
+        {
+            let settings = Arc::make_mut(settings);
+            (settings.crop, settings.geometry) = (Default::default(), Default::default());
         }
         wanted
     }
@@ -1183,12 +1756,14 @@ impl App {
         let dims = self.dims();
         let mut picked = None;
         let mut cropped = None;
+        let mut guided = None;
+        let mut spotted = None;
         let mut clicked = None;
         let context = self.menu_context();
         let mut chosen = None;
         egui::CentralPanel::no_frame().frame(pasteboard).show(ui, |ui| match &self.shoot {
             Some(shoot) => {
-                let mouse = if self.crop.is_some() {
+                let mouse = if self.crop.is_some() || self.guided.is_some() || self.spot.is_some() {
                     Mouse::Tool
                 } else if self.selector {
                     Mouse::Pick
@@ -1206,8 +1781,23 @@ impl App {
                     let frame = crate::crop::Frame { area: self.loupe.area(), whole: self.loupe.whole(path, settings.orientation), dims };
                     cropped = Some(tool.show(ui, &self.theme, frame, settings, self.crop_locked));
                 }
+                if let (Some(tool), Some(editing), Some(dims)) = (&mut self.guided, self.edits.get(path), dims) {
+                    let settings = editing.history.settings();
+                    let whole = self.loupe.untransformed(path, settings.orientation);
+                    guided = tool.show(ui, &self.theme, self.loupe.area(), whole, dims, &settings.geometry.guides).added;
+                }
+                if let (Some(tool), Some(editing), Some(dims)) = (&mut self.spot, self.edits.get(path), dims) {
+                    let settings = editing.history.settings();
+                    let whole = self.loupe.bare(path, settings.orientation);
+                    spotted = Some(tool.show(ui, &self.theme, self.loupe.area(), whole, dims, &settings.spots));
+                }
+                let mut corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);
+                if let Some(info) = self.info {
+                    let editing = self.edits.get(path);
+                    let lines = info_lines(info, &shoot.frame().name(), editing.map(|e| (&e.camera.capture, e.history.settings())));
+                    corner = info_overlay(ui, &self.theme, corner, &lines);
+                }
                 // What the loupe leaves out, so it isn't forgotten.
-                let corner = ui.max_rect().left_top() + egui::vec2(12.0, 8.0);
                 if self.before {
                     ui.painter().text(corner, Align2::LEFT_TOP, "Before", FontId::proportional(13.0), self.theme.foreground);
                 } else if !self.off.is_empty() {
@@ -1222,6 +1812,17 @@ impl App {
         }
         if let Some(cropped) = cropped {
             self.crop_gesture(cropped);
+        }
+        if let Some(out) = spotted {
+            self.spot_gesture(out);
+        }
+        if let Some(line) = guided {
+            self.edit(|history, _| {
+                history.set(|settings| {
+                    settings.geometry.upright = lightcraft_develop::Upright::Guided;
+                    settings.geometry.guides.push(line);
+                })
+            });
         }
         if let Some(dir) = clicked {
             self.open(dir);
@@ -1247,7 +1848,9 @@ impl App {
     /// The shown frames' thumbnails, under the loupe.
     fn filmstrip(&mut self, ui: &mut Ui) {
         let Some(shoot) = &mut self.shoot else { return };
-        let (clicked, response) = self.filmstrip.show(ui, shoot, &self.theme);
+        let (edits, exports, frames) = (&self.edits, &self.exports, shoot.frames());
+        let marks = |i: usize| frame_marks(&frames[i], edits.get(&frames[i].path), exports.get(&frames[i].path));
+        let (clicked, response) = self.filmstrip.show(ui, shoot, &self.theme, &marks);
         let was = shoot.current();
         match clicked {
             Some((clicked, Click::Toggle)) => shoot.toggle_selected(clicked),
@@ -1300,20 +1903,37 @@ impl App {
             self.clipping = !self.clipping;
         }
         ui.add_space(6.0);
+        // Auto Sync, while it's on, as Lightroom's switch on its Sync button.
+        if self.auto_sync {
+            let selected = self.shoot.as_ref().map_or(0, |shoot| shoot.selection().len());
+            let text = if selected > 1 { format!("Auto Sync: {selected} frames") } else { "Auto Sync: select frames to sync".to_owned() };
+            let tip = hotkeys::current().command(Command::AutoSync).map_or_else(|| "Turn Auto Sync off".to_owned(), |s| format!("Turn Auto Sync off ({})", format_shortcut(&s)));
+            let label = egui::Label::new(RichText::new(text).color(self.theme.accent)).sense(egui::Sense::click());
+            if ui.add(label).on_hover_text(tip).clicked() {
+                self.auto_sync = false;
+            }
+            ui.add_space(4.0);
+        }
         // Not until the frame's raw has been decoded: the sliders are read against it.
         let editing = self.shoot.as_ref().and_then(|shoot| self.edits.get(&shoot.frame().path));
         let Some(editing) = editing.filter(|editing| editing.info.is_some()) else { return };
         let (settings, fresh) = (editing.history.settings(), editing.history.fresh());
         let dims = self.dims().filter(|_| self.crop.is_some());
         let scroll = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
-        let (cropped, out) = scroll
+        let mut spot = self.spot.take();
+        let (cropped, spotted, out) = scroll
             .show(ui, |ui| {
                 let cropped = dims.map(|dims| crop_panel::show(ui, &self.theme, settings, dims, self.crop_locked));
-                (cropped, develop::show(ui, &self.theme, settings, fresh, self.selected, &editing.camera, &self.off))
+                let spotted = spot.as_mut().map(|tool| crate::spot::panel(ui, &self.theme, tool, &settings.spots));
+                (cropped, spotted, develop::show(ui, &self.theme, settings, fresh, self.selected, &editing.camera, &self.off))
             })
             .inner;
+        self.spot = spot;
         if let Some(cropped) = cropped {
             self.crop_panel(cropped);
+        }
+        if let Some(spotted) = spotted {
+            self.spot_panel(spotted);
         }
         self.panel(out);
     }
@@ -1408,6 +2028,52 @@ fn status(shoot: &Shoot) -> String {
     format!("{}   {mark}{place} / {of}{selected}", shoot.frame().name())
 }
 
+/// What a frame's thumbnail says of its edit and its export: from its
+/// edit this session where it has one, its export this session where it
+/// was exported, and else what its sidecar held when the shoot was opened.
+fn frame_marks(frame: &omalux_engine::shoot::Frame, editing: Option<&Editing>, exported: Option<&sidecar::Exported>) -> crate::filmstrip::Marks {
+    let key = editing.map_or_else(|| frame.edit_key.clone().unwrap_or_else(|| sidecar::export_key(None)), |editing| editing.key.clone());
+    let exported = exported.or(frame.exported.as_ref());
+    crate::filmstrip::Marks { edited: key != sidecar::export_key(None), exported: exported.map(|exported| exported.settings == key) }
+}
+
+/// What an info overlay says of a frame: its name first, then what's
+/// known of the rest. `shot` is how it was shot and its settings, once its
+/// raw has been decoded.
+fn info_lines(info: Info, name: &str, shot: Option<(&look::Capture, &DevelopSettings)>) -> Vec<String> {
+    let rest = shot.map_or_else(Vec::new, |(capture, settings)| match info {
+        Info::One => [capture.time.clone(), capture.cropped(settings)].into_iter().flatten().collect(),
+        Info::Two => [capture.exposure(), capture.optics()].into_iter().flatten().collect(),
+    });
+    std::iter::once(name.to_owned()).chain(rest).collect()
+}
+
+/// The info overlay's lines at the loupe's corner, the first larger, on a
+/// plate so they read over any frame. Where what goes under it starts.
+fn info_overlay(ui: &Ui, theme: &Theme, corner: egui::Pos2, lines: &[String]) -> egui::Pos2 {
+    let painter = ui.painter();
+    let galleys: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let size = if i == 0 { 15.0 } else { 12.5 };
+            let colour = if i == 0 { theme.foreground } else { theme.dark_foreground };
+            painter.layout_no_wrap(line.clone(), FontId::proportional(size), colour)
+        })
+        .collect();
+    let width = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max);
+    let height: f32 = galleys.iter().map(|g| g.size().y + 2.0).sum();
+    let plate = egui::Rect::from_min_size(corner - egui::vec2(6.0, 4.0), egui::vec2(width + 12.0, height + 6.0));
+    painter.rect_filled(plate, 4.0, theme.dark_background.gamma_multiply(0.8));
+    let mut at = corner;
+    for galley in galleys {
+        let h = galley.size().y;
+        painter.galley(at, galley, theme.foreground);
+        at.y += h + 2.0;
+    }
+    egui::pos2(corner.x, plate.bottom() + 6.0)
+}
+
 /// How a paste went.
 #[derive(Default)]
 struct Pasted {
@@ -1496,6 +2162,8 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         self.remember_place();
+        self.finish_autos();
+        self.stop_exporting();
         self.disk.finish();
     }
 }
@@ -1527,9 +2195,10 @@ mod tests {
             let (_tx, rx) = channel();
             let ctx = egui::Context::default();
             let renderer = Renderer::new(crate::render::tests::decoder(), false, || {});
+            let autos = Autos::new(crate::render::tests::decoder(), || {});
             let wake = ctx.clone();
             let disk = Disk::new(move || wake.request_repaint());
-            let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect(), Workers { renderer, disk }, paths);
+            let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect(), Workers { renderer, autos, disk }, paths);
             Self { ctx, app, time: 0.0, screen: egui::vec2(800.0, 600.0) }
         }
 
@@ -1558,9 +2227,9 @@ mod tests {
                 // when a frame leaves the renderer with nothing to do and
                 // the next has taken in what was done.
                 self.frame(vec![]);
-                if !self.app.renderer.busy() {
+                if !self.app.renderer.busy() && !self.app.autos.busy() {
                     self.frame(vec![]);
-                    if !self.app.renderer.busy() {
+                    if !self.app.renderer.busy() && !self.app.autos.busy() {
                         return;
                     }
                 }
@@ -2808,6 +3477,71 @@ mod tests {
         let target = folder.0.join("omalux/DSC00001.tif");
         assert!(target.exists(), "TIFF was not exported");
         assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exported 1 of 1 to omalux", false)));
+
+        // Quitting before the window has heard of a TIFF: it's still recorded.
+        std::fs::remove_file(&target).unwrap();
+        h.app.exports.clear();
+        h.app.export_frames(vec![raw_path.clone()], false, &h.ctx.clone());
+        while !target.exists() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(60), "export timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        eframe::App::on_exit(&mut h.app);
+        let record = sidecar::exported(&sidecar::read(&raw_path).unwrap().unwrap()).unwrap();
+        assert_eq!(record.map(|record| record.file), Some("DSC00001.tif".to_owned()));
+    }
+
+    #[test]
+    fn an_export_is_kept_in_the_sidecar_marked_in_the_filmstrip_and_done_again_once_edited() {
+        let dir = std::env::var_os("LIGHTCRAFT_CORPUS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/lightcraft/corpus"))
+            .join("raw");
+        let Ok(bytes) = std::fs::read(dir.join("arw-sony-a7m3-compressed.arw")) else {
+            eprintln!("skip: CC0 corpus raws absent");
+            return;
+        };
+        let folder = Folder::new("export-again", &[]);
+        let raw_path = folder.0.join("DSC00001.ARW");
+        std::fs::write(&raw_path, &bytes).unwrap();
+        sidecar::update(&raw_path, |xmp| sidecar::with_rating(xmp, 1)).unwrap();
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let marks = |h: &Harness| {
+            let shoot = h.app.shoot.as_ref().unwrap();
+            frame_marks(shoot.frame(), h.app.edits.get(&raw_path), h.app.exports.get(&raw_path))
+        };
+        assert_eq!(marks(&h), crate::filmstrip::Marks { edited: false, exported: None });
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(marks(&h), crate::filmstrip::Marks { edited: true, exported: None });
+        let export = |h: &mut Harness| {
+            h.press(Modifiers { shift: true, ..Modifiers::COMMAND }, Key::E);
+            let started = std::time::Instant::now();
+            while h.app.exporting.is_some() {
+                assert!(started.elapsed() < std::time::Duration::from_secs(60), "export timed out");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                h.frame(vec![]);
+            }
+            h.app.disk.flush();
+            h.app.message.clone().map(|(text, _)| text)
+        };
+        assert_eq!(export(&mut h).as_deref(), Some("Exported 1 of 1 to omalux"));
+        assert_eq!(marks(&h).exported, Some(true));
+        let xmp = sidecar::read(&raw_path).unwrap().unwrap();
+        assert_eq!(sidecar::exported(&xmp).unwrap().map(|e| e.file), Some("DSC00001.tif".to_owned()));
+        assert!(sidecar::edit(&xmp).unwrap().is_some(), "the edit is kept beside it");
+        // Up to date: nothing to do.
+        assert_eq!(export(&mut h).as_deref(), Some("Exported 0 of 1 to omalux; 1 was there already"));
+        // Edited since: marked, and exported again over the same TIFF, which nothing has saved into.
+        h.press(Modifiers::NONE, Key::Equals);
+        assert_eq!(marks(&h).exported, Some(false));
+        assert_eq!(export(&mut h).as_deref(), Some("Exported 1 of 1 to omalux"));
+        assert_eq!(marks(&h).exported, Some(true));
+        assert!(!folder.0.join("omalux/DSC00001-2.tif").exists());
+        // Opened again, the marks come from the sidecar.
+        h.app.open(folder.0.clone());
+        assert_eq!(marks(&h), crate::filmstrip::Marks { edited: true, exported: Some(true) });
     }
 
     #[test]
@@ -3066,37 +3800,37 @@ mod tests {
         h.press(Modifiers::NONE, Key::Comma);
         assert_eq!(h.app.selected, 0);
 
-        // Step forward through Light (2..7), HDR (8..10), Presence (11..12), to Amount in Detail (13).
-        for _ in 0..13 {
+        // Step forward through Light (2..7), HDR (8..10), Presence (11..15), to Amount in Detail (16).
+        for _ in 0..16 {
             h.press(Modifiers::NONE, Key::Period);
         }
-        assert_eq!(h.app.selected, 13);
+        assert_eq!(h.app.selected, 16);
         assert_eq!(h.settings().detail.sharpen_amount, 40.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().detail.sharpen_amount, 41.0, "nudged Amount");
 
-        // Step forward to Luminance (index 17).
+        // Step forward to Luminance (index 20).
         for _ in 0..4 {
             h.press(Modifiers::NONE, Key::Period);
         }
-        assert_eq!(h.app.selected, 17);
+        assert_eq!(h.app.selected, 20);
         assert_eq!(h.settings().detail.nr_luminance, 0.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().detail.nr_luminance, 1.0, "nudged Luminance");
 
         // Step forward past the profile's Distortion and Vignetting to
-        // Purple Amount in Lens Corrections (index 21).
+        // Purple Amount in Lens Corrections (index 24).
         for _ in 0..4 {
             h.press(Modifiers::NONE, Key::Period);
         }
-        assert_eq!(h.app.selected, 21);
+        assert_eq!(h.app.selected, 24);
         assert_eq!(h.settings().optics.defringe_purple_amount, 0.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().optics.defringe_purple_amount, 1.0, "nudged Purple Amount");
 
         // Step back with comma.
         h.press(Modifiers::NONE, Key::Comma);
-        assert_eq!(h.app.selected, 20);
+        assert_eq!(h.app.selected, 23);
     }
 
     #[test]
@@ -3264,7 +3998,7 @@ mod tests {
         let specs: Vec<_> = develop::sliders().collect();
         let at = specs.iter().position(|spec| spec.id == "light.hdr").unwrap();
         let ids = |range: std::ops::RangeInclusive<usize>| specs[range].iter().map(|spec| spec.id).collect::<Vec<_>>();
-        assert_eq!(ids(at - 1..=at + 3), ["light.blacks", "light.hdr", "light.hdrHighlights", "light.hdrShadows", "color.vibrance"]);
+        assert_eq!(ids(at - 1..=at + 3), ["light.blacks", "light.hdr", "light.hdrHighlights", "light.hdrShadows", "effects.texture"]);
         h.app.selected = at;
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().light.hdr, 1.0);
@@ -3272,6 +4006,338 @@ mod tests {
         h.press(Modifiers::NONE, Key::Minus);
         h.press(Modifiers::NONE, Key::Minus);
         assert_eq!(h.settings().light.hdr, 0.0, "it stops at 0");
+    }
+
+    #[test]
+    fn y_alt_y_and_shift_y_are_lightrooms_before_after_views_with_one_zoom() {
+        let folder = Folder::new("compare", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let panes = |h: &mut Harness| {
+            h.frame(vec![]);
+            h.ctx.data(|d| d.get_temp::<[egui::Rect; 2]>(egui::Id::new("loupe panes")))
+        };
+        assert_eq!(panes(&mut h), None, "the loupe alone");
+        h.press(Modifiers::NONE, Key::Y);
+        h.settle();
+        let [before, after] = panes(&mut h).expect("side by side");
+        assert!(before.right() < after.left() && before.height() == after.height(), "{before:?} {after:?}");
+        let path = h.app.shoot.as_ref().unwrap().frame().path.clone();
+        assert!(h.app.loupe.shown(&path).is_some_and(|shown| shown.before.is_some()), "before is rendered");
+        assert_eq!(h.app.renderer.shared_view().size, ((after.width() * h.ctx.pixels_per_point()) as usize, (after.height() * h.ctx.pixels_per_point()) as usize), "each the size of its room");
+
+        h.press(Modifiers::ALT, Key::Y);
+        let [before, after] = panes(&mut h).expect("one above the other");
+        assert!(before.bottom() < after.top() && before.width() == after.width());
+        h.press(Modifiers::SHIFT, Key::Y);
+        let [before, after] = panes(&mut h).expect("split");
+        assert_eq!(before, after);
+
+        // One zoom for both: Z, and each gets its window at 100%.
+        h.press(Modifiers::NONE, Key::Y);
+        h.settle();
+        h.press(Modifiers::NONE, Key::Z);
+        h.frame(key_events(Modifiers::NONE, Key::Z, false));
+        h.settle();
+        let shown = h.app.loupe.shown(&path).unwrap();
+        let (after, before) = (shown.zoomed.as_ref().map(|z| z.key.window), shown.zoomed_before.as_ref().map(|z| z.key.window));
+        assert!(after.is_some() && after == before, "{after:?} {before:?}");
+
+        // Y again is the loupe; so are \, R and W.
+        h.press(Modifiers::NONE, Key::Y);
+        assert_eq!(panes(&mut h), None);
+        for key in [Key::Backslash, Key::R, Key::W] {
+            h.press(Modifiers::NONE, Key::Y);
+            assert!(panes(&mut h).is_some());
+            h.press(Modifiers::NONE, key);
+            assert_eq!(h.app.compare, None, "{key:?}");
+            assert!(!h.app.before, "{key:?} isn't Before as well");
+            (h.app.crop, h.app.selector) = (None, false);
+        }
+    }
+
+    #[test]
+    fn upright_is_a_step_found_on_the_frame_and_pasted_it_is_found_again() {
+        use lightcraft_develop::Upright;
+        let folder = Folder::new("upright", &[1, 1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 3000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().clone();
+        // Upright's button, not the slider of the same name below it.
+        let output = h.frame(vec![]);
+        let vertical = texts(&output).into_iter().find(|(text, _)| text == "Vertical").unwrap().1;
+        h.click(vertical.center());
+        assert_eq!(h.settings().geometry.upright, Upright::Vertical);
+        assert!(h.settings().geometry.upright_transform.is_some(), "found and kept");
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        let constrain = h.text("Constrain Crop");
+        h.click(constrain.center());
+        assert!(h.settings().geometry.constrain_crop);
+        h.press(Modifiers::COMMAND, Key::Z);
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh, "two steps");
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        assert_eq!(h.settings().geometry.upright, Upright::Vertical);
+
+        // Pasted onto a frame not decoded yet (past the neighbours
+        // prepared ahead): found once it is.
+        copy(&mut h);
+        let last = h.app.shoot.as_ref().unwrap().frames()[4].path.clone();
+        assert!(h.app.renderer.source(&last).is_none());
+        h.app.paste_onto(&h.app.clipboard.clone().unwrap(), std::slice::from_ref(&last));
+        assert_eq!(h.app.edits[&last].history.settings().geometry.upright_transform, None, "not this frame's yet");
+        h.press(Modifiers::NONE, Key::End);
+        h.settle();
+        assert_eq!(h.settings().geometry.upright, Upright::Vertical);
+        assert!(h.settings().geometry.upright_transform.is_some(), "found on its own frame");
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().geometry.upright, Upright::Off, "the paste was the one step");
+    }
+
+    #[test]
+    fn shift_t_draws_guided_uprights_lines_on_the_frame_and_esc_takes_them_back() {
+        use lightcraft_develop::Upright;
+        let folder = Folder::new("guided", &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().geometry.clone();
+        h.press(Modifiers::SHIFT, Key::T);
+        h.settle();
+        assert!(h.app.guided.is_some());
+        assert_eq!(h.settings().geometry.upright, Upright::Guided);
+        let frame = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("guided frame"))).expect("the frame is drawn");
+        let at = |u: f32, v: f32| frame.min + frame.size() * egui::vec2(u, v);
+        drag(&mut h, at(0.2, 0.1), at(0.25, 0.9), Modifiers::NONE);
+        drag(&mut h, at(0.8, 0.1), at(0.75, 0.9), Modifiers::NONE);
+        let guides = h.settings().geometry.guides.clone();
+        assert_eq!(guides.len(), 2);
+        assert!((guides[0].0.x - 0.2).abs() < 0.01 && (guides[0].1.y - 0.9).abs() < 0.01, "{guides:?}");
+        assert_eq!(h.saved().map(|s| s.geometry.guides.len()), Some(2));
+        // The frame shown is through its lens corrections alone.
+        let wanted = h.app.wanted();
+        assert_eq!(wanted[0].settings.as_ref().unwrap().geometry, Default::default());
+        // Delete takes the last away; Esc, all of what the tool did.
+        h.press(Modifiers::NONE, Key::Delete);
+        assert_eq!(h.settings().geometry.guides.len(), 1);
+        h.press(Modifiers::NONE, Key::Escape);
+        assert!(h.app.guided.is_none());
+        assert_eq!(h.settings().geometry, fresh);
+        // Return keeps them.
+        h.press(Modifiers::SHIFT, Key::T);
+        h.settle();
+        drag(&mut h, at(0.2, 0.1), at(0.25, 0.9), Modifiers::NONE);
+        h.press(Modifiers::NONE, Key::Enter);
+        assert!(h.app.guided.is_none());
+        assert_eq!(h.settings().geometry.guides.len(), 1);
+    }
+
+    #[test]
+    fn auto_sync_makes_a_change_on_every_selected_frame_as_one_step() {
+        use lightcraft_develop::WbMode;
+        let folder = Folder::new("auto-sync", &[1, 1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let paths: Vec<PathBuf> = h.app.shoot.as_ref().unwrap().frames().iter().map(|f| f.path.clone()).collect();
+        // Off, nothing but the current frame changes.
+        h.press(Modifiers::COMMAND, Key::A);
+        h.press(Modifiers::NONE, Key::Equals);
+        assert!(h.app.edits.get(&paths[1]).is_none_or(|e| e.history.settings().light.exposure == 0.0));
+        h.press(Modifiers::COMMAND, Key::Z);
+
+        let ctrl_alt_shift = Modifiers { alt: true, shift: true, ..Modifiers::COMMAND };
+        h.press(ctrl_alt_shift, Key::A);
+        assert!(h.app.auto_sync);
+        h.frame(vec![]);
+        assert!(h.text("Auto Sync: 5 frames").is_positive());
+        // A drag of Exposure: the value it ends at, on every selected frame, once.
+        let track = h.track("light.exposure");
+        drag(&mut h, track.center(), track.center() + egui::vec2(track.width() * 0.2, 0.0), Modifiers::NONE);
+        let exposure = h.settings().light.exposure;
+        assert!(exposure > 0.0);
+        for path in &paths {
+            assert_eq!(h.saved_of(&file_name(path)).map(|s| s.light.exposure), Some(exposure), "{path:?}");
+        }
+        // Undone from all of them at once, decoded or not.
+        h.press(Modifiers::COMMAND, Key::Z);
+        for path in &paths {
+            assert_eq!(h.app.edits[path].history.settings().light.exposure, 0.0, "{path:?}");
+        }
+        // Auto white balance: each frame's own, not the current frame's numbers;
+        // the frames not decoded yet get theirs once they are.
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::U);
+        for path in &paths {
+            assert_eq!(h.app.edits[path].history.settings().wb.mode, WbMode::Auto, "{path:?}");
+        }
+        assert!(!h.app.edits[&paths[4]].pending.is_empty(), "set once it's decoded");
+        h.press(Modifiers::NONE, Key::End);
+        h.settle();
+        assert!(h.app.edits[&paths[4]].pending.is_empty());
+        // As shot is each frame's own.
+        h.press(Modifiers::COMMAND, Key::A);
+        h.app.edit(|history, info| history.set(|settings| edit::as_shot(settings, info)));
+        for path in &paths {
+            let settings = h.app.edits[path].history.settings();
+            assert_eq!(settings.wb.mode, WbMode::AsShot, "{path:?}");
+        }
+    }
+
+    /// Five frames, all selected under Auto Sync, and Auto white balance
+    /// made on them, with the last frames' raws not decoded: its path.
+    fn auto_synced(name: &str) -> (Folder, Harness, PathBuf) {
+        let folder = Folder::new(name, &[1, 1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let last = h.app.shoot.as_ref().unwrap().frames()[4].path.clone();
+        h.press(Modifiers::COMMAND, Key::A);
+        h.press(Modifiers { alt: true, shift: true, ..Modifiers::COMMAND }, Key::A);
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::U);
+        assert!(h.app.edits[&last].waiting());
+        (folder, h, last)
+    }
+
+    #[test]
+    fn auto_syncs_autos_are_found_on_frames_never_stepped_to() {
+        let (_folder, mut h, last) = auto_synced("auto-sync-found");
+        h.settle();
+        assert!(!h.app.edits[&last].waiting());
+        assert!(h.app.edits[&last].info.is_some());
+    }
+
+    #[test]
+    fn an_undone_auto_sync_sets_nothing_and_made_again_it_does() {
+        use lightcraft_develop::WbMode;
+        let (_folder, mut h, last) = auto_synced("auto-sync-undo");
+        h.press(Modifiers::COMMAND, Key::Z);
+        h.settle();
+        assert_eq!(h.app.edits[&last].history.settings().wb.mode, WbMode::AsShot);
+        assert!(!h.app.edits[&last].waiting());
+
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        assert!(h.app.edits[&last].waiting());
+        h.settle();
+        assert!(!h.app.edits[&last].waiting());
+        assert_eq!(h.app.edits[&last].history.settings().wb.mode, WbMode::Auto);
+    }
+
+    #[test]
+    fn quitting_sets_what_auto_sync_was_waiting_to() {
+        let (_folder, mut h, last) = auto_synced("auto-sync-quit");
+        eframe::App::on_exit(&mut h.app);
+        assert!(!h.app.edits[&last].waiting());
+        assert_eq!(h.saved_of(&file_name(&last)).as_ref(), Some(h.app.edits[&last].history.settings()));
+    }
+
+    #[test]
+    fn an_export_waits_for_what_auto_sync_is_waiting_to_set() {
+        let (_folder, mut h, last) = auto_synced("auto-sync-export");
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::E);
+        assert!(h.app.exporting.is_none() && h.app.export_next.is_some());
+        h.settle();
+        assert!(!h.app.edits[&last].waiting());
+        assert!(h.app.export_next.is_none());
+    }
+
+    #[test]
+    fn q_puts_heal_circles_on_dust_and_esc_takes_them_back() {
+        use lightcraft_develop::SpotMode;
+        let folder = Folder::new("spots", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().clone();
+        h.press(Modifiers::NONE, Key::Q);
+        h.settle();
+        assert!(h.app.spot.is_some());
+        // Shown before its lens corrections, crop and transform, where spots are kept.
+        let wanted = h.app.wanted();
+        let shown = wanted[0].settings.as_ref().unwrap();
+        assert_eq!((shown.optics, shown.crop), (Default::default(), Default::default()));
+        let frame = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("spot frame"))).expect("the frame is drawn");
+        let at = |u: f32, v: f32| frame.min + frame.size() * egui::vec2(u, v);
+        h.click(at(0.25, 0.5));
+        let spots = h.settings().spots.clone();
+        assert_eq!(spots.len(), 1);
+        assert_eq!(spots[0].mode, SpotMode::Heal);
+        assert!((spots[0].points[0].x - 0.25).abs() < 0.01 && (spots[0].points[0].y - 0.5).abs() < 0.01, "{spots:?}");
+        assert_eq!(h.saved().map(|s| s.spots.len()), Some(1));
+        // ] makes the held one larger; a drag moves it, as one step.
+        h.press(Modifiers::NONE, Key::CloseBracket);
+        assert!(h.settings().spots[0].size > spots[0].size);
+        drag(&mut h, at(0.25, 0.5), at(0.6, 0.4), Modifiers::NONE);
+        let moved = h.settings().spots[0].points[0];
+        assert!((moved.x - 0.6).abs() < 0.01 && (moved.y - 0.4).abs() < 0.01, "{moved:?}");
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert!((h.settings().spots[0].points[0].x - 0.25).abs() < 0.01, "the drag was one step");
+        // A is Visualize Spots, rendered on the frame.
+        h.press(Modifiers::NONE, Key::A);
+        h.settle();
+        assert!(h.app.renderer.shared_view().spots.is_some());
+        // Find Dust on a frame with none says so.
+        h.app.find_dust();
+        assert_eq!(h.said(), "Found no dust");
+        // Esc: the spots as they were when the tool came to the frame.
+        h.click(at(0.75, 0.75));
+        assert_eq!(h.settings().spots.len(), 2);
+        h.press(Modifiers::NONE, Key::Escape);
+        assert!(h.app.spot.is_none());
+        assert_eq!(h.settings().spots, fresh.spots);
+        // Copied and pasted onto another frame, with the Spot Removal group.
+        h.press(Modifiers::NONE, Key::Q);
+        h.settle();
+        h.click(at(0.25, 0.5));
+        h.press(Modifiers::NONE, Key::Enter);
+        assert!(h.app.spot.is_none());
+        h.app.copy(&[Group::SpotRemoval]);
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.settle();
+        paste(&mut h, Modifiers::COMMAND);
+        assert_eq!(h.settings().spots.len(), 1);
+    }
+
+    #[test]
+    fn i_cycles_lightrooms_info_overlays_and_ctrl_i_shows_or_hides_the_last() {
+        let folder = Folder::new("info", &[1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let path = h.app.shoot.as_ref().unwrap().frame().path.clone();
+        let capture = look::Capture {
+            time: Some("2026-10-04 15:43:16".into()),
+            iso: Some(100),
+            shutter: Some(1.0 / 250.0),
+            aperture: Some(1.8),
+            focal: Some(85.0),
+            lens: Some("FE 85mm F1.8".into()),
+            size: Some((6000, 4000)),
+        };
+        h.app.edits.get_mut(&path).unwrap().camera = Arc::new(Camera { capture, ..Camera::default() });
+        let shown = |output: &egui::FullOutput| texts(output).into_iter().map(|(text, _)| text).collect::<Vec<_>>();
+        let has = |output: &egui::FullOutput, text: &str| shown(output).iter().any(|t| t == text);
+        let output = h.frame(vec![]);
+        assert!(!has(&output, "2026-10-04 15:43:16"), "none to begin with");
+        let output = h.press(Modifiers::NONE, Key::I);
+        let output = if has(&output, "6000 × 4000") { output } else { h.frame(vec![]) };
+        assert!(has(&output, "2026-10-04 15:43:16") && has(&output, "6000 × 4000"), "Info 1: {:?}", shown(&output));
+        h.press(Modifiers::NONE, Key::I);
+        let output = h.frame(vec![]);
+        assert!(has(&output, "1/250 sec at f/1.8, ISO 100") && has(&output, "FE 85mm F1.8 at 85 mm"), "Info 2: {:?}", shown(&output));
+        assert!(!has(&output, "6000 × 4000"));
+        h.press(Modifiers::NONE, Key::I);
+        let output = h.frame(vec![]);
+        assert!(!has(&output, "1/250 sec at f/1.8, ISO 100"), "and none");
+        h.press(Modifiers::COMMAND, Key::I);
+        let output = h.frame(vec![]);
+        assert!(has(&output, "1/250 sec at f/1.8, ISO 100"), "Ctrl+I shows the last one again");
+        h.press(Modifiers::COMMAND, Key::I);
+        let output = h.frame(vec![]);
+        assert!(!has(&output, "1/250 sec at f/1.8, ISO 100"), "and hides it");
     }
 
     #[test]
@@ -3284,15 +4350,47 @@ mod tests {
         h.settle();
 
         assert_eq!(h.settings().wb.mode, WbMode::AsShot);
-        // Initially state word is "As Shot", and to its left is "Auto".
-        let auto_btn = h.text("Auto");
+        // Initially state word is "As Shot", and to its left is "Auto"
+        // (the first: Upright has an Auto too).
+        let output = h.frame(vec![]);
+        let auto_btn = texts(&output).into_iter().find(|(text, _)| text == "Auto").unwrap().1;
         h.click(auto_btn.center());
         assert_eq!(h.settings().wb.mode, WbMode::Auto);
 
-        // State word is now "Auto", clicking it goes back to As Shot.
-        let auto_state = h.text("Auto");
+        // State word is now "Auto", a click on it is the WB menu, and As
+        // Shot in it goes back.
+        let auto_state = h.text("Auto ▾");
         h.click(auto_state.center());
+        let as_shot = h.text("As Shot");
+        h.click(as_shot.center());
         assert_eq!(h.settings().wb.mode, WbMode::AsShot);
+    }
+
+    #[test]
+    fn the_wb_menu_sets_a_preset_as_one_step_and_a_paste_keeps_it() {
+        use lightcraft_develop::WbMode;
+        let folder = Folder::new("wb-preset", &[1, 1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let fresh = h.settings().clone();
+        let menu = h.text("As Shot ▾");
+        h.click(menu.center());
+        let tungsten = h.text("Tungsten");
+        h.click(tungsten.center());
+        assert_eq!((h.settings().wb.mode, h.settings().wb.temp, h.settings().wb.tint), (WbMode::Tungsten, 2850.0, 0.0));
+        assert_eq!(h.saved().as_ref(), Some(h.settings()));
+        // Pasted as the preset, not as the frame's own as-shot white balance.
+        copy(&mut h);
+        h.press(Modifiers::NONE, Key::ArrowRight);
+        h.settle();
+        paste(&mut h, Modifiers::COMMAND);
+        assert_eq!((h.settings().wb.mode, h.settings().wb.temp), (WbMode::Tungsten, 2850.0));
+        h.press(Modifiers::NONE, Key::ArrowLeft);
+        h.settle();
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings(), &fresh, "one step to undo");
     }
 
     #[test]

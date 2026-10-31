@@ -68,7 +68,8 @@ afterwards in Omapix.
   - **Flat**: low contrast, all the highlight and shadow room there is.
     For frames that need the most latitude in Omapix.
 - **White balance:** As Shot, Auto, the eyedropper (click something
-  neutral), Temp and Tint.
+  neutral), Lightroom's presets (Daylight, Cloudy, Shade, Tungsten,
+  Fluorescent, Flash), Temp and Tint. Presets from M8.
 - **Light:** Exposure, Contrast, Highlights, Shadows, Whites, Blacks.
 - **HDR:** one slider that brightens the shadows and holds back the
   highlights locally, so more of what the raw holds is visible, without
@@ -79,7 +80,11 @@ afterwards in Omapix.
   Profile's shows the frame without that panel, and Before/After (`\`)
   without any. A look, never saved: touching one of the panel's sliders
   turns it back on, as in Lightroom.
-- **Presence:** Vibrance and Saturation.
+- **Presence:** Texture, Clarity, Dehaze, Vibrance and Saturation, as
+  Lightroom's Presence panel has them (the first three from M8). Dehaze
+  is here for outdoor haze, which is best taken out of linear,
+  scene-referred data. Texture and Clarity are here because Lightroom's
+  panel has them; they're the nearest of these to finishing work.
 - **Detail:**
   - **AI Denoise:** a button and a strength, run on the raw before
     demosaicing, as Lightroom's Denoise is.
@@ -91,6 +96,11 @@ afterwards in Omapix.
   highlights at f/1.8: an amount and a hue range for each, the range as
   two sliders (low and high) where Lightroom has one with two thumbs,
   which neither Lightcraft nor OmaLux has a widget for.
+- **Transform** (M8): Lightroom's panel. Upright (Auto, Guided, Level,
+  Vertical, Full), Vertical, Horizontal, Rotate, Aspect, Scale, Offset
+  and Constrain Crop, with Guided Upright's tool on Shift+T. Perspective
+  is geometry, so it's done here, in the same resample as the lens
+  correction and the crop, rather than resampled again in Omapix.
 - **Crop & Straighten** (R): aspect ratios, the crop rectangle, the
   straighten angle (and a line to draw along), 90° turns. As in
   Lightroom, the tool shows the frame whole with the crop over it, and
@@ -130,9 +140,14 @@ afterwards in Omapix.
   Lightroom, of the developed frame as it will be exported, with the
   clipping warnings (J).
 - **Before/after:** `\` toggles between the edit and the frame with
-  none.
+  none. Lightroom's views (M8): Y side by side, Alt+Y one above the
+  other, Shift+Y one frame split in half, with zoom and pan locked
+  between the two.
 - **Inspection:** 100% zoom (Z), on a full-resolution development of
   what's on screen.
+- **Info overlay** (I, M8): Lightroom's loupe info, cycling through file
+  name and capture time, the exposure (ISO, shutter, aperture, focal
+  length, lens), and off.
 - **Selecting** in the filmstrip: Ctrl+click, Shift+click, Shift+arrows,
   Ctrl+A and Ctrl+D, as Omacull has them. The selection is what a paste
   or an export reaches, so a plain step or click clears it, as in
@@ -143,7 +158,8 @@ afterwards in Omapix.
   - Ctrl+C copies every setting of the current frame.
   - Ctrl+Shift+C opens a checklist of the groups to copy (White Balance,
     Profile, Light, HDR, Presence, AI Denoise, Noise Reduction,
-    Sharpening, Lens Corrections, Crop: each arrives with its panel),
+    Sharpening, Lens Corrections, Crop, and from M8 and M9 Transform and
+    Spot Removal: each arrives with its panel),
     remembering the last choice.
     What's chosen at copy time is what's pasted; there is no second
     checklist at paste time. This is the opposite of darktable's
@@ -162,6 +178,10 @@ afterwards in Omapix.
     no group: they're the way up it is, which another frame doesn't
     want, as in Lightroom. A crop pasted onto a frame of another shape
     is brought inside it.
+  - **Auto Sync** (M9), Lightroom's: with a selection, a change to the
+    frame in front is made on every selected frame as it's made, as an
+    absolute value of the setting touched. White balance as shot and
+    each Auto stay each frame's own, as in a paste.
   - A paste is one step to undo however many frames it reached: Ctrl+Z
     on the frame it was made from, or on any frame it reached, takes it
     back from all of them, except those edited since, which keep their
@@ -180,6 +200,12 @@ afterwards in Omapix.
 - **Export:** 16-bit TIFF in Linear ProPhoto RGB with its ICC profile
   (what Michael exports from darktable today, and what Omapix opens), into
   a subfolder of the shoot, `omalux/` by default, set in `config.toml`.
+  A TIFF is never written over once Omapix has saved into it. From M9
+  the export is recorded in the sidecar (`omalux:exported`), the
+  filmstrip marks frames that are edited, exported, or edited since
+  their export, and an out-of-date frame is exported again: over its
+  TIFF if nothing has saved into it since, beside it as
+  `DSC01234-2.tif` if Omapix has.
 - **Undo and redo** per frame, and Ctrl+Shift+R resets a frame.
 
 ### Out (for now)
@@ -196,7 +222,10 @@ job:
   DCPs is in, for Adobe's Camera Standard: see "The look".)
 - Match Total Exposures across a set. Later.
 - Presets saved by name. Copy and paste covers the need for now.
-- Healing, liquify and anything else that changes pixels by hand: Omapix.
+- Healing, liquify and anything else that changes pixels by hand:
+  Omapix. The one exception (M9) is sensor
+  dust: heal circles that paste across a set, since dust is in the same
+  place on every frame.
 - Culling beyond marks: compare, survey, faces, signals are Omacull's.
   Omacull stays a separate tool so it stays fast.
 - A catalogue, collections, keywords, search across shoots.
@@ -216,6 +245,8 @@ Omapix's are.
 | Ctrl+L | The picks, or everything (Lightroom's Enable Filters) |
 | P X U 0–5 | Pick, reject, unmark, stars (0 unmarks) |
 | `\` | Before/after |
+| Y, Alt+Y, Shift+Y | Before/after side by side, one above the other, split (M8) |
+| I, Ctrl+I | Cycle the info overlay, show or hide it (M8) |
 | Z | 100% zoom (tap to toggle, hold for a look) |
 | , . | Select the previous or next slider |
 | = − (Shift for more) | Nudge the selected slider |
@@ -231,6 +262,8 @@ Omapix's are.
 | In the crop tool: X, A | Turn the crop on its side; lock its shape, or let it go |
 | In the crop tool: Return, Esc | Put the tool away; and with the crop as it was |
 | In the crop tool: Ctrl+drag | Straighten along a line |
+| Shift+T | Guided Upright (M8) |
+| Q | Spot Removal, for sensor dust (M9); in it A visualizes spots, `[` `]` size a spot, Delete takes it away |
 | Ctrl+[, Ctrl+] | Rotate left, rotate right |
 | Ctrl+Alt+R | Reset the crop |
 | J | Clipping warnings |
@@ -240,6 +273,7 @@ Omapix's are.
 | Ctrl+C, Ctrl+Shift+C | Copy all settings, choose what to copy |
 | Ctrl+V, Ctrl+Alt+V | Paste, paste from previous |
 | Ctrl+Shift+V | Paste onto the whole stack |
+| Ctrl+Alt+Shift+A | Auto Sync on or off (M9; Lightroom's key, to check) |
 | Ctrl+Z, Ctrl+Shift+Z | Undo, redo |
 | Ctrl+Shift+R | Reset the frame |
 | Ctrl+E | Export and edit in Omapix |

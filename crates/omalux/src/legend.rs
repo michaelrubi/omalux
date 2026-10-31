@@ -33,9 +33,9 @@ const SECTIONS: &[(&str, &[Command])] = &[
             Command::Redo,
         ],
     ),
-    ("Crop", &[Command::Crop, Command::RotateLeft, Command::RotateRight, Command::ResetCrop]),
-    ("Copy and Paste", &[Command::Copy, Command::CopyChoose, Command::Paste, Command::PastePrevious, Command::PasteStack]),
-    ("View", &[Command::BeforeAfter, Command::Clipping, Command::Zoom, Command::Shortcuts]),
+    ("Crop and Transform", &[Command::Crop, Command::RotateLeft, Command::RotateRight, Command::ResetCrop, Command::GuidedUpright, Command::SpotRemoval]),
+    ("Copy and Paste", &[Command::Copy, Command::CopyChoose, Command::Paste, Command::PastePrevious, Command::PasteStack, Command::AutoSync]),
+    ("View", &[Command::BeforeAfter, Command::CompareSideBySide, Command::CompareTopBottom, Command::CompareSplit, Command::Clipping, Command::Zoom, Command::InfoCycle, Command::InfoShow, Command::Shortcuts]),
     ("Folder", &[Command::Open, Command::Close, Command::Export, Command::ExportAndEdit, Command::Quit]),
 ];
 
@@ -94,22 +94,29 @@ fn sections(hotkeys: &Hotkeys) -> Vec<(&'static str, Vec<(&'static str, String)>
     commands.chain(others).collect()
 }
 
-/// `sections` cut into `columns` runs of about as many rows each, in order.
+/// `sections` cut into `columns` runs in order, the tallest as short as
+/// it can be (each section is its rows and two for its title and gap).
 fn split<T>(sections: &[(&str, Vec<T>)], columns: usize) -> Vec<std::ops::Range<usize>> {
-    let total: usize = sections.iter().map(|(_, rows)| rows.len() + 2).sum();
-    let mut runs = Vec::new();
-    let (mut start, mut filled) = (0, 0);
-    for (i, (_, rows)) in sections.iter().enumerate() {
-        // A new column before the section if most of it would be past
-        // this one's share.
-        let size = rows.len() + 2;
-        if i > start && runs.len() + 1 < columns && (2 * filled + size) * columns > 2 * total * (runs.len() + 1) {
-            runs.push(start..i);
-            start = i;
+    let sizes: Vec<usize> = sections.iter().map(|(_, rows)| rows.len() + 2).collect();
+    let height = |run: &std::ops::Range<usize>| sizes[run.clone()].iter().sum::<usize>();
+    // The best cut of sections[start..] into `columns` runs: there are
+    // only a dozen sections, so every cut is tried.
+    fn best(sizes: &[usize], start: usize, columns: usize, height: &dyn Fn(&std::ops::Range<usize>) -> usize) -> Vec<std::ops::Range<usize>> {
+        if columns <= 1 || start >= sizes.len() {
+            return std::iter::once(start..sizes.len()).collect();
         }
-        filled += size;
+        (start + 1..=sizes.len())
+            .map(|end| {
+                let mut runs: Vec<_> = std::iter::once(start..end).collect();
+                runs.extend(best(sizes, end, columns - 1, height));
+                runs
+            })
+            .min_by_key(|runs| runs.iter().map(height).max().unwrap_or(0))
+            .unwrap_or_else(|| std::iter::once(start..sizes.len()).collect())
     }
-    runs.push(start..sections.len());
+    let mut runs = best(&sizes, 0, columns, &height);
+    // A column left empty at the end still counts as one.
+    runs.resize_with(columns, || sizes.len()..sizes.len());
     runs
 }
 
@@ -167,9 +174,13 @@ mod tests {
             assert_eq!(runs.len(), columns);
             assert!(runs.windows(2).all(|w| w[0].end == w[1].start) && runs[0].start == 0 && runs[columns - 1].end == sections.len());
         }
-        let rows = |run: std::ops::Range<usize>| sections[run].iter().map(|(_, rows)| rows.len() + 2).sum::<usize>();
+        // As even as whole sections allow: no column longer than its share
+        // and the longest section.
+        let size = |(_, rows): &(&str, Vec<_>)| rows.len() + 2;
+        let rows = |run: std::ops::Range<usize>| sections[run].iter().map(size).sum::<usize>();
+        let (total, longest) = (rows(0..sections.len()), sections.iter().map(size).max().unwrap());
         let lengths: Vec<usize> = split(&sections, 3).into_iter().map(rows).collect();
-        assert!(lengths.iter().max().unwrap() - lengths.iter().min().unwrap() <= 12, "{lengths:?}");
+        assert!(*lengths.iter().max().unwrap() <= total.div_ceil(3) + longest, "{lengths:?}");
     }
 
     #[test]

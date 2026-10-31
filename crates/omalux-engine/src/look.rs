@@ -113,6 +113,71 @@ pub struct Camera {
     /// The lens a profile correction was found for, as the Lens
     /// Corrections panel names it ([`crate::lens_profiles::Found`]).
     pub lens: Option<String>,
+    /// How the frame was shot, for the loupe's info overlay.
+    pub capture: Capture,
+}
+
+/// How a frame was shot, from its Exif: what Lightroom's loupe info
+/// shows.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Capture {
+    /// When, as `2026-10-04 15:43:16`.
+    pub time: Option<String>,
+    pub iso: Option<u32>,
+    /// The shutter speed, in seconds.
+    pub shutter: Option<f64>,
+    pub aperture: Option<f64>,
+    /// The focal length, in millimetres.
+    pub focal: Option<f64>,
+    /// The lens, as the camera names it.
+    pub lens: Option<String>,
+    /// The full-size frame's width and height, unturned.
+    pub size: Option<(usize, usize)>,
+}
+
+impl Capture {
+    pub fn of(meta: &lightcraft_meta::Metadata) -> Self {
+        let time = meta.capture_time.as_ref().map(|t| {
+            format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute, t.second)
+        });
+        let lens = meta.lens_model.clone().filter(|lens| !lens.trim().is_empty());
+        Self { time, iso: meta.iso, shutter: meta.exposure_time, aperture: meta.f_number, focal: meta.focal_length, lens, size: None }
+    }
+
+    /// The size `settings` crop the full-size frame to, as Lightroom's
+    /// Cropped Dimensions: `6000 × 4000`.
+    pub fn cropped(&self, settings: &DevelopSettings) -> Option<String> {
+        let (w, h) = crate::crop::dims(self.size?, settings);
+        let rect = settings.crop.geometry.rect_px(w, h);
+        Some(format!("{} × {}", rect.width().round(), rect.height().round()))
+    }
+
+    /// The exposure as Lightroom writes it: `1/250 sec at f/1.8, ISO 100`,
+    /// with what's known of it.
+    pub fn exposure(&self) -> Option<String> {
+        let shutter = self.shutter.filter(|s| *s > 0.0).map(|s| {
+            if s < 0.4 { format!("1/{} sec", (1.0 / s).round()) } else { format!("{} sec", (s * 10.0).round() / 10.0) }
+        });
+        let aperture = self.aperture.filter(|f| *f > 0.0).map(|f| format!("f/{}", (f * 10.0).round() / 10.0));
+        let iso = self.iso.map(|iso| format!("ISO {iso}"));
+        let at = match (shutter, aperture) {
+            (Some(s), Some(a)) => Some(format!("{s} at {a}")),
+            (s, a) => s.or(a),
+        };
+        match (at, iso) {
+            (Some(at), Some(iso)) => Some(format!("{at}, {iso}")),
+            (at, iso) => at.or(iso),
+        }
+    }
+
+    /// The lens and focal length: `FE 85mm F1.8 at 85 mm`.
+    pub fn optics(&self) -> Option<String> {
+        let focal = self.focal.filter(|f| *f > 0.0).map(|f| format!("{} mm", f.round()));
+        match (self.lens.clone(), focal) {
+            (Some(lens), Some(focal)) => Some(format!("{lens} at {focal}")),
+            (lens, focal) => lens.or(focal),
+        }
+    }
 }
 
 /// A fresh raw's settings, white balance as shot: Lightcraft's raw
@@ -181,7 +246,28 @@ mod tests {
         let tone = lightcraft_pipeline::tone::CameraTone::new(knots);
         assert!(tone.is_some());
         let info = SourceInfo { raw: true, camera_tone: tone, ..SourceInfo::default() };
-        (info, Camera { style: Some("Standard".into()), dro: Some(Dro::Auto), lift: 30.0, fixed: true, lens: None })
+        (info, Camera { style: Some("Standard".into()), dro: Some(Dro::Auto), lift: 30.0, fixed: true, lens: None, capture: Capture::default() })
+    }
+
+    #[test]
+    fn the_capture_reads_as_lightroom_writes_it() {
+        let meta = lightcraft_meta::Metadata {
+            capture_time: Some(lightcraft_meta::DateTime { year: 2026, month: 10, day: 4, hour: 15, minute: 43, second: 16, ..Default::default() }),
+            exposure_time: Some(1.0 / 250.0),
+            f_number: Some(1.8),
+            iso: Some(100),
+            focal_length: Some(85.0),
+            lens_model: Some("FE 85mm F1.8".into()),
+            ..Default::default()
+        };
+        let capture = Capture::of(&meta);
+        assert_eq!(capture.time.as_deref(), Some("2026-10-04 15:43:16"));
+        assert_eq!(capture.exposure().as_deref(), Some("1/250 sec at f/1.8, ISO 100"));
+        assert_eq!(capture.optics().as_deref(), Some("FE 85mm F1.8 at 85 mm"));
+        let long = Capture { shutter: Some(2.5), aperture: None, iso: None, ..capture.clone() };
+        assert_eq!(long.exposure().as_deref(), Some("2.5 sec"));
+        assert_eq!(Capture::default().exposure(), None);
+        assert_eq!(Capture::of(&lightcraft_meta::Metadata { lens_model: Some(" ".into()), ..Default::default() }).optics(), None);
     }
 
     #[test]

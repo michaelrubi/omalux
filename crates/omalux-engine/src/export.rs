@@ -64,22 +64,56 @@ pub fn tiff(image: &Linear16) -> Result<Vec<u8>, String> {
     encode::encode_tiff(&EncodeImage::new(w, h, 3, Samples::U16(&image.samples)), TiffCompression::Deflate, &meta).map_err(|e| e.to_string())
 }
 
-/// Export `raw` to `to`: `<to>/<stem>.tif`.
+/// What an export did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Exported {
+    /// Wrote this TIFF, rendered from the edit `record` names: what to
+    /// keep in the sidecar.
+    Written { tiff: PathBuf, record: crate::sidecar::Exported },
+    /// This TIFF is the frame's already: of its edit as it stands, or one
+    /// OmaLux didn't make and so never writes over.
+    There(PathBuf),
+}
+
+impl Exported {
+    pub fn tiff(&self) -> &Path {
+        match self {
+            Exported::Written { tiff, .. } | Exported::There(tiff) => tiff,
+        }
+    }
+}
+
+/// When a file was last written, in seconds since 1970.
+fn modified(path: &Path) -> Option<u64> {
+    let time = fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    time.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
+}
+
+/// The first of `<stem>-2.tif`, `<stem>-3.tif`… in `to` that isn't there.
+fn beside(to: &Path, stem: &str) -> PathBuf {
+    (2..).map(|n| to.join(format!("{stem}-{n}.tif"))).find(|path| !path.exists()).unwrap_or_else(|| to.join(format!("{stem}-new.tif")))
+}
+
+/// Export `raw` to `to`, `<to>/<stem>.tif` the first time.
 ///
 /// Decodes at full size, takes `edit` or the edit in its sidecar or a
 /// fresh raw's as-shot settings, under the edit's process version, renders to 16-bit Linear ProPhoto RGB, and
 /// writes the TIFF in one step via a temporary file.
 ///
-/// Returns `Ok(true)` if exported, or `Ok(false)` if a TIFF of that name was
-/// already there (which is never overwritten). Returns an error if the raw
-/// cannot be read or decoded, if its sidecar has an edit with a newer process
-/// version, or if rendering/writing fails.
-pub fn export(raw: &Path, to: &Path, edit: Option<&crate::sidecar::Edit>) -> Result<bool, String> {
-    let stem = raw.file_stem().ok_or_else(|| format!("{}: not a file", raw.display()))?.to_string_lossy();
-    let target = to.join(format!("{stem}.tif"));
-    if target.try_exists().map_err(|e| format!("{}: {e}", target.display()))? {
-        return Ok(false);
-    }
+/// `last` is the frame's last export, from its sidecar. A TIFF already
+/// there of the edit as it stands is left as it is. One of an edit since
+/// is written over if nothing has saved into it since it was exported, and
+/// otherwise a new one is written beside it (`<stem>-2.tif`), so Omapix's
+/// retouching is never lost. A TIFF OmaLux has no record of is never
+/// written over: a frame with no edit leaves it as the frame's, and one
+/// with an edit, which it may not be of, goes in a new one beside it.
+///
+/// Returns an error if the raw cannot be read or decoded, if its sidecar
+/// has an edit with a newer process version, or if rendering/writing fails.
+pub fn export(raw: &Path, to: &Path, edit: Option<&crate::sidecar::Edit>, last: Option<&crate::sidecar::Exported>) -> Result<Exported, String> {
+    let stem = raw.file_stem().ok_or_else(|| format!("{}: not a file", raw.display()))?.to_string_lossy().into_owned();
+    let first = to.join(format!("{stem}.tif"));
+    let there = |path: &Path| path.try_exists().map_err(|e| format!("{}: {e}", path.display()));
 
     let saved = match edit {
         Some(edit) => Some(edit.clone()),
@@ -88,12 +122,36 @@ pub fn export(raw: &Path, to: &Path, edit: Option<&crate::sidecar::Edit>) -> Res
             xmp.as_deref().map(crate::sidecar::edit).transpose().map_err(|e| format!("{}: {e}", raw.display()))?.flatten()
         }
     };
+    if last.is_none() && saved.is_none() && there(&first)? {
+        return Ok(Exported::There(first));
+    }
     let process = saved.as_ref().map_or(crate::sidecar::PROCESS_VERSION, |edit| edit.process);
     let saved = saved.map(|edit| edit.settings);
     let bytes = fs::read(raw).map_err(|e| format!("{}: {e}", raw.display()))?;
     let profile = saved.as_ref().map_or(Profile::Camera, Profile::of);
     let crate::raw::Loaded { image: full, info, camera, .. } = crate::raw::load(&bytes, usize::MAX, profile, process)?;
-    let dev_settings = saved.unwrap_or_else(|| look::fresh(info.as_shot_temp, info.as_shot_tint));
+    let fresh = look::fresh(info.as_shot_temp, info.as_shot_tint);
+    let dev_settings = saved.unwrap_or_else(|| fresh.clone());
+    // An edit that's a fresh raw's is named as having none.
+    let key = crate::sidecar::export_key(Some(&dev_settings).filter(|s| **s != fresh));
+
+    let target = match last {
+        None if !there(&first)? => first,
+        None if key == crate::sidecar::export_key(None) => return Ok(Exported::There(first)),
+        None => beside(to, &stem),
+        Some(last) => {
+            let previous = to.join(&last.file);
+            if !there(&previous)? {
+                if there(&first)? { beside(to, &stem) } else { first }
+            } else if last.settings == key {
+                return Ok(Exported::There(previous));
+            } else if modified(&previous) == Some(last.modified) {
+                previous
+            } else {
+                beside(to, &stem)
+            }
+        }
+    };
 
     let image = render(&full, &info, &camera, &dev_settings)?;
     let tiff_bytes = tiff(&image)?;
@@ -113,7 +171,9 @@ pub fn export(raw: &Path, to: &Path, edit: Option<&crate::sidecar::Edit>) -> Res
     }
     written.map_err(|e| format!("{}: {e}", target.display()))?;
 
-    Ok(true)
+    let file = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let record = crate::sidecar::Exported { file, settings: key, modified: modified(&target).unwrap_or(0) };
+    Ok(Exported::Written { tiff: target, record })
 }
 
 #[cfg(test)]
@@ -202,7 +262,8 @@ mod tests {
             let target = out.join(format!("{stem}.tif"));
 
             // 1. The TIFF is where it should be, 16-bit with the profile.
-            assert!(export(&raw_path, &out, None).unwrap());
+            let Exported::Written { tiff, record } = export(&raw_path, &out, None, None).unwrap() else { panic!("not written") };
+            assert_eq!((tiff, record.file.as_str(), record.settings.as_str()), (target.clone(), format!("{stem}.tif").as_str(), "fresh"));
             assert!(target.exists());
 
             let tiff_bytes = fs::read(&target).unwrap();
@@ -213,10 +274,30 @@ mod tests {
             let tiff::decoder::DecodingResult::U16(default_samples) = decoder.read_image().unwrap() else { panic!("not 16-bit") };
             assert!(!default_samples.is_empty());
 
-            // 2. An existing one is left alone.
+            // 2. Of the edit as it stands, it's left as it is.
+            assert_eq!(export(&raw_path, &out, None, Some(&record)).unwrap(), Exported::There(target.clone()));
+            // Edited since, and nothing saved into it: written over.
+            let mut since = look::fresh(6500.0, 0.0);
+            since.light.exposure = 1.0;
+            let Exported::Written { tiff, record: again } = export(&raw_path, &out, Some(&crate::sidecar::Edit::new(since.clone())), Some(&record)).unwrap() else { panic!("not written") };
+            assert_eq!(tiff, target);
+            assert_ne!(again.settings, record.settings);
+            // Saved into since (Omapix's retouching): a new one beside it.
+            let later = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
+            fs::File::options().append(true).open(&target).unwrap().set_modified(later).unwrap();
+            let retouched = fs::read(&target).unwrap();
+            since.light.exposure = 0.5;
+            let Exported::Written { tiff, .. } = export(&raw_path, &out, Some(&crate::sidecar::Edit::new(since.clone())), Some(&again)).unwrap() else { panic!("not written") };
+            assert_eq!(tiff, out.join(format!("{stem}-2.tif")));
+            assert_eq!(fs::read(&target).unwrap(), retouched, "the retouched one is left as it was");
+            // One OmaLux has no record of is never written over.
             let dummy = b"existing untouched tiff data";
             fs::write(&target, dummy).unwrap();
-            assert!(!export(&raw_path, &out, None).unwrap());
+            assert_eq!(export(&raw_path, &out, None, None).unwrap(), Exported::There(target.clone()));
+            assert_eq!(fs::read(&target).unwrap(), dummy);
+            // With an edit it may not be of, a new one goes beside it.
+            let Exported::Written { tiff, .. } = export(&raw_path, &out, Some(&crate::sidecar::Edit::new(since.clone())), None).unwrap() else { panic!("not written") };
+            assert_eq!(tiff, out.join(format!("{stem}-3.tif")));
             assert_eq!(fs::read(&target).unwrap(), dummy);
 
             // 3. The sidecar's edit is what's rendered.
@@ -225,7 +306,7 @@ mod tests {
             crate::sidecar::update(&raw_path, |xmp| crate::sidecar::with_edit(xmp, &crate::sidecar::Edit::new(edited_settings.clone()))).unwrap();
 
             let out_edit = folder.0.join("omalux-edit");
-            assert!(export(&raw_path, &out_edit, None).unwrap());
+            assert!(matches!(export(&raw_path, &out_edit, None, None).unwrap(), Exported::Written { .. }));
             let target_edit = out_edit.join(format!("{stem}.tif"));
             let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(fs::read(&target_edit).unwrap())).unwrap();
             let tiff::decoder::DecodingResult::U16(edit_samples) = decoder.read_image().unwrap() else { panic!("not 16-bit") };
@@ -242,7 +323,7 @@ mod tests {
             }).unwrap();
 
             let out_newer = folder.0.join("omalux-newer");
-            let err = export(&raw_path, &out_newer, None).unwrap_err();
+            let err = export(&raw_path, &out_newer, None, None).unwrap_err();
             assert!(err.contains("newer OmaLux"), "unexpected error: {err}");
             assert!(!out_newer.join(format!("{stem}.tif")).exists());
         }
