@@ -10,6 +10,9 @@
 //!
 //! Off the UI thread, [`Loader`] loads thumbnails in the order they are
 //! wanted, dropping jobs that are no longer wanted whenever the request changes.
+//!
+//! A frame with an edit gets a developed thumbnail too ([`developed`]),
+//! cached under that edit, so going back to an edit finds it there.
 
 use std::collections::{HashSet, VecDeque};
 use std::fs;
@@ -21,13 +24,20 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::UNIX_EPOCH;
 
-use lightcraft_raster::Rgba8;
+use lightcraft_develop::DevelopSettings;
+use lightcraft_pipeline::{RenderRequest, SourceInfo};
+use lightcraft_raster::{Rgb32f, Rgba8};
+
+use crate::look::{self, Camera};
 
 /// The long edge of a thumbnail, in pixels: sharp on a HiDPI filmstrip.
 pub const LONG_EDGE: usize = 320;
 const QUALITY: u8 = 85;
 /// Bumped when thumbnails are made differently, so old ones aren't used.
 const VERSION: u64 = 1;
+/// [`VERSION`], for developed thumbnails: bumped when a re-sync changes
+/// how frames render.
+const DEVELOPED: u64 = 1;
 
 /// `$XDG_CACHE_HOME/omalux`, or `~/.cache/omalux`.
 pub fn cache_dir() -> Option<PathBuf> {
@@ -66,6 +76,24 @@ pub(crate) fn key(raw: &Path, version: u64) -> io::Result<String> {
 /// Where a raw's thumbnail is cached in `dir`.
 pub fn cached(dir: &Path, raw: &Path) -> io::Result<PathBuf> {
     Ok(dir.join(format!("{}.jpg", key(raw, VERSION)?)))
+}
+
+/// Where a raw's developed thumbnail of edit `edit`
+/// ([`crate::sidecar::export_key`]) under process version `process` is
+/// cached in `dir`.
+pub fn cached_developed(dir: &Path, raw: &Path, edit: &str, process: u32) -> io::Result<PathBuf> {
+    Ok(dir.join(format!("{}-{edit}-{process}.jpg", key(raw, DEVELOPED)?)))
+}
+
+/// A frame as its edit renders it, no larger than [`LONG_EDGE`], in sRGB.
+pub fn developed(source: &Rgb32f, info: &SourceInfo, camera: &Camera, settings: &DevelopSettings) -> Rgba8 {
+    let (settings, info) = look::effective(settings, info, camera);
+    lightcraft_pipeline::render(source, &info, &settings, &RenderRequest::fit(LONG_EDGE, LONG_EDGE)).image
+}
+
+/// A thumbnail kept at `path`.
+pub fn read(path: &Path) -> io::Result<Rgba8> {
+    decode_thumb(&fs::read(path)?)
 }
 
 fn encode_thumb(thumbnail: &Rgba8) -> io::Result<Vec<u8>> {
@@ -405,6 +433,31 @@ mod tests {
     use super::testing::*;
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_developed_thumbnail_is_of_its_edit_with_its_crop_and_cached_under_it() {
+        let source = Rgb32f::filled(600, 400, [0.1; 3]);
+        let (info, camera) = (SourceInfo::default(), Camera::default());
+        let plain = developed(&source, &info, &camera, &DevelopSettings::default());
+        assert_eq!((plain.width, plain.height), (LONG_EDGE, LONG_EDGE * 2 / 3));
+
+        let mut edit = DevelopSettings::default();
+        edit.light.exposure = 1.0;
+        crate::crop::set_aspect(&mut edit, (600.0, 400.0), crate::crop::Aspect::Ratio(1, 1));
+        let square = developed(&source, &info, &camera, &edit);
+        assert_eq!(square.width, square.height);
+        assert!(square.data[0][1] > plain.data[0][1], "brighter: {:?} against {:?}", square.data[0], plain.data[0]);
+
+        let folder = TestFolder::new("thumbs-developed");
+        let raw = folder.0.join("DSC00001.ARW");
+        fs::write(&raw, b"raw").unwrap();
+        let path = cached_developed(&folder.0, &raw, "abc", 3).unwrap();
+        assert_ne!(path, cached_developed(&folder.0, &raw, "abd", 3).unwrap(), "another edit");
+        assert_ne!(path, cached_developed(&folder.0, &raw, "abc", 2).unwrap(), "another process version");
+        store(&path, &square).unwrap();
+        let kept = read(&path).unwrap();
+        assert_eq!((kept.width, kept.height), (square.width, square.height));
+    }
 
     #[test]
     fn thumbnails_are_cached_and_remade_when_the_raw_changes() {

@@ -8,13 +8,14 @@
 //! near the current view.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui::{
     Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Ui, Vec2, pos2, vec2,
 };
 use lightcraft_codecs::display::DisplayProfile;
+use lightcraft_raster::Rgba8;
 use omalux_engine::shoot::{self, Rating, Shoot, stars};
 use omalux_engine::sidecar;
 use omalux_engine::thumbs::{Loaded, Loader};
@@ -31,6 +32,15 @@ const KEEP_THUMBNAILS: usize = 100;
 pub enum Slot {
     Ready(TextureHandle),
     Failed,
+}
+
+/// A frame's developed thumbnail.
+struct Developed {
+    /// The edit last asked for; a thumbnail of any other isn't taken.
+    key: String,
+    /// What's shown, which is of an earlier edit until the one asked for
+    /// comes in. None until the first does.
+    texture: Option<TextureHandle>,
 }
 
 /// What a frame's thumbnail says of its edit and its export, besides its
@@ -61,6 +71,8 @@ pub enum Click {
 pub struct Filmstrip {
     loader: Option<Loader>,
     thumbnails: HashMap<usize, Slot>,
+    /// The frames with an edit, shown as it renders.
+    developed: HashMap<PathBuf, Developed>,
     wanted: Vec<usize>,
     /// The frames in the strip and where they were last drawn.
     pub cells: Vec<(usize, Rect)>,
@@ -71,7 +83,7 @@ pub struct Filmstrip {
 
 impl Filmstrip {
     pub fn new(cache: Option<PathBuf>) -> Self {
-        Self { loader: None, thumbnails: HashMap::new(), wanted: Vec::new(), cells: Vec::new(), cache, display: None }
+        Self { loader: None, thumbnails: HashMap::new(), developed: HashMap::new(), wanted: Vec::new(), cells: Vec::new(), cache, display: None }
     }
 
     /// Forget the shoot: another is opened, or this one closed.
@@ -91,9 +103,42 @@ impl Filmstrip {
         };
         if changed {
             self.thumbnails.clear();
+            self.developed.clear();
             self.wanted.clear();
             self.display = display;
         }
+    }
+
+    /// Whether a frame's thumbnail of edit `key` is to be asked for: true
+    /// once for each edit, which is then the one that's waited for.
+    pub fn wants_developed(&mut self, path: &Path, key: &str) -> bool {
+        let developed = self.developed.entry(path.to_path_buf()).or_insert_with(|| Developed { key: String::new(), texture: None });
+        let wants = developed.key != key;
+        if wants {
+            developed.key = key.to_owned();
+        }
+        wants
+    }
+
+    #[cfg(test)]
+    pub fn developed_key(&self, path: &Path) -> Option<&str> {
+        self.developed.get(path).map(|developed| developed.key.as_str())
+    }
+
+    #[cfg(test)]
+    pub fn developed_shown(&self, path: &Path) -> bool {
+        self.developed.get(path).is_some_and(|developed| developed.texture.is_some())
+    }
+
+    /// A frame's developed thumbnail is in. One of an edit it's moved on
+    /// from is dropped.
+    pub fn set_developed(&mut self, ctx: &egui::Context, path: &Path, key: &str, mut image: Rgba8) {
+        let Some(developed) = self.developed.get_mut(path).filter(|developed| developed.key == key) else { return };
+        if let Some(display) = &self.display {
+            let _ = display.from_srgb(&mut image);
+        }
+        let pixels = egui::ColorImage::from_rgba_unmultiplied([image.width, image.height], image.data.as_flattened());
+        developed.texture = Some(ctx.load_texture(format!("developed-{}", path.display()), pixels, egui::TextureOptions::LINEAR));
     }
 
     /// Start loading the open shoot's thumbnails, if that hasn't begun.
@@ -108,9 +153,15 @@ impl Filmstrip {
 
     /// Collect thumbnails that finished loading off the UI thread, and drop
     /// textures that are no longer near view.
-    pub fn collect(&mut self, ctx: &egui::Context, current: usize) {
+    pub fn collect(&mut self, ctx: &egui::Context, shoot: &Shoot) {
+        let current = shoot.current();
         let near = |i: &usize| i.abs_diff(current) <= KEEP_THUMBNAILS;
         self.thumbnails.retain(|i, _| near(i));
+        for (i, frame) in shoot.frames().iter().enumerate() {
+            if !near(&i) {
+                self.developed.remove(&frame.path);
+            }
+        }
         let Some(loader) = &self.loader else { return };
         for Loaded { index, result } in loader.loaded() {
             if near(&index) {
@@ -180,23 +231,25 @@ impl Filmstrip {
                     painter.rect_stroke(card, 1.0, Stroke::new(1.0, theme.dark_foreground), StrokeKind::Inside);
                 }
             }
-            match self.thumbnails.get(&i) {
-                Some(Slot::Ready(texture)) => {
+            let Marks { edited, exported } = marks(i);
+            // Its edit as it renders; a frame with none, the camera's JPEG.
+            let developed = self.developed.get(&shoot.frames()[i].path).filter(|_| edited).and_then(|developed| developed.texture.as_ref());
+            match (developed, self.thumbnails.get(&i)) {
+                (Some(texture), _) | (None, Some(Slot::Ready(texture))) => {
                     let image = fit(texture.size_vec2(), inner);
                     let tint = if rating == sidecar::REJECT { Color32::from_gray(80) } else { Color32::WHITE };
                     painter.image(texture.id(), image, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), tint);
                 }
-                Some(Slot::Failed) => {
+                (None, Some(Slot::Failed)) => {
                     painter.rect_filled(inner, 2.0, theme.darker_background);
                     painter.text(inner.center(), Align2::CENTER_CENTER, "!", FontId::proportional(14.0), theme.red);
                 }
-                None => {
+                (None, None) => {
                     painter.rect_filled(inner, 2.0, theme.darker_background);
                 }
             }
             badge(&painter, inner.center_bottom() - vec2(0.0, 3.0), Align2::CENTER_BOTTOM, rating, 13.0, theme);
             // Edited, and exported (red once it's been edited since), at the bottom right.
-            let Marks { edited, exported } = marks(i);
             let mut corner = inner.right_bottom() + vec2(-3.0, -3.0);
             if let Some(current) = exported {
                 let colour = if current { theme.foreground } else { theme.red };

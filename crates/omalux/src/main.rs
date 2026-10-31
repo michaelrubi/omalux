@@ -6,6 +6,7 @@ mod config;
 mod crop;
 mod crop_panel;
 mod develop;
+mod developer;
 mod guided;
 mod filmstrip;
 mod histogram;

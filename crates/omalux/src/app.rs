@@ -28,6 +28,7 @@ use crate::checklist::{Checklist, Outcome};
 use crate::commands::Command;
 use crate::config::Config;
 use crate::develop::{self, PanelOut};
+use crate::developer::{Developer, Job};
 use crate::filmstrip::{Click, Filmstrip, STRIP_HEIGHT};
 use crate::hotkeys::{self, format_shortcut};
 use crate::crop_panel;
@@ -138,6 +139,7 @@ pub struct Paths {
 pub struct Workers {
     pub renderer: Renderer,
     pub autos: Autos,
+    pub developer: Developer,
     pub disk: Disk,
 }
 
@@ -231,6 +233,7 @@ pub struct App {
     /// its frames (and whether to open them after): started once it has.
     export_next: Option<(Vec<PathBuf>, bool)>,
     autos: Autos,
+    developer: Developer,
     /// The last thing to tell the user, and whether it's a problem.
     message: Option<(String, bool)>,
     title: String,
@@ -318,7 +321,9 @@ impl App {
             thumbnails: omalux_engine::thumbs::default_dir(),
             monitors: hotkeys::config_dir().map(|dir| dir.join("monitors.toml")),
         };
-        let mut app = Self::build(theme, theme::watch(ctx.clone()), config, warnings, script, Workers { renderer, autos, disk }, paths);
+        let wake = ctx.clone();
+        let developer = Developer::new(Decoder::raw(), paths.thumbnails.clone(), move || wake.request_repaint());
+        let mut app = Self::build(theme, theme::watch(ctx.clone()), config, warnings, script, Workers { renderer, autos, developer, disk }, paths);
         if let Some(path) = open {
             app.open(path);
         }
@@ -367,6 +372,7 @@ impl App {
             exporting: None,
             export_next: None,
             autos: workers.autos,
+            developer: workers.developer,
             message: None,
             title: String::new(),
             disk: workers.disk,
@@ -1565,6 +1571,7 @@ impl App {
         }
         self.finish_picking();
         self.develop(ctx);
+        self.develop_thumbnails(ctx);
         self.find_autos();
         if let Some((frames, edit)) = self.export_next.take() {
             self.export_frames(frames, edit, ctx);
@@ -1598,7 +1605,7 @@ impl App {
         }
         if let Some(shoot) = &self.shoot {
             self.filmstrip.sync_shoot(shoot, ctx);
-            self.filmstrip.collect(ctx, shoot.current());
+            self.filmstrip.collect(ctx, shoot);
             if self.at.as_ref() != Some(&shoot.frame().path) {
                 self.previous = self.at.replace(shoot.frame().path.clone());
             }
@@ -1658,6 +1665,35 @@ impl App {
             // Decoded again, for another profile's look.
             Some(editing) => (editing.info, editing.camera) = (Some(info), camera),
             None => _ = self.edits.insert(path.to_path_buf(), Editing::new(History::new(fresh, saved), Some((info, camera)))),
+        }
+    }
+
+    /// Take in the developed thumbnails made, and ask for those the
+    /// filmstrip's edited frames are missing: once a drag has ended, and
+    /// the current frame's from the raw that's here. The closest to the
+    /// current frame is asked for last, which is made first.
+    fn develop_thumbnails(&mut self, ctx: &egui::Context) {
+        for (path, key, image) in self.developer.made() {
+            self.filmstrip.set_developed(ctx, &path, &key, image);
+        }
+        let Some(shoot) = &self.shoot else { return };
+        let current = shoot.current();
+        let mut shown: Vec<usize> = self.filmstrip.cells.iter().map(|&(i, _)| i).collect();
+        shown.sort_by_key(|&i| std::cmp::Reverse(i.abs_diff(current)));
+        let frames: Vec<(PathBuf, Option<String>)> = shown.iter().map(|&i| &shoot.frames()[i]).map(|frame| (frame.path.clone(), frame.edit_key.clone())).collect();
+        for (path, saved) in frames {
+            let editing = self.edits.get(&path);
+            if editing.is_some_and(|editing| editing.history.changing()) {
+                continue;
+            }
+            let Some(key) = editing.map_or(saved, |editing| Some(editing.key.clone())).filter(|key| *key != sidecar::export_key(None)) else { continue };
+            if !self.filmstrip.wants_developed(&path, &key) {
+                continue;
+            }
+            let Some(settings) = self.settings_of(&path) else { continue };
+            let source = self.edits.get(&path).and_then(|editing| Some((self.renderer.source(&path)?, editing.info.clone()?, editing.camera.clone())));
+            let process = self.process_of(&path);
+            self.developer.ask(Job { path, key, settings, process, source });
         }
     }
 
@@ -2196,9 +2232,10 @@ mod tests {
             let ctx = egui::Context::default();
             let renderer = Renderer::new(crate::render::tests::decoder(), false, || {});
             let autos = Autos::new(crate::render::tests::decoder(), || {});
+            let developer = Developer::new(crate::render::tests::decoder(), paths.thumbnails.clone(), || {});
             let wake = ctx.clone();
             let disk = Disk::new(move || wake.request_repaint());
-            let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect(), Workers { renderer, autos, disk }, paths);
+            let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect(), Workers { renderer, autos, developer, disk }, paths);
             Self { ctx, app, time: 0.0, screen: egui::vec2(800.0, 600.0) }
         }
 
@@ -2221,15 +2258,19 @@ mod tests {
 
         /// Frames until everything wanted has been developed and shown.
         fn settle(&mut self) {
-            for _ in 0..2000 {
+            // By the clock: a test exporting a whole raw holds up the
+            // thread pool the small renders share.
+            let started = std::time::Instant::now();
+            while started.elapsed() < std::time::Duration::from_secs(60) {
                 // A frame can ask for more (the first one drawn tells the
                 // renderer how much room the loupe has), so it's settled
                 // when a frame leaves the renderer with nothing to do and
                 // the next has taken in what was done.
                 self.frame(vec![]);
-                if !self.app.renderer.busy() && !self.app.autos.busy() {
+                let busy = |h: &Self| h.app.renderer.busy() || h.app.autos.busy() || h.app.developer.busy();
+                if !busy(self) {
                     self.frame(vec![]);
-                    if !self.app.renderer.busy() && !self.app.autos.busy() {
+                    if !busy(self) {
                         return;
                     }
                 }
@@ -3227,6 +3268,38 @@ mod tests {
         assert!(h.app.loupe.zoom().is_some());
         h.click(fitted.center());
         assert!(h.app.loupe.zoom().is_none());
+    }
+
+    #[test]
+    fn an_edited_frame_shows_as_it_renders_in_the_filmstrip_and_a_fresh_one_as_the_cameras_jpeg() {
+        let folder = Folder::new("developed-thumbnails", &[1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let (first, second) = {
+            let frames = h.app.shoot.as_ref().unwrap().frames();
+            (frames[0].path.clone(), frames[1].path.clone())
+        };
+        assert!(h.app.filmstrip.developed_key(&first).is_none(), "nothing for a frame with no edit");
+
+        h.press(Modifiers::NONE, Key::Equals);
+        h.settle();
+        let key = h.app.edits[&first].key.clone();
+        assert_eq!(h.app.filmstrip.developed_key(&first), Some(key.as_str()));
+        assert!(h.app.filmstrip.developed_shown(&first));
+
+        // A step later, the thumbnail's of the edit as it stands.
+        h.press(Modifiers::NONE, Key::Equals);
+        h.settle();
+        let later = h.app.edits[&first].key.clone();
+        assert_ne!(later, key);
+        assert_eq!(h.app.filmstrip.developed_key(&first), Some(later.as_str()));
+
+        // A frame pasted onto, whose raw hasn't been decoded here, gets one too.
+        h.press(Modifiers::COMMAND, Key::C);
+        h.app.paste(vec![second.clone()]);
+        h.settle();
+        assert!(h.app.filmstrip.developed_shown(&second));
     }
 
     #[test]
