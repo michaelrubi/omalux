@@ -210,9 +210,10 @@ binary.
 - Filmstrip and loupe, stepping with the arrows: the embedded preview at
   once, the render after it, neighbours prepared ahead. *Done:* the next
   two frames and the previous one are developed ahead. Thumbnails are
-  the embedded previews, cached in `~/.cache/omalux/thumbnails/`; the
-  developed frame in the filmstrip (DESIGN.md's "Pipeline") isn't there
-  yet. Everything shown is in the monitor's colours where
+  the embedded previews, cached in `~/.cache/omalux/thumbnails/`; a
+  frame with an edit shows as it renders, crop and turns included,
+  made on a thread of its own once a drag ends and cached under that
+  edit (2026-10-31). Everything shown is in the monitor's colours where
   Hyprland takes it for sRGB and it isn't: which monitor the window is
   on comes from `hyprctl`, its profile from
   `~/.config/omalux/monitors.toml` or else its EDID (Omacull's monitor
@@ -372,9 +373,7 @@ Michael's to do from the installed binary.
   Auto, Rotate Left and Right (Ctrl+[ and Ctrl+]) and Reset
   (Ctrl+Alt+R) in the panel. A drag is one step, saved when it ends.
   The crop is a copy group, in Ctrl+C's everything too; quarter turns
-  are never pasted. *Open:* the filmstrip's thumbnails are the
-  camera's JPEGs, so they show neither the crop nor a turn until M1's
-  developed thumbnails are there; a crop pasted onto a frame that
+  are never pasted. *Open:* a crop pasted onto a frame that
   hasn't been decoded yet isn't brought inside a frame of another
   shape until it's next cropped (its shape isn't known until then);
   and there's no overlay but thirds (a finer grid while turning).

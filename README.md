@@ -13,9 +13,11 @@ It's the second stage of one workflow: cull in
 [Omacull](https://github.com/michaelrubi/omacull), develop in OmaLux,
 retouch in Omapix, export.
 
-**Status:** M0 nearly done: Lightcraft's engine vendored, an empty
-window, and the spikes run on real frames; nothing to develop with yet. [docs/DESIGN.md](docs/DESIGN.md) has
-the design and [docs/ROADMAP.md](docs/ROADMAP.md) the plan.
+**Status:** in development, for the Sony A7 III only. The develop panels,
+copy and paste, stacks, crop, lens corrections, Auto Sync, Spot Removal
+and the export to Omapix are built; AI denoise and packaging are next.
+[docs/DESIGN.md](docs/DESIGN.md) has the design and
+[docs/ROADMAP.md](docs/ROADMAP.md) the plan.
 
 ## Credits
 
