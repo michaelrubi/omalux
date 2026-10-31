@@ -105,7 +105,8 @@ fn beside(to: &Path, stem: &str) -> PathBuf {
 /// is written over if nothing has saved into it since it was exported, and
 /// otherwise a new one is written beside it (`<stem>-2.tif`), so Omapix's
 /// retouching is never lost. A TIFF OmaLux has no record of is never
-/// written over.
+/// written over: a frame with no edit leaves it as the frame's, and one
+/// with an edit, which it may not be of, goes in a new one beside it.
 ///
 /// Returns an error if the raw cannot be read or decoded, if its sidecar
 /// has an edit with a newer process version, or if rendering/writing fails.
@@ -113,9 +114,6 @@ pub fn export(raw: &Path, to: &Path, edit: Option<&crate::sidecar::Edit>, last: 
     let stem = raw.file_stem().ok_or_else(|| format!("{}: not a file", raw.display()))?.to_string_lossy().into_owned();
     let first = to.join(format!("{stem}.tif"));
     let there = |path: &Path| path.try_exists().map_err(|e| format!("{}: {e}", path.display()));
-    if last.is_none() && there(&first)? {
-        return Ok(Exported::There(first));
-    }
 
     let saved = match edit {
         Some(edit) => Some(edit.clone()),
@@ -124,6 +122,9 @@ pub fn export(raw: &Path, to: &Path, edit: Option<&crate::sidecar::Edit>, last: 
             xmp.as_deref().map(crate::sidecar::edit).transpose().map_err(|e| format!("{}: {e}", raw.display()))?.flatten()
         }
     };
+    if last.is_none() && saved.is_none() && there(&first)? {
+        return Ok(Exported::There(first));
+    }
     let process = saved.as_ref().map_or(crate::sidecar::PROCESS_VERSION, |edit| edit.process);
     let saved = saved.map(|edit| edit.settings);
     let bytes = fs::read(raw).map_err(|e| format!("{}: {e}", raw.display()))?;
@@ -135,7 +136,9 @@ pub fn export(raw: &Path, to: &Path, edit: Option<&crate::sidecar::Edit>, last: 
     let key = crate::sidecar::export_key(Some(&dev_settings).filter(|s| **s != fresh));
 
     let target = match last {
-        None => first,
+        None if !there(&first)? => first,
+        None if key == crate::sidecar::export_key(None) => return Ok(Exported::There(first)),
+        None => beside(to, &stem),
         Some(last) => {
             let previous = to.join(&last.file);
             if !there(&previous)? {
@@ -291,6 +294,10 @@ mod tests {
             let dummy = b"existing untouched tiff data";
             fs::write(&target, dummy).unwrap();
             assert_eq!(export(&raw_path, &out, None, None).unwrap(), Exported::There(target.clone()));
+            assert_eq!(fs::read(&target).unwrap(), dummy);
+            // With an edit it may not be of, a new one goes beside it.
+            let Exported::Written { tiff, .. } = export(&raw_path, &out, Some(&crate::sidecar::Edit::new(since.clone())), None).unwrap() else { panic!("not written") };
+            assert_eq!(tiff, out.join(format!("{stem}-3.tif")));
             assert_eq!(fs::read(&target).unwrap(), dummy);
 
             // 3. The sidecar's edit is what's rendered.

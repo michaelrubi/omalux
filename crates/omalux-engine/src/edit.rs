@@ -148,6 +148,12 @@ impl History {
         self.redo.last().and_then(|(_, paste)| *paste)
     }
 
+    /// Whether paste number `paste` is among the steps made, and hasn't
+    /// been undone.
+    pub fn stands(&self, paste: u64) -> bool {
+        self.undo.iter().any(|(_, tag)| *tag == Some(paste))
+    }
+
     /// Change the settings as they stand, without a step: for what's
     /// filled in once the frame's raw is decoded (an automatic Upright
     /// pasted onto it before), which undo has no reason to take back.

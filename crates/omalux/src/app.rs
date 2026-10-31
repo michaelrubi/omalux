@@ -6,12 +6,14 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use egui::{Align2, FontId, RichText, Ui};
 use lightcraft_codecs::display::DisplayProfile;
 use lightcraft_develop::DevelopSettings;
 use lightcraft_pipeline::SourceInfo;
+use lightcraft_raster::Rgb32f;
 use omalux_engine::auto::{self, Auto};
 use omalux_engine::copy::{self, Copied, Group};
 use omalux_engine::crop;
@@ -21,6 +23,7 @@ use omalux_engine::look::{self, Camera, Profile};
 use omalux_engine::shoot::{Filter, Shoot, Step, stars};
 use omalux_engine::sidecar;
 
+use crate::autos::{Autos, Found};
 use crate::checklist::{Checklist, Outcome};
 use crate::commands::Command;
 use crate::config::Config;
@@ -66,8 +69,9 @@ struct Editing {
     /// what tells a frame edited since its export.
     key: String,
     /// What Auto Sync asked to be set automatically before the frame's
-    /// raw was decoded: set once it is.
-    pending: Vec<Auto>,
+    /// raw was decoded, and the step that asked: set once it's decoded,
+    /// while that step stands.
+    pending: Vec<(u64, Auto)>,
 }
 
 /// [`sidecar::export_key`] of a frame's edit: `fresh` for one that's a
@@ -91,6 +95,20 @@ impl Editing {
         let changed = change(&mut self.history, info);
         self.stepped();
         changed
+    }
+
+    /// Whether Auto Sync is still to set something here, by a step that
+    /// hasn't been undone.
+    fn waiting(&self) -> bool {
+        self.pending.iter().any(|(paste, _)| self.history.stands(*paste))
+    }
+
+    /// What Auto Sync is still to set here; what an undone step asked for
+    /// stays, for if it's made again.
+    fn take_waiting(&mut self) -> Vec<Auto> {
+        let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending).into_iter().partition(|(paste, _)| self.history.stands(*paste));
+        self.pending = later;
+        now.into_iter().map(|(_, what)| what).collect()
     }
 
     /// Take up the history's settings after a step. True if they're not
@@ -119,6 +137,7 @@ pub struct Paths {
 /// test gives it.
 pub struct Workers {
     pub renderer: Renderer,
+    pub autos: Autos,
     pub disk: Disk,
 }
 
@@ -137,6 +156,8 @@ struct Exporting {
     edit: bool,
     /// What each frame's export did, as it's dealt with.
     results: Receiver<(PathBuf, Result<omalux_engine::export::Exported, String>)>,
+    /// Set on quitting: no more frames are started.
+    stop: Arc<AtomicBool>,
 }
 
 impl Exporting {
@@ -206,6 +227,10 @@ pub struct App {
     picking: Option<Receiver<Option<PathBuf>>>,
     /// Frames being exported, while the export runs.
     exporting: Option<Exporting>,
+    /// An export asked for while Auto Sync has yet to set something on
+    /// its frames (and whether to open them after): started once it has.
+    export_next: Option<(Vec<PathBuf>, bool)>,
+    autos: Autos,
     /// The last thing to tell the user, and whether it's a problem.
     message: Option<(String, bool)>,
     title: String,
@@ -285,13 +310,15 @@ impl App {
         let wake = ctx.clone();
         let renderer = Renderer::new(Decoder::raw(), gpu, move || wake.request_repaint());
         let wake = ctx.clone();
+        let autos = Autos::new(Decoder::raw(), move || wake.request_repaint());
+        let wake = ctx.clone();
         let disk = Disk::new(move || wake.request_repaint());
         let paths = Paths {
             state: hotkeys::config_dir().map(|dir| dir.join("state.toml")),
             thumbnails: omalux_engine::thumbs::default_dir(),
             monitors: hotkeys::config_dir().map(|dir| dir.join("monitors.toml")),
         };
-        let mut app = Self::build(theme, theme::watch(ctx.clone()), config, warnings, script, Workers { renderer, disk }, paths);
+        let mut app = Self::build(theme, theme::watch(ctx.clone()), config, warnings, script, Workers { renderer, autos, disk }, paths);
         if let Some(path) = open {
             app.open(path);
         }
@@ -338,6 +365,8 @@ impl App {
             off: Vec::new(),
             picking: None,
             exporting: None,
+            export_next: None,
+            autos: workers.autos,
             message: None,
             title: String::new(),
             disk: workers.disk,
@@ -412,6 +441,8 @@ impl App {
     /// Forget what was held of the shoot that was open. What was copied
     /// stays: it can be pasted in the next shoot.
     fn forget(&mut self) {
+        self.finish_autos();
+        self.export_next = None;
         self.saved.clear();
         self.processes.clear();
         self.unreadable.clear();
@@ -478,22 +509,31 @@ impl App {
         if frames.is_empty() || self.exporting.is_some() {
             return;
         }
+        // An export is of the edit as it'll stand.
+        if frames.iter().any(|frame| self.edits.get(frame).is_some_and(Editing::waiting)) {
+            self.message = Some(("Setting Auto Sync's Autos before exporting…".to_owned(), false));
+            self.export_next = Some((frames, edit));
+            return;
+        }
         let to = shoot.dir().join(&self.config.export_folder);
         let (tx, rx) = channel();
         // Each with its edit as it stands, where it's been opened this
         // session; the rest are exported with what their sidecars hold.
         // And each with its last export, to tell whether it's to be done
-        // again.
-        let last = |frame: &PathBuf| self.exports.get(frame).cloned().or_else(|| shoot.frames().iter().find(|f| f.path == *frame).and_then(|f| f.exported.clone()));
+        // again. A frame reset to a fresh raw's has its sidecar written
+        // first, so it's read as it stands.
+        self.disk.flush();
+        let last =|frame: &PathBuf| self.exports.get(frame).cloned().or_else(|| shoot.frames().iter().find(|f| f.path == *frame).and_then(|f| f.exported.clone()));
         let to_export: Vec<(PathBuf, Option<sidecar::Edit>, Option<sidecar::Exported>)> = frames
             .iter()
             .map(|frame| {
-                let edit = self.edits.get(frame).map(|editing| sidecar::Edit { process: self.process_of(frame), settings: (*editing.settings).clone() });
+                let edit = self.edits.get(frame).filter(|editing| editing.history.edited()).map(|editing| sidecar::Edit { process: self.process_of(frame), settings: (*editing.settings).clone() });
                 (frame.clone(), edit, last(frame))
             })
             .collect();
         let (ctx, target) = (ctx.clone(), to.clone());
         let total = frames.len();
+        let stop = Arc::new(AtomicBool::new(false));
         self.message = Some((format!("Exporting 1 of {total}…"), false));
         self.exporting = Some(Exporting {
             to,
@@ -504,10 +544,14 @@ impl App {
             failed: Vec::new(),
             edit,
             results: rx,
+            stop: stop.clone(),
         });
         std::thread::spawn(move || {
             for (frame, edit, last) in to_export {
-                let res = omalux_engine::export::export(&frame, &target, edit.as_ref(), last.as_ref())
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let res =omalux_engine::export::export(&frame, &target, edit.as_ref(), last.as_ref())
                     .map_err(|e| format!("{}: {e}", file_name(&frame)));
                 if tx.send((frame, res)).is_err() {
                     return;
@@ -515,6 +559,18 @@ impl App {
                 ctx.request_repaint();
             }
         });
+    }
+
+    /// Quitting: no more frames, and the ones done or under way recorded
+    /// in their sidecars, or a TIFF would be there with no record of it.
+    fn stop_exporting(&mut self) {
+        let Some(exporting) = self.exporting.take() else { return };
+        exporting.stop.store(true, Ordering::Relaxed);
+        for (frame, result) in exporting.results {
+            if let Ok(omalux_engine::export::Exported::Written { record, .. }) = result {
+                self.disk.exported(frame, record);
+            }
+        }
     }
 
     fn finish_exporting(&mut self) {
@@ -967,7 +1023,7 @@ impl App {
                     }
                 }
                 // Found on it once its raw is decoded.
-                _ => editing.pending.extend_from_slice(autos),
+                _ => editing.pending.extend(autos.iter().map(|&what| (number, what))),
             }
             editing.history.paste(number, becomes);
             if editing.stepped() {
@@ -978,18 +1034,66 @@ impl App {
 
     /// What Auto Sync asked to be set automatically on a frame before its
     /// raw was decoded, set now it is: no step, as the sync was the step.
-    fn apply_pending(&mut self, path: &Path) {
-        let Some(source) = self.renderer.source(path) else { return };
-        let Some(editing) = self.edits.get_mut(path).filter(|editing| !editing.pending.is_empty()) else { return };
+    fn apply_pending(&mut self, path: &Path, source: &Arc<Rgb32f>) {
+        let Some(editing) = self.edits.get_mut(path) else { return };
         let Some(info) = editing.info.clone() else { return };
-        let (pending, camera) = (std::mem::take(&mut editing.pending), editing.camera.clone());
+        let (pending, camera) = (editing.take_waiting(), editing.camera.clone());
         if editing.history.amend(|settings| {
             for what in pending {
-                auto::apply(settings, &info, &camera, &source, what);
+                auto::apply(settings, &info, &camera, source, what);
             }
         }) {
             editing.stepped();
             self.save(path);
+        }
+    }
+
+    /// Set what Auto Sync is waiting to set on the frames whose raws are
+    /// here, and ask for the rest: they may never be stepped to.
+    fn find_autos(&mut self) {
+        while let Some(found) = self.autos.found() {
+            self.found_auto(found);
+        }
+        let waiting: Vec<PathBuf> = self.edits.iter().filter(|(_, editing)| editing.waiting()).map(|(path, _)| path.clone()).collect();
+        for path in waiting {
+            let decoded = self.edits.get(&path).is_some_and(|editing| editing.info.is_some());
+            match self.renderer.source(&path).filter(|_| decoded) {
+                Some(source) => self.apply_pending(&path, &source),
+                None => {
+                    let profile = self.edits.get(&path).map_or(Profile::Camera, |editing| Profile::of(&editing.settings));
+                    self.autos.ask(&path, (profile, self.process_of(&path)));
+                }
+            }
+        }
+    }
+
+    /// A raw decoded for what Auto Sync is waiting to set on it.
+    fn found_auto(&mut self, (path, loaded): Found) {
+        match loaded {
+            Ok(loaded) => {
+                if self.edits.contains_key(&path) {
+                    self.decoded(&path, Arc::new(loaded.info), Arc::new(loaded.camera));
+                    self.apply_pending(&path, &Arc::new(loaded.image));
+                }
+            }
+            Err(error) => {
+                if let Some(editing) = self.edits.get_mut(&path) {
+                    editing.take_waiting();
+                }
+                self.message = Some((format!("Couldn't set Auto on {}: {error}", file_name(&path)), true));
+            }
+        }
+    }
+
+    /// Wait for what Auto Sync is waiting to set: it's held nowhere but
+    /// here, so it's done before a shoot is closed or OmaLux quits.
+    fn finish_autos(&mut self) {
+        loop {
+            self.find_autos();
+            match self.autos.wait() {
+                Some(found) => self.found_auto(found),
+                None => return,
+            }
         }
     }
 
@@ -1461,6 +1565,10 @@ impl App {
         }
         self.finish_picking();
         self.develop(ctx);
+        self.find_autos();
+        if let Some((frames, edit)) = self.export_next.take() {
+            self.export_frames(frames, edit, ctx);
+        }
         self.finish_exporting();
         self.disk_problems();
         if !ctx.egui_wants_keyboard_input() && self.choosing.is_none() {
@@ -1527,25 +1635,29 @@ impl App {
         for news in self.loupe.take(ctx, self.renderer.done()) {
             match news {
                 News::Decoded(path, info, camera) => {
-                    // Its edit starts from what its sidecar held, or as a fresh raw.
-                    let fresh = look::fresh(info.as_shot_temp, info.as_shot_tint);
-                    let saved = self.saved.remove(&path).flatten().map(|settings| (*settings).clone());
-                    match self.edits.get_mut(&path) {
-                        // Pasted onto before it was decoded.
-                        Some(editing) if editing.info.is_none() => {
-                            editing.history.decoded(fresh);
-                            (editing.info, editing.camera) = (Some(info), camera);
-                            editing.stepped();
-                        }
-                        // Decoded again, for another profile's look.
-                        Some(editing) => (editing.info, editing.camera) = (Some(info), camera),
-                        None => _ = self.edits.insert(path.clone(), Editing::new(History::new(fresh, saved), Some((info, camera)))),
-                    }
+                    self.decoded(&path, info, camera);
                     self.fill_upright(&path);
-                    self.apply_pending(&path);
                 }
                 News::Failed(path, error) => self.message = Some((format!("Couldn't develop {}: {error}", file_name(&path)), true)),
             }
+        }
+    }
+
+    /// A frame's raw has been decoded: its edit starts from what its
+    /// sidecar held, or as a fresh raw.
+    fn decoded(&mut self, path: &Path, info: Arc<SourceInfo>, camera: Arc<Camera>) {
+        let fresh = look::fresh(info.as_shot_temp, info.as_shot_tint);
+        let saved = self.saved.remove(path).flatten().map(|settings| (*settings).clone());
+        match self.edits.get_mut(path) {
+            // Pasted onto before it was decoded.
+            Some(editing) if editing.info.is_none() => {
+                editing.history.decoded(fresh);
+                (editing.info, editing.camera) = (Some(info), camera);
+                editing.stepped();
+            }
+            // Decoded again, for another profile's look.
+            Some(editing) => (editing.info, editing.camera) = (Some(info), camera),
+            None => _ = self.edits.insert(path.to_path_buf(), Editing::new(History::new(fresh, saved), Some((info, camera)))),
         }
     }
 
@@ -2050,6 +2162,8 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         self.remember_place();
+        self.finish_autos();
+        self.stop_exporting();
         self.disk.finish();
     }
 }
@@ -2081,9 +2195,10 @@ mod tests {
             let (_tx, rx) = channel();
             let ctx = egui::Context::default();
             let renderer = Renderer::new(crate::render::tests::decoder(), false, || {});
+            let autos = Autos::new(crate::render::tests::decoder(), || {});
             let wake = ctx.clone();
             let disk = Disk::new(move || wake.request_repaint());
-            let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect(), Workers { renderer, disk }, paths);
+            let app = App::build(Theme::default(), rx, Config::default(), Vec::new(), script.iter().copied().collect(), Workers { renderer, autos, disk }, paths);
             Self { ctx, app, time: 0.0, screen: egui::vec2(800.0, 600.0) }
         }
 
@@ -2112,9 +2227,9 @@ mod tests {
                 // when a frame leaves the renderer with nothing to do and
                 // the next has taken in what was done.
                 self.frame(vec![]);
-                if !self.app.renderer.busy() {
+                if !self.app.renderer.busy() && !self.app.autos.busy() {
                     self.frame(vec![]);
-                    if !self.app.renderer.busy() {
+                    if !self.app.renderer.busy() && !self.app.autos.busy() {
                         return;
                     }
                 }
@@ -3362,6 +3477,18 @@ mod tests {
         let target = folder.0.join("omalux/DSC00001.tif");
         assert!(target.exists(), "TIFF was not exported");
         assert_eq!(h.app.message.as_ref().map(|(t, p)| (t.as_str(), *p)), Some(("Exported 1 of 1 to omalux", false)));
+
+        // Quitting before the window has heard of a TIFF: it's still recorded.
+        std::fs::remove_file(&target).unwrap();
+        h.app.exports.clear();
+        h.app.export_frames(vec![raw_path.clone()], false, &h.ctx.clone());
+        while !target.exists() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(60), "export timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        eframe::App::on_exit(&mut h.app);
+        let record = sidecar::exported(&sidecar::read(&raw_path).unwrap().unwrap()).unwrap();
+        assert_eq!(record.map(|record| record.file), Some("DSC00001.tif".to_owned()));
     }
 
     #[test]
@@ -4058,6 +4185,63 @@ mod tests {
             let settings = h.app.edits[path].history.settings();
             assert_eq!(settings.wb.mode, WbMode::AsShot, "{path:?}");
         }
+    }
+
+    /// Five frames, all selected under Auto Sync, and Auto white balance
+    /// made on them, with the last frames' raws not decoded: its path.
+    fn auto_synced(name: &str) -> (Folder, Harness, PathBuf) {
+        let folder = Folder::new(name, &[1, 1, 1, 1, 1]);
+        let mut h = Harness::new(&[]);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let last = h.app.shoot.as_ref().unwrap().frames()[4].path.clone();
+        h.press(Modifiers::COMMAND, Key::A);
+        h.press(Modifiers { alt: true, shift: true, ..Modifiers::COMMAND }, Key::A);
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::U);
+        assert!(h.app.edits[&last].waiting());
+        (folder, h, last)
+    }
+
+    #[test]
+    fn auto_syncs_autos_are_found_on_frames_never_stepped_to() {
+        let (_folder, mut h, last) = auto_synced("auto-sync-found");
+        h.settle();
+        assert!(!h.app.edits[&last].waiting());
+        assert!(h.app.edits[&last].info.is_some());
+    }
+
+    #[test]
+    fn an_undone_auto_sync_sets_nothing_and_made_again_it_does() {
+        use lightcraft_develop::WbMode;
+        let (_folder, mut h, last) = auto_synced("auto-sync-undo");
+        h.press(Modifiers::COMMAND, Key::Z);
+        h.settle();
+        assert_eq!(h.app.edits[&last].history.settings().wb.mode, WbMode::AsShot);
+        assert!(!h.app.edits[&last].waiting());
+
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        assert!(h.app.edits[&last].waiting());
+        h.settle();
+        assert!(!h.app.edits[&last].waiting());
+        assert_eq!(h.app.edits[&last].history.settings().wb.mode, WbMode::Auto);
+    }
+
+    #[test]
+    fn quitting_sets_what_auto_sync_was_waiting_to() {
+        let (_folder, mut h, last) = auto_synced("auto-sync-quit");
+        eframe::App::on_exit(&mut h.app);
+        assert!(!h.app.edits[&last].waiting());
+        assert_eq!(h.saved_of(&file_name(&last)).as_ref(), Some(h.app.edits[&last].history.settings()));
+    }
+
+    #[test]
+    fn an_export_waits_for_what_auto_sync_is_waiting_to_set() {
+        let (_folder, mut h, last) = auto_synced("auto-sync-export");
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::E);
+        assert!(h.app.exporting.is_none() && h.app.export_next.is_some());
+        h.settle();
+        assert!(!h.app.edits[&last].waiting());
+        assert!(h.app.export_next.is_none());
     }
 
     #[test]

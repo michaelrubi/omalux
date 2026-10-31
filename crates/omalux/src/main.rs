@@ -1,4 +1,5 @@
 mod app;
+mod autos;
 mod checklist;
 mod commands;
 mod config;

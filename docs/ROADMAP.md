@@ -754,8 +754,11 @@ what was installed, so edits made at process version 3 stay readable.
   - Headless tests: a drag over a selection of three writes the value
     to each, once; as-shot white balance stays per frame; one Ctrl+Z
     takes the drag back from all three. *Done*, with a selection of
-    five, two of them not decoded: an Auto on those is set once they
-    are. The key is from memory, not checked against Lightroom's list.
+    five, two of them not decoded: an Auto on those is set once a thread
+    of its own has decoded them, whether or not they're stepped to. An
+    undone step sets nothing, an export waits for it, and closing the
+    shoot or quitting finishes it first (about a quarter of a second a
+    frame). The key is from memory, not checked against Lightroom's list.
 - **Edited and exported marks** in the filmstrip: one mark for a frame
   whose edit isn't a fresh raw's, one for a frame that's been exported,
   and the exported mark in the warning colour when the edit has changed
@@ -783,7 +786,10 @@ what was installed, so edits made at process version 3 stay readable.
   ways, Ctrl+Shift+E on a frame marked out of date exports it again, and
   on a frame that's up to date does nothing. *Done, as 2:* the TIFF's
   mtime is checked against `omalux:exportedModified`; Ctrl+E opens
-  what was written. Tested on the corpus raws.
+  what was written. Tested on the corpus raws. A TIFF with no record
+  (from before this, say) stays the frame's if it has no edit; with an
+  edit, a new one goes beside it. Quitting mid-export finishes the frame
+  under way, starts no more, and records what was written.
 - **Dust spots.** Healing is Omapix's, but sensor dust is in the same
   place on every frame of a shoot. A raw developer fixes it once for the
   set; Omapix would fix it frame by frame. *Decide first:* only if the
