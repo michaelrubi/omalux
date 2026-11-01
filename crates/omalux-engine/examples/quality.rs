@@ -499,7 +499,7 @@ mod tests {
             let samples: Vec<u16> = pro.map(|v| (v.clamp(0.0, 1.0) * 65535.0).round() as u16).to_vec();
 
             let linear_img = export::Linear16 { width: 1, height: 1, samples };
-            let tiff_bytes = export::tiff(&linear_img).expect("tiff encode failed");
+            let tiff_bytes = export::tiff(&linear_img, &export::Shot::default()).expect("tiff encode failed");
 
             let decoded = decode(&tiff_bytes, DecodeOptions::default()).expect("tiff decode failed");
             let srgb8 = decoded.to_srgb8();

@@ -221,7 +221,7 @@ fn spike(path: &Path, out: Option<&Path>, gpu: bool, totals: &mut Totals) -> Res
     // The export: full size, 16-bit Linear ProPhoto, on the CPU (Lightcraft's GPU renders 8-bit only).
     let (image, t_render) = timed(|| export::render(&full, &info, &Camera::default(), &settings));
     let image = image?;
-    let (tiff, t_encode) = timed(|| export::tiff(&image));
+    let (tiff, t_encode) = timed(|| export::tiff(&image, &export::Shot::default()));
     let tiff = tiff?;
     println!("  export: render {t_render:.0} ms, TIFF {t_encode:.0} ms, {:.0} MB", tiff.len() as f64 / 1e6);
     totals.export.push(t_render + t_encode);
