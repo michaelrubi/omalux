@@ -745,6 +745,11 @@ impl App {
                 }
             }
             Command::PastePrevious => self.paste_previous(),
+            Command::UpdateProcess => {
+                if let Some(shoot) = &self.shoot {
+                    self.update_process(targets(shoot));
+                }
+            }
             Command::PasteStack => {
                 let Some(shoot) = &self.shoot else { return };
                 match shoot.stack(shoot.current()) {
@@ -814,6 +819,37 @@ impl App {
         };
         let pasted = self.paste_onto(&copied, &frames);
         self.message = Some(pasted.said("Pasted onto"));
+    }
+
+    /// Lightroom's Update to Current Process Version: `frames`' edits from
+    /// an older OmaLux are rendered under this one's process version from
+    /// now on, and saved as its. Their settings stay as they are; how
+    /// they look may change a little (see `sidecar::PROCESS_VERSION`).
+    fn update_process(&mut self, frames: Vec<PathBuf>) {
+        let mut updated = Vec::new();
+        for path in frames {
+            // Read the frame's sidecar, if it hasn't been yet: that's
+            // where its process version is learnt.
+            let Some(settings) = self.settings_of(&path) else { continue };
+            if self.processes.remove(&path).is_none() {
+                continue;
+            }
+            if self.edits.contains_key(&path) {
+                self.save(&path);
+            } else {
+                self.disk.save(path.clone(), sidecar::Edit::new((*settings).clone()));
+            }
+            // Its thumbnail developed again, under the new version.
+            self.filmstrip.forget_developed(&path);
+            updated.push(path);
+        }
+        let now = sidecar::PROCESS_VERSION;
+        let text = match updated.as_slice() {
+            [] => format!("Already on the current process version ({now})"),
+            [one] => format!("Updated {} to process version {now}", file_name(one)),
+            many => format!("Updated {} frames to process version {now}", many.len()),
+        };
+        self.message = Some((text, false));
     }
 
     /// How the camera was held for a frame of the shoot (its raw's Exif
@@ -1926,6 +1962,7 @@ impl App {
             before: self.before,
             clipping: self.clipping,
             flat: settings.is_some_and(|settings| Profile::of(settings) == Profile::Flat),
+            outdated: self.process_of(&shoot.frame().path) < sidecar::PROCESS_VERSION,
         }
     }
 
@@ -4021,6 +4058,49 @@ mod tests {
         assert_eq!(h.app.wanted()[0].process, sidecar::PROCESS_VERSION);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(process(&h, "DSC00002.ARW"), sidecar::PROCESS_VERSION);
+    }
+
+    #[test]
+    fn update_process_brings_the_selections_edits_to_this_version() {
+        let folder = Folder::new("update", &[1, 1, 1]);
+        // Two edits from process version 2; the third frame has none.
+        let mut before = look::fresh(5200.0, 3.0);
+        before.light.exposure = 0.5;
+        for name in ["DSC00001.ARW", "DSC00002.ARW"] {
+            sidecar::update(&folder.0.join(name), |xmp| {
+                let with = sidecar::with_edit(xmp, &sidecar::Edit::new(before.clone()))?;
+                Ok(with.replace(&format!(">{}</omalux:processVersion>", sidecar::PROCESS_VERSION), ">2</omalux:processVersion>"))
+            })
+            .unwrap();
+        }
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 2000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let saved = |h: &Harness, name: &str| {
+            h.app.disk.flush();
+            sidecar::read(&folder.0.join(name)).unwrap().and_then(|xmp| sidecar::edit(&xmp).unwrap())
+        };
+
+        assert!(h.app.menu_context().outdated, "the menus offer it");
+        // The current frame alone, with no selection.
+        h.app.run(Command::UpdateProcess, &h.ctx.clone());
+        assert_eq!(saved(&h, "DSC00001.ARW").unwrap().process, sidecar::PROCESS_VERSION);
+        assert_eq!(saved(&h, "DSC00001.ARW").unwrap().settings, before, "its settings stay as they were");
+        assert_eq!(saved(&h, "DSC00002.ARW").unwrap().process, 2, "the next frame wasn't asked for");
+        assert_eq!(h.app.wanted()[0].process, sidecar::PROCESS_VERSION, "it's developed under this version now");
+        assert!(!h.app.menu_context().outdated, "and the menus don't offer it again");
+
+        // The whole shoot: the second frame is updated, the third has no
+        // edit to be updated and gets none.
+        h.press(Modifiers::COMMAND, Key::A);
+        h.app.run(Command::UpdateProcess, &h.ctx.clone());
+        assert_eq!(saved(&h, "DSC00002.ARW").unwrap().process, sidecar::PROCESS_VERSION);
+        assert_eq!(saved(&h, "DSC00002.ARW").unwrap().settings, before);
+        assert_eq!(saved(&h, "DSC00003.ARW"), None);
+        assert!(h.app.message.as_ref().is_some_and(|(text, _)| *text == format!("Updated DSC00002.ARW to process version {}", sidecar::PROCESS_VERSION)), "{:?}", h.app.message);
+        h.app.run(Command::UpdateProcess, &h.ctx.clone());
+        assert!(h.app.message.as_ref().is_some_and(|(text, _)| text.starts_with("Already on")), "{:?}", h.app.message);
     }
 
     #[test]

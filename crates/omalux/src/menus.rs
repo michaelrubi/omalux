@@ -28,6 +28,8 @@ pub struct Context {
     pub clipping: bool,
     /// The Flat profile is on.
     pub flat: bool,
+    /// The current frame's edit is from an older process version.
+    pub outdated: bool,
 }
 
 /// A menu's item: a command, or the Rating submenu of the stars.
@@ -45,7 +47,7 @@ const LOUPE: &[&[Entry]] = &[
     &[C(Command::WhiteBalance), C(Command::Flat), C(Command::AutoTone), C(Command::AutoWhiteBalance), C(Command::Crop)],
     &[C(Command::Copy), C(Command::CopyChoose), C(Command::Paste), C(Command::PastePrevious)],
     &[C(Command::Pick), C(Command::Reject), C(Command::Unmark), Stars],
-    &[C(Command::Reset)],
+    &[C(Command::Reset), C(Command::UpdateProcess)],
     &[C(Command::Export), C(Command::ExportAndEdit)],
     &[C(Command::Shortcuts)],
 ];
@@ -56,7 +58,7 @@ const FILMSTRIP: &[&[Entry]] = &[
     &[C(Command::Copy), C(Command::Paste), C(Command::PasteStack)],
     &[C(Command::ToggleStack)],
     &[C(Command::SelectAll), C(Command::SelectNone)],
-    &[C(Command::Reset), C(Command::Export)],
+    &[C(Command::Reset), C(Command::UpdateProcess), C(Command::Export)],
     &[C(Command::Shortcuts)],
 ];
 
@@ -66,6 +68,7 @@ const STARS: &[Command] = &[Command::Star1, Command::Star2, Command::Star3, Comm
 fn visible(command: Command, context: &Context) -> bool {
     match command {
         Command::PasteStack | Command::ToggleStack => context.stack.is_some(),
+        Command::UpdateProcess => context.outdated,
         _ => true,
     }
 }

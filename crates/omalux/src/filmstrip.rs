@@ -120,6 +120,15 @@ impl Filmstrip {
         wants
     }
 
+    /// A frame's developed thumbnail is to be asked for again, though its
+    /// edit's the same (it's under another process version now). The old
+    /// one stays shown till then.
+    pub fn forget_developed(&mut self, path: &Path) {
+        if let Some(developed) = self.developed.get_mut(path) {
+            developed.key.clear();
+        }
+    }
+
     #[cfg(test)]
     pub fn developed_key(&self, path: &Path) -> Option<&str> {
         self.developed.get(path).map(|developed| developed.key.as_str())
