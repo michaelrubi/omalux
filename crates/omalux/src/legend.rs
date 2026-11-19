@@ -29,6 +29,7 @@ const SECTIONS: &[(&str, &[Command])] = &[
             Command::AutoExposure,
             Command::AutoLevel,
             Command::Reset,
+            Command::UpdateProcess,
             Command::Undo,
             Command::Redo,
         ],

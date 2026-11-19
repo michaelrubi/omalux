@@ -883,8 +883,15 @@ craft-watch's notes:
     at 256 px. The Standard profile fitted again (the same 1376 raws)
     comes closer to the JPEGs by a little: on Run Dinah Barbie with `match`,
     both under 3, Camera match 2.69 to 2.67 ΔE2000 (saturated 3.99 to 3.97,
-    skin 3.15 to 3.13, sky 3.95 to 3.86). *Open:* no way yet to bring an edit up to the newest
-    version (Lightroom's Update process version).
+    skin 3.15 to 3.13, sky 3.95 to 3.86). Update to Current Process Version (Lightroom's,
+    in the menus on a frame whose edit is older, and the legend; no key,
+    as in Lightroom) moves the selection's edits, or the current
+    frame's, to the newest version: settings unchanged, saved and
+    rendered under it, the thumbnail developed again. *Done*
+    (2026-11-19), tested headlessly, not tried by hand yet. *Open:* it
+    can't be undone (the version isn't part of a frame's history), and
+    an export made before still shows as current, though it would now
+    render a little differently.
   - `match` on the corpus raws gives the same before and after: fitted
     10.04, profile and camera 10.40 (mean ΔE2000). That's far from
     M4's numbers because since M5 a fresh raw opens with profile

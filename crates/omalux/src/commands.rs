@@ -96,6 +96,9 @@ pub enum Command {
     AutoSync,
     /// Spot Removal, for sensor dust: open the tool, or put it away.
     SpotRemoval,
+    /// Lightroom's Update to Current Process Version: the selection's
+    /// edits rendered and saved under this OmaLux's from now on.
+    UpdateProcess,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -163,6 +166,7 @@ impl Command {
         Command::GuidedUpright,
         Command::AutoSync,
         Command::SpotRemoval,
+        Command::UpdateProcess,
     ];
 
     /// Look a command up by its name in code, e.g. "Open".
@@ -294,6 +298,7 @@ impl Command {
             Command::GuidedUpright => "Guided Upright Tool",
             Command::AutoSync => "Auto Sync",
             Command::SpotRemoval => "Spot Removal",
+            Command::UpdateProcess => "Update to Current Process Version",
         }
     }
 
@@ -355,6 +360,8 @@ impl Command {
             Command::AutoWhiteBalance => s(CMD_SHIFT, Key::U),
             // Lightroom has one Auto, on Ctrl+U; these two are buttons.
             Command::AutoExposure | Command::AutoLevel => None,
+            // Lightroom has none: it's in its Settings menu.
+            Command::UpdateProcess => None,
             // Lightroom has no key for a profile. Its F is Full Screen,
             // which is Hyprland's here.
             Command::Flat => s(Modifiers::NONE, Key::F),
