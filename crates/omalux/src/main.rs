@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod crop;
 mod crop_panel;
+mod curve;
 mod develop;
 mod developer;
 mod guided;
@@ -20,6 +21,7 @@ mod spot;
 mod slider;
 mod state;
 mod theme;
+mod wheel;
 
 use std::path::PathBuf;
 
