@@ -819,6 +819,41 @@ what was installed, so edits made at process version 3 stay readable.
   Exif orientation when the shoot opens. If the sensor turns out
   clean, the tool costs nothing to leave in.
 
+## M10. Tone Curve, HSL and Color Grading
+
+From "Later", asked for on 2026-11-19. Lightcraft's engine had all three
+(`curve`, `mixer`, `grading` in `DevelopSettings`, on the CPU and the
+GPU); OmaLux adds the panels, after Presence as in Lightroom. None of it
+changes a render at its defaults, so the process version stays 3.
+
+- **Tone Curve:** Lightroom's channel buttons (Parametric, RGB, Red,
+  Green, Blue), the graph with the frame's histogram behind it, and
+  Refine Saturation for the point curves. The parametric curve is drawn
+  as the pipeline builds it; a region is dragged up or down in the
+  graph, and the three splits along its foot. A point curve takes a
+  point on a click, moves one on a drag (or adds one and moves it), and
+  loses one on a double-click; the right-click menu resets the channel
+  or every curve. Lifted from Lightcraft's `curve_editor` (`0da998f2`).
+  *Done.*
+- **HSL / Color:** Hue, Saturation, Luminance and All tabs over the eight
+  colours, their tracks coloured as Lightcraft's. *Done.* Lightroom's
+  Color view (one colour's three sliders) and the targeted adjustment
+  tool are left out.
+- **Color Grading:** 3-Way (midtones over shadows and highlights, each
+  wheel's luminance under), or one of Shadows, Midtones, Highlights or
+  Global large, then Blending and Balance. The wheels take Lightroom's
+  modifiers (Shift keeps the hue, Ctrl the saturation, Alt moves
+  finely); a double-click resets one. Lifted from Lightcraft's
+  `grading_wheel` (`0da998f2`), without its eye. *Done.*
+- Each is a group to copy (Tone Curve, HSL / Color, Color Grading) and
+  has its panel switch; a gesture on the graph or a wheel is one step to
+  undo, saved, and reaches Auto Sync's frames. The views are kept while
+  OmaLux is open, not per frame.
+- Tested headlessly, not tried by hand yet. *Open:* a copy checklist
+  chosen before M10 doesn't tick the three new groups until they're
+  ticked once; whether the panel, now much longer, wants Lightroom's
+  collapsing panels.
+
 ## Ongoing: keeping up with Lightcraft
 
 Lightcraft moves fast. Every so often, and before each milestone:
@@ -939,8 +974,6 @@ are in Lightcraft already and need only a panel; those that aren't say so.
 - **Local adjustments:** a subject mask and a linear gradient, then a
   brush (Lightcraft's masks; its subject and sky are heuristics, so the
   subject would come from Omapix's BiRefNet). A maybe.
-- **HSL, the colour grading wheels and the tone curve** (Lightcraft's
-  Color Mixer, Color Grading and Tone Curve).
 - **Match Total Exposures** across a set.
 - **A measured colour profile**: a ColorChecker shot in daylight and
   tungsten, made into a dual-illuminant DCP with `dcamprof`, for colour

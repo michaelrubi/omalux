@@ -48,15 +48,34 @@ fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
 }
 
+/// HSL's eight colours, red to magenta, as their swatches and tracks are
+/// drawn. Lightcraft's (`BAND_COLORS`, `ui-egui/src/widgets.rs` at
+/// `0da998f2`).
+pub const BAND_COLORS: [&str; 8] = ["#aa0000", "#bb6600", "#aaaa00", "#009900", "#00aaaa", "#0044cc", "#7722aa", "#aa0077"];
+
 /// The colours along a track that has them: Temp's blue to yellow, Tint's
-/// green to magenta, a control's own gradient. Lightcraft's.
+/// green to magenta, a control's own gradient, an HSL colour's hue (from
+/// its neighbours' through its own), saturation and luminance, and the
+/// hue rainbow. Lightcraft's (`track_stops`, at `0da998f2`).
 fn track_stops(track: &Track) -> Option<Vec<Color32>> {
     let stops = |hexes: &[&str]| hexes.iter().map(|h| hex(h)).collect();
-    match track {
+    let band = |i: u8| hex(BAND_COLORS[usize::from(i) % 8]);
+    match *track {
         Track::Temp => Some(stops(&["#193961", "#47566a", "#60666d", "#70705b", "#737339", "#75742a"])),
         Track::Tint => Some(stops(&["#246123", "#2c552c", "#394739", "#4a3d4c", "#6b336b", "#872c87"])),
         Track::Gradient { from, to } => Some(vec![hex(from), hex(to)]),
-        _ => None,
+        Track::Hue { band: i } => {
+            let (previous, me, next) = (band(i + 7), band(i), band(i + 1));
+            let dim = |c: Color32| c.gamma_multiply(0.7);
+            Some(vec![dim(previous), dim(lerp(previous, me, 0.5)), dim(me), dim(lerp(me, next, 0.5)), dim(next)])
+        }
+        Track::Sat { band: i } => Some(vec![hex("#454343"), lerp(hex("#454343"), band(i), 0.6), band(i)]),
+        Track::Lum { band: i } => {
+            let c = band(i);
+            Some(vec![c.gamma_multiply(0.2), c.gamma_multiply(0.55), lerp(c, Color32::WHITE, 0.35), lerp(c, Color32::WHITE, 0.6)])
+        }
+        Track::Rainbow => Some(stops(&["#aa0000", "#aaaa00", "#009900", "#00aaaa", "#0044cc", "#aa0077", "#aa0000"])),
+        Track::Plain | Track::Centered => None,
     }
 }
 

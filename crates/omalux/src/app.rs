@@ -206,6 +206,8 @@ pub struct App {
     edits: HashMap<PathBuf, Editing>,
     /// The slider the keys act on, by its place in the panel.
     selected: usize,
+    /// Which channel, tab and wheel Tone Curve, HSL and Color Grading show.
+    views: develop::Views,
     /// A slider is being dragged: the loupe gets drafts.
     dragging: bool,
     /// The White Balance Selector is out: a click on the frame picks.
@@ -360,6 +362,7 @@ impl App {
             unreadable: HashSet::new(),
             edits: HashMap::new(),
             selected: develop::sliders().position(|spec| spec.id == "light.exposure").unwrap_or(0),
+            views: develop::Views::default(),
             dragging: false,
             selector: false,
             before: false,
@@ -652,8 +655,8 @@ impl App {
             Command::Undo => self.undo(false),
             Command::Redo => self.undo(true),
             Command::Reset => self.edit(|history, _| history.reset()),
-            Command::SliderPrevious => self.selected = self.selected.saturating_sub(1),
-            Command::SliderNext => self.selected = (self.selected + 1).min(develop::sliders().count() - 1),
+            Command::SliderPrevious => self.selected = develop::step(self.selected, -1, &self.views),
+            Command::SliderNext => self.selected = develop::step(self.selected, 1, &self.views),
             Command::Increase => self.nudge(1.0),
             Command::Decrease => self.nudge(-1.0),
             Command::IncreaseMore => self.nudge(5.0),
@@ -1233,6 +1236,14 @@ impl App {
         }
     }
 
+    /// The mouse on the tone curve or a grading wheel: a drag's changes are
+    /// drafts and one step once it ends, a click's a step of its own.
+    fn gesture(&mut self, change: Option<impl FnOnce(&mut DevelopSettings, &SourceInfo)>, started: bool, stopped: bool) {
+        self.dragging = (self.dragging || started) && !stopped;
+        let stopped = stopped || (!self.dragging && change.is_some());
+        self.dragged(change, stopped);
+    }
+
     /// A slider of the current frame's moved, `set` being how its value is
     /// written: a drag's changes are drafts in the loupe and one step once
     /// it ends.
@@ -1354,6 +1365,18 @@ impl App {
         }
         if let Some(on) = out.constrain_crop {
             self.edit(|history, _| history.set(|settings| settings.geometry.constrain_crop = on));
+        }
+        if let Some(curved) = out.curve {
+            let change = curved.change.map(|change| move |settings: &mut DevelopSettings, _: &SourceInfo| change.apply(&mut settings.curve));
+            self.gesture(change, curved.drag_started, curved.drag_stopped);
+        }
+        if let Some((which, turned)) = out.wheel {
+            let change = turned.change.map(|(hue, sat)| move |settings: &mut DevelopSettings, _: &SourceInfo| which.set(&mut settings.grading, hue, sat));
+            self.gesture(change, turned.drag_started, turned.drag_stopped);
+        }
+        // A view changed may have hidden the selected slider: the next one shown.
+        if !develop::visible(self.selected, &self.views) {
+            self.selected = develop::step(self.selected, 1, &self.views);
         }
         let Some((index, slid)) = out.slider else { return };
         let Some(spec) = develop::sliders().nth(index) else { return };
@@ -1998,7 +2021,8 @@ impl App {
             .show(ui, |ui| {
                 let cropped = dims.map(|dims| crop_panel::show(ui, &self.theme, settings, dims, self.crop_locked));
                 let spotted = spot.as_mut().map(|tool| crate::spot::panel(ui, &self.theme, tool, &settings.spots));
-                (cropped, spotted, develop::show(ui, &self.theme, settings, fresh, self.selected, &editing.camera, &self.off))
+                let shown = develop::Shown { settings, fresh, selected: self.selected, camera: &editing.camera, off: &self.off, histogram };
+                (cropped, spotted, develop::show(ui, &self.theme, &shown, &mut self.views))
             })
             .inner;
         self.spot = spot;
@@ -3813,7 +3837,7 @@ mod tests {
     fn detail_and_lens_corrections_sliders_are_drawn_and_drag_changes_setting() {
         let folder = Folder::new("detail-lens", &[1]);
         let mut h = Harness::new(&[]);
-        h.screen = egui::vec2(800.0, 2000.0);
+        h.screen = egui::vec2(800.0, 4000.0);
         h.app.open(folder.0.clone());
         h.settle();
 
@@ -3871,7 +3895,7 @@ mod tests {
     fn double_click_on_amount_resets_to_fresh_raw_value_of_40() {
         let folder = Folder::new("reset-amount", &[1]);
         let mut h = Harness::new(&[]);
-        h.screen = egui::vec2(800.0, 2000.0);
+        h.screen = egui::vec2(800.0, 4000.0);
         h.app.open(folder.0.clone());
         h.settle();
 
@@ -3901,6 +3925,12 @@ mod tests {
         h.screen = egui::vec2(800.0, 2000.0);
         h.app.open(folder.0.clone());
         h.settle();
+        let at = |id: &str| develop::sliders().position(|spec| spec.id == id).unwrap();
+        let period = |h: &mut Harness, n: usize| {
+            for _ in 0..n {
+                h.press(Modifiers::NONE, Key::Period);
+            }
+        };
 
         // Selected begins on Exposure (index 2).
         assert_eq!(h.app.selected, 2);
@@ -3910,44 +3940,139 @@ mod tests {
         h.press(Modifiers::NONE, Key::Comma);
         assert_eq!(h.app.selected, 0);
 
-        // Step forward through Light (2..7), HDR (8..10), Presence (11..15), to Amount in Detail (16).
-        for _ in 0..16 {
-            h.press(Modifiers::NONE, Key::Period);
-        }
-        assert_eq!(h.app.selected, 16);
+        // Step forward through Light, HDR and Presence to the Tone Curve's
+        // Highlights: the parametric curve's, shown first.
+        period(&mut h, 16);
+        assert_eq!(h.app.selected, at("curve.highlights"));
+        // On past its regions to HSL's Red: Refine Saturation is the point
+        // curve's, hidden.
+        period(&mut h, 4);
+        assert_eq!(h.app.selected, at("mixer.red.hue"), "Refine Saturation is passed over");
+        // HSL's Hue tab, then Color Grading's 3-Way: its three luminances,
+        // Blending and Balance; then Detail's Amount.
+        period(&mut h, 8);
+        assert_eq!(h.app.selected, at("grading.shadows.lum"), "the other tabs' sliders are passed over");
+        period(&mut h, 5);
+        assert_eq!(h.app.selected, at("detail.sharpenAmount"));
         assert_eq!(h.settings().detail.sharpen_amount, 40.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().detail.sharpen_amount, 41.0, "nudged Amount");
 
-        // Step forward to Luminance (index 20).
-        for _ in 0..4 {
-            h.press(Modifiers::NONE, Key::Period);
-        }
-        assert_eq!(h.app.selected, 20);
+        // Step forward to Luminance.
+        period(&mut h, 4);
+        assert_eq!(h.app.selected, at("detail.nrLuminance"));
         assert_eq!(h.settings().detail.nr_luminance, 0.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().detail.nr_luminance, 1.0, "nudged Luminance");
 
         // Step forward past the profile's Distortion and Vignetting to
-        // Purple Amount in Lens Corrections (index 24).
-        for _ in 0..4 {
-            h.press(Modifiers::NONE, Key::Period);
-        }
-        assert_eq!(h.app.selected, 24);
+        // Purple Amount in Lens Corrections.
+        period(&mut h, 4);
+        assert_eq!(h.app.selected, at("optics.defringePurple"));
         assert_eq!(h.settings().optics.defringe_purple_amount, 0.0);
         h.press(Modifiers::NONE, Key::Equals);
         assert_eq!(h.settings().optics.defringe_purple_amount, 1.0, "nudged Purple Amount");
 
         // Step back with comma.
         h.press(Modifiers::NONE, Key::Comma);
-        assert_eq!(h.app.selected, 23);
+        assert_eq!(h.app.selected, at("optics.profileVignetting"));
+
+        // Back over the views: Blending's before Detail, then the 3-Way's
+        // luminances, then HSL's Magenta hue.
+        h.app.selected = at("detail.sharpenAmount");
+        h.press(Modifiers::NONE, Key::Comma);
+        assert_eq!(h.app.selected, at("grading.balance"));
+        h.press(Modifiers::NONE, Key::Comma);
+        h.press(Modifiers::NONE, Key::Comma);
+        assert_eq!(h.app.selected, at("grading.highlights.lum"), "Global's are passed over");
+    }
+
+    #[test]
+    fn the_tone_curve_takes_regions_and_points_each_as_one_step() {
+        let folder = Folder::new("tone-curve", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 4000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        let graph = |h: &mut Harness| {
+            h.frame(vec![]);
+            h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("tone curve"))).expect("the curve has been drawn")
+        };
+        let at = |g: egui::Rect, x: f32, y: f32| egui::pos2(g.left() + g.width() * x, g.bottom() - g.height() * y);
+
+        // The parametric curve: Lights dragged up in the graph.
+        let g = graph(&mut h);
+        h.pointer(at(g, 0.6, 0.6), None);
+        h.pointer(at(g, 0.6, 0.6), Some(true));
+        h.pointer(at(g, 0.6, 0.7), None);
+        h.pointer(at(g, 0.6, 0.7), Some(false));
+        let lights = h.settings().curve.lights;
+        assert!(lights > 15.0, "{lights}");
+        assert_eq!(h.saved().map(|s| s.curve.lights), Some(lights));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().curve.lights, 0.0, "one step to undo");
+
+        // The RGB point curve: a point added by a drag and moved, then one
+        // added by a click; a double-click takes it away again.
+        h.app.views.curve = crate::curve::Channel::Rgb;
+        let g = graph(&mut h);
+        h.pointer(at(g, 0.25, 0.25), None);
+        h.pointer(at(g, 0.25, 0.25), Some(true));
+        h.pointer(at(g, 0.25, 0.4), None);
+        h.pointer(at(g, 0.25, 0.4), Some(false));
+        let master = h.settings().curve.master.clone();
+        assert_eq!(master.len(), 3);
+        assert!((master[1].y - 0.4).abs() < 0.02, "{master:?}");
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert!(h.settings().curve.master.is_empty(), "the drag was one step");
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        h.click(at(g, 0.75, 0.8));
+        assert_eq!(h.settings().curve.master.len(), 4);
+        // The second click of two is the double-click.
+        h.click(at(g, 0.75, 0.8));
+        assert_eq!(h.settings().curve.master.len(), 3, "a double-click took it away");
+        assert_eq!(h.saved().map(|s| s.curve.master.len()), Some(3));
+    }
+
+    #[test]
+    fn a_grading_wheel_is_dragged_for_hue_and_saturation_and_double_clicked_back() {
+        let folder = Folder::new("wheel", &[1]);
+        let mut h = Harness::new(&[]);
+        h.screen = egui::vec2(800.0, 4000.0);
+        h.app.open(folder.0.clone());
+        h.settle();
+        h.frame(vec![]);
+        let wheel = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new(("wheel", "Shadows")))).expect("the wheel has been drawn");
+        let c = wheel.center();
+        let r = wheel.width() / 2.0;
+        // Straight up, half way out: 90° at 50.
+        h.pointer(c, None);
+        h.pointer(c, Some(true));
+        h.pointer(c - egui::vec2(0.0, r * 0.25), None);
+        h.pointer(c - egui::vec2(0.0, r * 0.5), None);
+        h.pointer(c - egui::vec2(0.0, r * 0.5), Some(false));
+        let shadows = h.settings().grading.shadows;
+        assert_eq!((shadows.hue, shadows.sat), (90.0, 50.0));
+        assert_eq!(h.saved().map(|s| s.grading.shadows.sat), Some(50.0));
+        h.press(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.settings().grading.shadows.sat, 0.0, "one step to undo");
+        h.press(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        let puck = c - egui::vec2(0.0, r * 0.5);
+        h.click(puck);
+        h.click(puck);
+        assert_eq!((h.settings().grading.shadows.hue, h.settings().grading.shadows.sat), (0.0, 0.0), "double-clicked back");
+        // The view: one wheel's own sliders.
+        h.app.views.grading = develop::Grading::One(crate::wheel::Which::Midtones);
+        let _ = h.text("Midtones Hue");
+        let output = h.frame(vec![]);
+        assert!(!texts(&output).iter().any(|(text, _)| text == "Shadows Luminance"), "3-Way's are hidden");
     }
 
     #[test]
     fn clicking_remove_chromatic_aberration_and_profile_corrections_saves_and_ctrl_z_undoes() {
         let folder = Folder::new("remove-ca", &[1]);
         let mut h = Harness::new(&[]);
-        h.screen = egui::vec2(800.0, 2000.0);
+        h.screen = egui::vec2(800.0, 4000.0);
         h.app.open(folder.0.clone());
         h.settle();
 
@@ -4215,7 +4340,7 @@ mod tests {
         use lightcraft_develop::Upright;
         let folder = Folder::new("upright", &[1, 1, 1, 1, 1]);
         let mut h = Harness::new(&[]);
-        h.screen = egui::vec2(800.0, 3000.0);
+        h.screen = egui::vec2(800.0, 4000.0);
         h.app.open(folder.0.clone());
         h.settle();
         let fresh = h.settings().clone();
@@ -4587,7 +4712,7 @@ mod tests {
     fn shift_double_click_sets_control_alone_or_shows_no_automatic_value() {
         let folder = Folder::new("shift-dc", &[1]);
         let mut h = Harness::new(&[]);
-        h.screen = egui::vec2(800.0, 2000.0);
+        h.screen = egui::vec2(800.0, 4000.0);
         h.app.open(folder.0.clone());
         h.settle();
         let fresh = h.settings().clone();

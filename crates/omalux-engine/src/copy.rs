@@ -24,6 +24,11 @@ pub enum Group {
     Light,
     Hdr,
     Presence,
+    /// The parametric and point curves, and Refine Saturation.
+    ToneCurve,
+    /// HSL: each colour's hue, saturation and luminance.
+    Color,
+    ColorGrading,
     Sharpening,
     NoiseReduction,
     LensCorrections,
@@ -46,6 +51,9 @@ impl Group {
         Group::Light,
         Group::Hdr,
         Group::Presence,
+        Group::ToneCurve,
+        Group::Color,
+        Group::ColorGrading,
         Group::Sharpening,
         Group::NoiseReduction,
         Group::LensCorrections,
@@ -61,6 +69,9 @@ impl Group {
             Group::Light => "Light",
             Group::Hdr => "HDR",
             Group::Presence => "Presence",
+            Group::ToneCurve => "Tone Curve",
+            Group::Color => "HSL / Color",
+            Group::ColorGrading => "Color Grading",
             Group::Sharpening => "Sharpening",
             Group::NoiseReduction => "Noise Reduction",
             Group::LensCorrections => "Lens Corrections",
@@ -78,6 +89,9 @@ impl Group {
             Group::Light => &[("light", &["exposure", "contrast", "highlights", "shadows", "whites", "blacks"])],
             Group::Hdr => &[("light", &["hdr", "hdr_highlights", "hdr_shadows"])],
             Group::Presence => &[("effects", &[]), ("color", &[])],
+            Group::ToneCurve => &[("curve", &[])],
+            Group::Color => &[("mixer", &[])],
+            Group::ColorGrading => &[("grading", &[])],
             Group::Sharpening => &[("detail", &["sharpen_amount", "sharpen_radius", "sharpen_detail", "sharpen_masking"])],
             Group::NoiseReduction => {
                 &[("detail", &["nr_luminance", "nr_detail", "nr_contrast", "nr_color", "nr_color_detail", "nr_color_smoothness"])]
@@ -245,6 +259,7 @@ pub fn switched_off(settings: &DevelopSettings, fresh: &DevelopSettings, groups:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crop::Point;
     use lightcraft_develop::WbScale;
 
     fn edited() -> DevelopSettings {
@@ -253,6 +268,27 @@ mod tests {
         (s.light.exposure, s.light.shadows) = (0.7, 30.0);
         s.color.vibrance = 15.0;
         s
+    }
+
+    #[test]
+    fn the_curve_hsl_and_grading_are_each_their_own_group() {
+        let mut from = DevelopSettings::for_raw(5200.0, 3.0);
+        from.curve.lights = 20.0;
+        from.curve.master = vec![Point::new(0.0, 0.05), Point::new(0.5, 0.55), Point::new(1.0, 1.0)];
+        from.curve.refine_saturation = 60.0;
+        from.mixer.orange.sat = -15.0;
+        from.mixer.blue.lum = 10.0;
+        (from.grading.shadows.hue, from.grading.shadows.sat, from.grading.balance) = (210.0, 12.0, -20.0);
+        let fresh = DevelopSettings::for_raw(6100.0, -2.0);
+        let curve = Copied::new(&from, &[Group::ToneCurve]).paste(&fresh, &fresh);
+        assert_eq!((curve.curve, curve.mixer, curve.grading), (from.curve.clone(), fresh.mixer, fresh.grading));
+        let hsl = Copied::new(&from, &[Group::Color]).paste(&fresh, &fresh);
+        assert_eq!((hsl.curve, hsl.mixer, hsl.grading), (fresh.curve.clone(), from.mixer, fresh.grading));
+        let grading = Copied::new(&from, &[Group::ColorGrading]).paste(&fresh, &fresh);
+        assert_eq!((grading.curve, grading.mixer, grading.grading), (fresh.curve.clone(), fresh.mixer, from.grading));
+        // A panel's switch: the frame without it.
+        let off = switched_off(&from, &fresh, &[Group::ToneCurve, Group::Color, Group::ColorGrading]);
+        assert_eq!((off.curve, off.mixer, off.grading), (fresh.curve, fresh.mixer, fresh.grading));
     }
 
     #[test]

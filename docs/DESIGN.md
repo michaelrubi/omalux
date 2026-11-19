@@ -85,6 +85,17 @@ afterwards in Omapix.
   is here for outdoor haze, which is best taken out of linear,
   scene-referred data. Texture and Clarity are here because Lightroom's
   panel has them; they're the nearest of these to finishing work.
+- **Tone Curve, HSL and Color Grading** (M10): Lightroom's three panels
+  after Presence, each in Lightroom's views (a channel, a tab, a wheel),
+  whose hidden sliders `,` and `.` step over. Tone Curve: the parametric
+  curve (its regions dragged in the graph, its splits under it) or a
+  point curve for RGB, Red, Green or Blue, with Refine Saturation and
+  the frame's histogram behind. HSL: Hue, Saturation, Luminance or All
+  of the eight colours (Lightroom's Color view and the targeted
+  adjustment tool aren't here). Color Grading: 3-Way, or Shadows,
+  Midtones, Highlights or Global alone, with Blending and Balance. In
+  for finishing touches that belong with the raw (a contrast curve, a
+  colour that's off); retouching stays Omapix's.
 - **Detail:**
   - **AI Denoise:** a button and a strength, run on the raw before
     demosaicing, as Lightroom's Denoise is.
@@ -158,8 +169,9 @@ afterwards in Omapix.
   - Ctrl+C copies every setting of the current frame.
   - Ctrl+Shift+C opens a checklist of the groups to copy (White Balance,
     Profile, Light, HDR, Presence, AI Denoise, Noise Reduction,
-    Sharpening, Lens Corrections, Crop, and from M8 and M9 Transform and
-    Spot Removal: each arrives with its panel),
+    Sharpening, Lens Corrections, Crop, from M8 and M9 Transform and
+    Spot Removal, and from M10 Tone Curve, HSL / Color and Color
+    Grading: each arrives with its panel),
     remembering the last choice.
     What's chosen at copy time is what's pasted; there is no second
     checklist at paste time. This is the opposite of darktable's
@@ -214,7 +226,6 @@ Each of these has a place in the roadmap's "Later" or is someone else's
 job:
 
 - Local adjustments: subject masks, gradients, brushes. A maybe, later.
-- HSL, the colour grading wheels and the tone curve. Later.
 - Virtual copies (two edits of one raw). Later.
 - JPEGs and phone photos as input. Later; raws only to begin with.
 - JPEG export. Later: there are times a frame goes straight out.
